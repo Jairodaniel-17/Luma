@@ -1,0 +1,166 @@
+use futures_util::StreamExt;
+use rust_kiss_vdb::api;
+use rust_kiss_vdb::config::Config;
+use rust_kiss_vdb::engine::Engine;
+use std::net::SocketAddr;
+use tokio::sync::oneshot;
+
+async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
+    let engine = Engine::new(config.clone()).unwrap();
+    let app = api::router(engine, config);
+
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    (format!("http://{}", addr), tx)
+}
+
+fn base_config() -> Config {
+    Config {
+        port: 0,
+        api_key: "test".to_string(),
+        data_dir: None,
+        snapshot_interval_secs: 3600,
+        event_buffer_size: 1000,
+        live_broadcast_capacity: 16,
+        wal_segment_max_bytes: 256 * 1024,
+        wal_retention_segments: 4,
+        request_timeout_secs: 30,
+        max_body_bytes: 1_048_576,
+        max_key_len: 512,
+        max_collection_len: 64,
+        max_id_len: 128,
+        max_vector_dim: 4096,
+        max_k: 256,
+        max_json_bytes: 64 * 1024,
+        cors_allowed_origins: None,
+    }
+}
+
+#[tokio::test]
+async fn auth_missing_and_wrong() {
+    let (base, shutdown) = start_with_config(base_config()).await;
+    let client = reqwest::Client::new();
+
+    let ok = client.get(format!("{}/v1/health", base)).send().await.unwrap();
+    assert!(ok.status().is_success());
+
+    let missing = client
+        .get(format!("{}/v1/state/x", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 401);
+
+    let wrong = client
+        .get(format!("{}/v1/state/x", base))
+        .header("Authorization", "Bearer wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401);
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn ttl_emits_event() {
+    let (base, shutdown) = start_with_config(base_config()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{}/v1/stream?types=state_deleted&key_prefix=ttl:",
+            base
+        ))
+        .header("Authorization", "Bearer test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let put = client
+        .put(format!("{}/v1/state/ttl:1", base))
+        .header("Authorization", "Bearer test")
+        .json(&serde_json::json!({"value":{"v":1},"ttl_ms":50}))
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let mut stream = resp.bytes_stream();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut buf = String::new();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => panic!("timeout waiting for ttl event"),
+            chunk = stream.next() => {
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.unwrap();
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                if buf.contains("\"reason\":\"ttl\"") && buf.contains("\"key\":\"ttl:1\"") {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn sse_lagged_emits_gap_instead_of_dying() {
+    let mut config = base_config();
+    config.live_broadcast_capacity = 1;
+    let (base, shutdown) = start_with_config(config).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/v1/stream?types=state_updated&since=0", base))
+        .header("Authorization", "Bearer test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    for i in 0..200u32 {
+        let _ = client
+            .put(format!("{}/v1/state/lag:{}", base, i))
+            .header("Authorization", "Bearer test")
+            .json(&serde_json::json!({"value":{"i":i}}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let mut stream = resp.bytes_stream();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut buf = String::new();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => panic!("timeout waiting for gap event"),
+            chunk = stream.next() => {
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.unwrap();
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                if buf.contains("event:gap") || buf.contains("event: gap") {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = shutdown.send(());
+}
+

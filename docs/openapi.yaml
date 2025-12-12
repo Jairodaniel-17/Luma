@@ -1,0 +1,401 @@
+openapi: 3.0.3
+info:
+  title: RustKissVDB API
+  version: "0.1.0"
+servers:
+  - url: http://localhost:8080
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ErrorBody:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+    StateItem:
+      type: object
+      required: [key, value, revision]
+      properties:
+        key: { type: string }
+        value: {}
+        revision: { type: integer, format: uint64 }
+        expires_at_ms: { type: integer, format: uint64, nullable: true }
+    PutStateRequest:
+      type: object
+      required: [value]
+      properties:
+        value: {}
+        ttl_ms: { type: integer, format: uint64, nullable: true }
+        if_revision: { type: integer, format: uint64, nullable: true }
+    PutStateResponse:
+      type: object
+      required: [key, revision]
+      properties:
+        key: { type: string }
+        revision: { type: integer, format: uint64 }
+        expires_at_ms: { type: integer, format: uint64, nullable: true }
+    DeleteStateResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted: { type: boolean }
+    VectorMetric:
+      type: string
+      enum: [cosine, dot]
+    CreateVectorCollectionRequest:
+      type: object
+      required: [dim, metric]
+      properties:
+        dim: { type: integer, minimum: 1 }
+        metric: { $ref: "#/components/schemas/VectorMetric" }
+    CreateVectorCollectionResponse:
+      type: object
+      required: [collection, dim, metric]
+      properties:
+        collection: { type: string }
+        dim: { type: integer }
+        metric: { $ref: "#/components/schemas/VectorMetric" }
+    VectorAddRequest:
+      type: object
+      required: [id, vector]
+      properties:
+        id: { type: string }
+        vector:
+          type: array
+          items: { type: number, format: float }
+        meta: {}
+    VectorUpdateRequest:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        vector:
+          type: array
+          items: { type: number, format: float }
+          nullable: true
+        meta: { nullable: true }
+    VectorDeleteRequest:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+    VectorDeleteResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted: { type: boolean }
+    VectorGetResponse:
+      type: object
+      required: [id, vector, meta]
+      properties:
+        id: { type: string }
+        vector:
+          type: array
+          items: { type: number, format: float }
+        meta: {}
+    VectorSearchRequest:
+      type: object
+      required: [vector, k]
+      properties:
+        vector:
+          type: array
+          items: { type: number, format: float }
+        k: { type: integer, minimum: 1 }
+        filters: { nullable: true }
+        include_meta: { type: boolean, nullable: true }
+    VectorSearchHit:
+      type: object
+      required: [id, score]
+      properties:
+        id: { type: string }
+        score: { type: number, format: float }
+        meta: { nullable: true }
+    VectorSearchResponse:
+      type: object
+      required: [hits]
+      properties:
+        hits:
+          type: array
+          items: { $ref: "#/components/schemas/VectorSearchHit" }
+paths:
+  /v1/health:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: OK }
+  /v1/metrics:
+    get:
+      summary: Metrics (text)
+      responses:
+        "200": { description: OK }
+  /v1/state:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: List state keys by prefix
+      parameters:
+        - in: query
+          name: prefix
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/StateItem" }
+        "401": { description: Unauthorized }
+  /v1/state/{key}:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: Get a state key
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StateItem" }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+    put:
+      security: [{ bearerAuth: [] }]
+      summary: Put a state key (CAS via if_revision)
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PutStateRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PutStateResponse" }
+        "401": { description: Unauthorized }
+        "409": { description: Revision mismatch }
+        "413": { description: Payload too large }
+    delete:
+      security: [{ bearerAuth: [] }]
+      summary: Delete a state key
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteStateResponse" }
+        "401": { description: Unauthorized }
+  /v1/stream:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: SSE stream (replay + tail) by offset
+      parameters:
+        - in: query
+          name: since
+          description: Offset/event_id (u64). Server replays events with offset > since.
+          schema: { type: integer, format: uint64, default: 0 }
+        - in: query
+          name: types
+          description: Comma-separated event types.
+          schema: { type: string }
+        - in: query
+          name: key_prefix
+          description: Filters only events with data.key starting with prefix.
+          schema: { type: string }
+        - in: query
+          name: collection
+          description: Filters only events with data.collection == collection.
+          schema: { type: string }
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { description: Unauthorized }
+  /v1/events:
+    get:
+      security: [{ bearerAuth: [] }]
+      deprecated: true
+      summary: Legacy SSE alias for /v1/stream (prefix -> key_prefix)
+      parameters:
+        - in: query
+          name: since
+          schema: { type: integer, format: uint64, default: 0 }
+        - in: query
+          name: types
+          schema: { type: string }
+        - in: query
+          name: prefix
+          schema: { type: string }
+      responses:
+        "200": { description: text/event-stream }
+        "401": { description: Unauthorized }
+  /v1/vector/{collection}:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Create a vector collection
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateVectorCollectionRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateVectorCollectionResponse" }
+        "401": { description: Unauthorized }
+        "409": { description: Already exists }
+  /v1/vector/{collection}/add:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Add a vector id (fails if exists)
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VectorAddRequest" }
+      responses:
+        "200": { description: OK }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+        "409": { description: Already exists }
+  /v1/vector/{collection}/upsert:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Upsert a vector id
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VectorAddRequest" }
+      responses:
+        "200": { description: OK }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+  /v1/vector/{collection}/update:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Update a vector id (404 if id missing)
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VectorUpdateRequest" }
+      responses:
+        "200": { description: OK }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+  /v1/vector/{collection}/delete:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Delete a vector id (404 if id missing)
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VectorDeleteRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VectorDeleteResponse" }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+  /v1/vector/{collection}/get:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: Get a vector id
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+        - in: query
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VectorGetResponse" }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+  /v1/vector/{collection}/search:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Search vectors (top-k)
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VectorSearchRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VectorSearchResponse" }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
+
