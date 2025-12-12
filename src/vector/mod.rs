@@ -1,12 +1,19 @@
+mod persist;
+
+use crate::vector::persist::{CollectionLayout, Manifest, Record, RecordOp};
+use anyhow::Context;
+use hnsw_rs::prelude::*;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct VectorStore(Arc<Inner>);
 
 struct Inner {
+    data_dir: Option<PathBuf>,
     collections: RwLock<HashMap<String, Collection>>,
 }
 
@@ -22,32 +29,29 @@ pub struct VectorItem {
     pub meta: serde_json::Value,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Metric {
     Cosine,
     Dot,
 }
 
-#[derive(Clone, Debug)]
-struct Collection {
-    dim: usize,
-    metric: Metric,
-    items: HashMap<String, VectorItem>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum VectorError {
     #[error("collection not found")]
     CollectionNotFound,
-    #[error("id not found")]
-    IdNotFound,
     #[error("collection already exists")]
     CollectionExists,
-    #[error("vector dim mismatch")]
-    DimMismatch,
+    #[error("id not found")]
+    IdNotFound,
     #[error("id already exists")]
     IdExists,
+    #[error("vector dim mismatch")]
+    DimMismatch,
+    #[error("invalid collection manifest")]
+    InvalidManifest,
+    #[error("persistence error")]
+    Persistence,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,23 +69,69 @@ pub struct SearchHit {
     pub meta: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PersistVectorSnapshot {
-    pub collections: HashMap<String, PersistCollection>,
+#[derive(Clone)]
+struct Collection {
+    dim: usize,
+    metric: Metric,
+    layout: Option<CollectionLayout>,
+    manifest: Manifest,
+    items: HashMap<String, VectorItem>,
+    applied_offset: u64,
+    hnsw: HnswIndex,
+    data_ids: HashMap<String, usize>,
+    id_by_data_id: Vec<String>,
+    deleted_data_id: Vec<bool>,
+    hnsw_capacity: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PersistCollection {
-    pub dim: usize,
-    pub metric: Metric,
-    pub items: HashMap<String, VectorItem>,
+#[derive(Clone)]
+enum HnswIndex {
+    Cosine(Hnsw<'static, f32, anndists::dist::distances::DistCosine>),
+    Dot(Hnsw<'static, f32, anndists::dist::distances::DistDot>),
 }
 
 impl VectorStore {
     pub fn new() -> Self {
         Self(Arc::new(Inner {
+            data_dir: None,
             collections: RwLock::new(HashMap::new()),
         }))
+    }
+
+    pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        let vectors_dir = data_dir.join("vectors");
+        std::fs::create_dir_all(&vectors_dir)?;
+
+        let mut collections = HashMap::new();
+        for entry in std::fs::read_dir(&vectors_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let layout = CollectionLayout::new(&vectors_dir, &name);
+            let (manifest, items, applied_offset) = persist::load_collection(&layout)
+                .with_context(|| format!("load vector collection {name}"))?;
+            let mut c = Collection::new(name.clone(), layout, manifest, items, applied_offset)?;
+            c.rebuild_index();
+            collections.insert(name, c);
+        }
+
+        Ok(Self(Arc::new(Inner {
+            data_dir: Some(data_dir),
+            collections: RwLock::new(collections),
+        })))
+    }
+
+    pub fn applied_offset(&self) -> u64 {
+        let cols = self.0.collections.read();
+        cols.values().map(|c| c.applied_offset).max().unwrap_or(0)
+    }
+
+    pub fn get_collection(&self, name: &str) -> Option<(usize, Metric)> {
+        let cols = self.0.collections.read();
+        cols.get(name).map(|c| (c.dim, c.metric))
     }
 
     pub fn create_collection(
@@ -94,47 +144,144 @@ impl VectorStore {
         if cols.contains_key(name) {
             return Err(VectorError::CollectionExists);
         }
-        cols.insert(
-            name.to_string(),
-            Collection {
-                dim,
-                metric,
-                items: HashMap::new(),
-            },
-        );
+        let layout = self.layout_for(name).ok_or(VectorError::Persistence)?;
+        persist::init_collection(&layout, dim, metric).map_err(|_| VectorError::Persistence)?;
+        let (manifest, items, applied_offset) =
+            persist::load_collection(&layout).map_err(|_| VectorError::Persistence)?;
+        let mut c = Collection::new(name.to_string(), layout, manifest, items, applied_offset)?;
+        c.rebuild_index();
+        cols.insert(name.to_string(), c);
         Ok(())
     }
 
-    pub fn get_collection(&self, name: &str) -> Option<(usize, Metric)> {
+    pub fn get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {
         let cols = self.0.collections.read();
-        cols.get(name).map(|c| (c.dim, c.metric))
+        let c = cols.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        Ok(c.items.get(id).cloned())
+    }
+
+    pub fn apply_event(&self, ev: &crate::engine::EventRecord) -> Result<(), VectorError> {
+        match ev.event_type.as_str() {
+            "vector_collection_created" => {
+                let name = ev
+                    .data
+                    .get("collection")
+                    .and_then(|v| v.as_str())
+                    .ok_or(VectorError::InvalidManifest)?;
+                let dim = ev.data.get("dim").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let metric: Metric = serde_json::from_value(
+                    ev.data
+                        .get("metric")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::String("cosine".into())),
+                )
+                .map_err(|_| VectorError::InvalidManifest)?;
+
+                let mut cols = self.0.collections.write();
+                if let Some(existing) = cols.get(name) {
+                    if existing.dim != dim || existing.metric != metric {
+                        return Err(VectorError::InvalidManifest);
+                    }
+                    cols.get_mut(name).unwrap().applied_offset = cols.get(name).unwrap().applied_offset.max(ev.offset);
+                    if let Some(layout) = &cols.get(name).unwrap().layout {
+                        let _ = persist::update_applied_offset(layout, ev.offset);
+                    }
+                    return Ok(());
+                }
+
+                let layout = self.layout_for(name).ok_or(VectorError::Persistence)?;
+                persist::init_collection(&layout, dim, metric).map_err(|_| VectorError::Persistence)?;
+                let (manifest, items, applied_offset) =
+                    persist::load_collection(&layout).map_err(|_| VectorError::Persistence)?;
+                let mut c = Collection::new(name.to_string(), layout, manifest, items, applied_offset)?;
+                c.applied_offset = ev.offset;
+                if let Some(layout) = &c.layout {
+                    persist::update_applied_offset(layout, ev.offset).map_err(|_| VectorError::Persistence)?;
+                }
+                c.rebuild_index();
+                cols.insert(name.to_string(), c);
+                Ok(())
+            }
+            "vector_added" | "vector_upserted" | "vector_updated" | "vector_deleted" => {
+                let collection = ev
+                    .data
+                    .get("collection")
+                    .and_then(|v| v.as_str())
+                    .ok_or(VectorError::InvalidManifest)?;
+                let id = ev.data.get("id").and_then(|v| v.as_str()).ok_or(VectorError::InvalidManifest)?;
+
+                let mut cols = self.0.collections.write();
+                let c = cols.get_mut(collection).ok_or(VectorError::CollectionNotFound)?;
+                if ev.offset <= c.applied_offset {
+                    return Ok(());
+                }
+
+                match ev.event_type.as_str() {
+                    "vector_deleted" => {
+                        let record = Record {
+                            offset: ev.offset,
+                            op: RecordOp::Delete,
+                            id: id.to_string(),
+                            vector: None,
+                            meta: None,
+                        };
+                        c.apply_record(record, None)?;
+                    }
+                    _ => {
+                        let vector: Vec<f32> =
+                            serde_json::from_value(ev.data.get("vector").cloned().unwrap_or(serde_json::Value::Array(vec![])))
+                                .map_err(|_| VectorError::InvalidManifest)?;
+                        let meta = ev.data.get("meta").cloned().unwrap_or(serde_json::Value::Null);
+                        let record = Record {
+                            offset: ev.offset,
+                            op: RecordOp::Upsert,
+                            id: id.to_string(),
+                            vector: Some(vector),
+                            meta: Some(meta),
+                        };
+                        c.apply_record(record, None)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn add(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {
         let mut cols = self.0.collections.write();
         let c = cols.get_mut(collection).ok_or(VectorError::CollectionNotFound)?;
-        if item.vector.len() != c.dim {
-            return Err(VectorError::DimMismatch);
-        }
         if c.items.contains_key(id) {
             return Err(VectorError::IdExists);
         }
-        c.items.insert(id.to_string(), item);
+        if item.vector.len() != c.dim {
+            return Err(VectorError::DimMismatch);
+        }
+        let record = Record {
+            offset: 0,
+            op: RecordOp::Upsert,
+            id: id.to_string(),
+            vector: Some(item.vector),
+            meta: Some(item.meta),
+        };
+        c.apply_record(record, Some(ApplyMode::InMemoryOnly))?;
         Ok(())
     }
 
-    pub fn upsert(
-        &self,
-        collection: &str,
-        id: &str,
-        item: VectorItem,
-    ) -> Result<(), VectorError> {
+    pub fn upsert(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {
         let mut cols = self.0.collections.write();
         let c = cols.get_mut(collection).ok_or(VectorError::CollectionNotFound)?;
         if item.vector.len() != c.dim {
             return Err(VectorError::DimMismatch);
         }
-        c.items.insert(id.to_string(), item);
+        let record = Record {
+            offset: 0,
+            op: RecordOp::Upsert,
+            id: id.to_string(),
+            vector: Some(item.vector),
+            meta: Some(item.meta),
+        };
+        c.apply_record(record, Some(ApplyMode::InMemoryOnly))?;
         Ok(())
     }
 
@@ -147,161 +294,204 @@ impl VectorStore {
     ) -> Result<(), VectorError> {
         let mut cols = self.0.collections.write();
         let c = cols.get_mut(collection).ok_or(VectorError::CollectionNotFound)?;
-        let existing = c.items.get_mut(id).ok_or(VectorError::IdNotFound)?;
-
-        if let Some(v) = vector {
-            if v.len() != c.dim {
-                return Err(VectorError::DimMismatch);
-            }
-            existing.vector = v;
+        let current = c.items.get(id).cloned().ok_or(VectorError::IdNotFound)?;
+        let new_vec = vector.unwrap_or(current.vector);
+        if new_vec.len() != c.dim {
+            return Err(VectorError::DimMismatch);
         }
-        if let Some(m) = meta {
-            existing.meta = m;
-        }
+        let new_meta = meta.unwrap_or(current.meta);
+        let record = Record {
+            offset: 0,
+            op: RecordOp::Upsert,
+            id: id.to_string(),
+            vector: Some(new_vec),
+            meta: Some(new_meta),
+        };
+        c.apply_record(record, Some(ApplyMode::InMemoryOnly))?;
         Ok(())
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<(), VectorError> {
         let mut cols = self.0.collections.write();
         let c = cols.get_mut(collection).ok_or(VectorError::CollectionNotFound)?;
-        if c.items.remove(id).is_some() {
-            Ok(())
-        } else {
-            Err(VectorError::IdNotFound)
+        if !c.items.contains_key(id) {
+            return Err(VectorError::IdNotFound);
         }
-    }
-
-    pub fn get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {
-        let cols = self.0.collections.read();
-        let c = cols.get(collection).ok_or(VectorError::CollectionNotFound)?;
-        Ok(c.items.get(id).cloned())
+        let record = Record {
+            offset: 0,
+            op: RecordOp::Delete,
+            id: id.to_string(),
+            vector: None,
+            meta: None,
+        };
+        c.apply_record(record, Some(ApplyMode::InMemoryOnly))?;
+        Ok(())
     }
 
     pub fn search(&self, collection: &str, req: SearchRequest) -> Result<Vec<SearchHit>, VectorError> {
         let cols = self.0.collections.read();
         let c = cols.get(collection).ok_or(VectorError::CollectionNotFound)?;
-        if req.vector.len() != c.dim {
+        c.search(req)
+    }
+
+    fn layout_for(&self, collection: &str) -> Option<CollectionLayout> {
+        let base = self.0.data_dir.as_ref()?.join("vectors");
+        Some(CollectionLayout::new(&base, collection))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ApplyMode {
+    InMemoryOnly,
+}
+
+impl Collection {
+    fn new(
+        _name: String,
+        layout: CollectionLayout,
+        manifest: Manifest,
+        items: HashMap<String, VectorItem>,
+        applied_offset: u64,
+    ) -> Result<Self, VectorError> {
+        let dim = manifest.dim;
+        let metric = manifest.metric;
+        let mut c = Self {
+            dim,
+            metric,
+            layout: Some(layout),
+            manifest,
+            items,
+            applied_offset,
+            hnsw: make_hnsw(metric, 16, 1024, 16, 200),
+            data_ids: HashMap::new(),
+            id_by_data_id: Vec::new(),
+            deleted_data_id: Vec::new(),
+            hnsw_capacity: 1024,
+        };
+        c.rebuild_index();
+        Ok(c)
+    }
+
+    fn rebuild_index(&mut self) {
+        let capacity = (self.items.len().max(1) * 2).max(1024);
+        self.hnsw_capacity = capacity;
+        self.data_ids.clear();
+        self.id_by_data_id.clear();
+        self.deleted_data_id.clear();
+        self.hnsw = make_hnsw(self.metric, 16, capacity, 16, 200);
+
+        let mut next_data_id = 0usize;
+        for (id, item) in self.items.iter() {
+            let vec = normalize_if_needed(self.metric, item.vector.clone());
+            let data_id = next_data_id;
+            next_data_id += 1;
+            self.data_ids.insert(id.clone(), data_id);
+            self.id_by_data_id.push(id.clone());
+            self.deleted_data_id.push(false);
+            insert_into_hnsw(&mut self.hnsw, vec, data_id);
+        }
+    }
+
+    fn apply_record(&mut self, mut record: Record, mode: Option<ApplyMode>) -> Result<(), VectorError> {
+        if record.op == RecordOp::Upsert {
+            let Some(vec) = record.vector.as_ref() else {
+                return Err(VectorError::InvalidManifest);
+            };
+            if vec.len() != self.dim {
+                return Err(VectorError::DimMismatch);
+            }
+        }
+
+        if let Some(layout) = &self.layout {
+            if mode.is_none() {
+                persist::append_record(layout, &record).map_err(|_| VectorError::Persistence)?;
+                persist::update_applied_offset(layout, record.offset).map_err(|_| VectorError::Persistence)?;
+                self.manifest.applied_offset = self.manifest.applied_offset.max(record.offset);
+                self.applied_offset = self.applied_offset.max(record.offset);
+            }
+        }
+
+        match record.op {
+            RecordOp::Delete => {
+                self.items.remove(&record.id);
+                if let Some(old) = self.data_ids.remove(&record.id) {
+                    if old < self.deleted_data_id.len() {
+                        self.deleted_data_id[old] = true;
+                    }
+                }
+            }
+            RecordOp::Upsert => {
+                let mut vec = record.vector.take().ok_or(VectorError::InvalidManifest)?;
+                vec = normalize_if_needed(self.metric, vec);
+                let meta = record.meta.take().unwrap_or(serde_json::Value::Null);
+                let new_item = VectorItem { vector: vec.clone(), meta };
+                if let Some(old) = self.data_ids.get(&record.id).cloned() {
+                    if old < self.deleted_data_id.len() {
+                        self.deleted_data_id[old] = true;
+                    }
+                }
+                self.items.insert(record.id.clone(), new_item);
+
+                if self.id_by_data_id.len() + 1 > self.hnsw_capacity {
+                    self.rebuild_index();
+                } else {
+                    let data_id = self.id_by_data_id.len();
+                    self.id_by_data_id.push(record.id.clone());
+                    self.deleted_data_id.push(false);
+                    self.data_ids.insert(record.id, data_id);
+                    insert_into_hnsw(&mut self.hnsw, vec, data_id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn search(&self, req: SearchRequest) -> Result<Vec<SearchHit>, VectorError> {
+        if req.vector.len() != self.dim {
             return Err(VectorError::DimMismatch);
         }
         let include_meta = req.include_meta.unwrap_or(false);
-        let k = req.k.max(1).min(10_000);
+        let k = req.k.max(1);
+        let query = normalize_if_needed(self.metric, req.vector);
+        if self.items.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        let query_norm = if matches!(c.metric, Metric::Cosine) {
-            norm(&req.vector).max(1e-9)
-        } else {
-            1.0
+        let candidate_k = (k * 20).min(self.items.len()).max(k);
+        let ef = (candidate_k * 2).max(50).min(10_000);
+
+        let neighbours = match &self.hnsw {
+            HnswIndex::Cosine(h) => h.search(query.as_slice(), candidate_k, ef),
+            HnswIndex::Dot(h) => h.search(query.as_slice(), candidate_k, ef),
         };
 
         let mut hits = Vec::new();
-        for (id, item) in c.items.iter() {
+        for n in neighbours {
+            let data_id = n.d_id;
+            if data_id >= self.id_by_data_id.len() {
+                continue;
+            }
+            if self.deleted_data_id.get(data_id).copied().unwrap_or(true) {
+                continue;
+            }
+            let id = &self.id_by_data_id[data_id];
+            let Some(item) = self.items.get(id) else { continue };
             if !matches_filters(&item.meta, req.filters.as_ref()) {
                 continue;
             }
-            let score = match c.metric {
-                Metric::Dot => dot(&req.vector, &item.vector),
-                Metric::Cosine => {
-                    let denom = query_norm * norm(&item.vector).max(1e-9);
-                    dot(&req.vector, &item.vector) / denom
-                }
-            };
+            let score = 1.0 - n.distance;
             hits.push(SearchHit {
                 id: id.clone(),
                 score,
                 meta: include_meta.then(|| item.meta.clone()),
             });
+            if hits.len() >= k {
+                break;
+            }
         }
 
-        if hits.len() > k {
-            hits.select_nth_unstable_by(k - 1, |a, b| b.score.total_cmp(&a.score));
-            hits.truncate(k);
-        }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         Ok(hits)
-    }
-
-    pub fn snapshot(&self) -> PersistVectorSnapshot {
-        let cols = self.0.collections.read();
-        PersistVectorSnapshot {
-            collections: cols
-                .iter()
-                .map(|(name, c)| {
-                    (
-                        name.clone(),
-                        PersistCollection {
-                            dim: c.dim,
-                            metric: c.metric,
-                            items: c.items.clone(),
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub fn load_snapshot(&self, snapshot: PersistVectorSnapshot) -> anyhow::Result<()> {
-        let mut cols = self.0.collections.write();
-        cols.clear();
-        for (name, c) in snapshot.collections {
-            cols.insert(
-                name,
-                Collection {
-                    dim: c.dim,
-                    metric: c.metric,
-                    items: c.items,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    pub fn apply_wal_create(&self, data: &serde_json::Value) -> anyhow::Result<()> {
-        let collection = data
-            .get("collection")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing collection"))?;
-        let dim = data.get("dim").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let metric: Metric = serde_json::from_value(data.get("metric").cloned().unwrap_or(serde_json::Value::String("cosine".into())))?;
-        let _ = self.create_collection(collection, dim, metric);
-        Ok(())
-    }
-
-    pub fn apply_wal_item(&self, event_type: &str, data: &serde_json::Value) -> anyhow::Result<()> {
-        let collection = data
-            .get("collection")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing collection"))?;
-        let id = data
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing id"))?;
-        match event_type {
-            "vector_deleted" => {
-                let _ = self.delete(collection, id);
-            }
-            "vector_added" | "vector_upserted" | "vector_updated" => {
-                let vector: Vec<f32> = serde_json::from_value(
-                    data.get("vector")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Array(vec![])),
-                )?;
-                let meta = data.get("meta").cloned().unwrap_or(serde_json::Value::Null);
-                let item = VectorItem { vector, meta };
-                match event_type {
-                    "vector_added" => {
-                        let _ = self.add(collection, id, item);
-                    }
-                    "vector_upserted" => {
-                        let _ = self.upsert(collection, id, item);
-                    }
-                    "vector_updated" => {
-                        let _ = self.upsert(collection, id, item);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-        Ok(())
     }
 }
 
@@ -319,54 +509,35 @@ fn matches_filters(meta: &serde_json::Value, filters: Option<&serde_json::Value>
     true
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+fn normalize_if_needed(metric: Metric, mut v: Vec<f32>) -> Vec<f32> {
+    if metric == Metric::Dot {
+        anndists::dist::distances::l2_normalize(v.as_mut_slice());
+    }
+    v
 }
 
-fn norm(v: &[f32]) -> f32 {
-    dot(v, v).sqrt()
+fn make_hnsw(metric: Metric, max_nb_conn: usize, max_elem: usize, nb_layer: usize, ef_c: usize) -> HnswIndex {
+    match metric {
+        Metric::Cosine => HnswIndex::Cosine(Hnsw::<f32, anndists::dist::distances::DistCosine>::new(
+            max_nb_conn,
+            max_elem,
+            nb_layer,
+            ef_c,
+            anndists::dist::distances::DistCosine {},
+        )),
+        Metric::Dot => HnswIndex::Dot(Hnsw::<f32, anndists::dist::distances::DistDot>::new(
+            max_nb_conn,
+            max_elem,
+            nb_layer,
+            ef_c,
+            anndists::dist::distances::DistDot {},
+        )),
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn search_cosine_prefers_closer() {
-        let store = VectorStore::new();
-        store.create_collection("docs", 2, Metric::Cosine).unwrap();
-        store
-            .upsert(
-                "docs",
-                "a",
-                VectorItem {
-                    vector: vec![1.0, 0.0],
-                    meta: serde_json::json!({"tag":"x"}),
-                },
-            )
-            .unwrap();
-        store
-            .upsert(
-                "docs",
-                "b",
-                VectorItem {
-                    vector: vec![0.0, 1.0],
-                    meta: serde_json::json!({"tag":"y"}),
-                },
-            )
-            .unwrap();
-
-        let hits = store
-            .search(
-                "docs",
-                SearchRequest {
-                    vector: vec![0.9, 0.1],
-                    k: 1,
-                    filters: None,
-                    include_meta: None,
-                },
-            )
-            .unwrap();
-        assert_eq!(hits[0].id, "a");
+fn insert_into_hnsw(hnsw: &mut HnswIndex, v: Vec<f32>, data_id: usize) {
+    match hnsw {
+        HnswIndex::Cosine(h) => h.insert((&v, data_id)),
+        HnswIndex::Dot(h) => h.insert((&v, data_id)),
     }
 }

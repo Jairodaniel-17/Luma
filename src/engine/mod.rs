@@ -54,7 +54,10 @@ impl Engine {
             None => None,
         };
         let state = state::StateStore::new();
-        let vectors = VectorStore::new();
+        let vectors = match &config.data_dir {
+            Some(dir) => VectorStore::open(dir).context("open vector store")?,
+            None => VectorStore::new(),
+        };
 
         let engine = Self(Arc::new(Inner {
             config: config.clone(),
@@ -111,7 +114,6 @@ impl Engine {
             since_offset = since_offset.max(db.applied_offset().unwrap_or(0));
         }
         if let Some(snapshot) = persist.load_snapshot().context("read snapshot")? {
-            self.0.vectors.load_snapshot(snapshot.vectors)?;
             self.0.events.set_next_offset(snapshot.last_offset + 1);
             since_offset = snapshot.last_offset;
         }
@@ -129,11 +131,9 @@ impl Engine {
                         "state_deleted" => {
                             let _ = db.apply_state_deleted(&ev);
                         }
-                        "vector_collection_created" => {
-                            let _ = vectors.apply_wal_create(&ev.data);
-                        }
-                        "vector_added" | "vector_upserted" | "vector_updated" | "vector_deleted" => {
-                            let _ = vectors.apply_wal_item(ev.event_type.as_str(), &ev.data);
+                        "vector_collection_created" | "vector_added" | "vector_upserted" | "vector_updated"
+                        | "vector_deleted" => {
+                            let _ = vectors.apply_event(&ev);
                         }
                         _ => {}
                     }
@@ -191,7 +191,6 @@ impl Engine {
             }
         }
         let snapshot = persist::Snapshot {
-            vectors: self.0.vectors.snapshot(),
             last_offset: self.0.events.last_published_offset(),
         };
         persist.write_snapshot_and_rotate(&snapshot)
@@ -344,8 +343,14 @@ impl Engine {
             "dim": dim,
             "metric": metric,
         });
-        let _event = self.append_event_durable("vector_collection_created", data)?;
+        let event = self.0.events.next_record("vector_collection_created", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
         self.0.vectors.create_collection(collection, dim, metric)?;
+        self.0.vectors.apply_event(&event)?;
+        self.0.events.publish_record(event);
+        self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
     }
@@ -356,14 +361,19 @@ impl Engine {
         if self.0.vectors.get(collection, id)?.is_some() {
             return Err(VectorError::IdExists.into());
         }
-        let event_data = serde_json::json!({
+        let data = serde_json::json!({
             "collection": collection,
             "id": id,
             "vector": item.vector.clone(),
             "meta": item.meta.clone(),
         });
-        let _event = self.append_event_durable("vector_added", event_data)?;
-        self.0.vectors.add(collection, id, item)?;
+        let event = self.0.events.next_record("vector_added", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        self.0.vectors.apply_event(&event)?;
+        self.0.events.publish_record(event);
+        self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
     }
@@ -376,14 +386,19 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let _g = self.0.commit_lock.lock();
         let _ = self.0.vectors.get_collection(collection).ok_or(VectorError::CollectionNotFound)?;
-        let event_data = serde_json::json!({
+        let data = serde_json::json!({
             "collection": collection,
             "id": id,
             "vector": item.vector.clone(),
             "meta": item.meta.clone(),
         });
-        let _event = self.append_event_durable("vector_upserted", event_data)?;
-        self.0.vectors.upsert(collection, id, item)?;
+        let event = self.0.events.next_record("vector_upserted", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        self.0.vectors.apply_event(&event)?;
+        self.0.events.publish_record(event);
+        self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
     }
@@ -397,28 +412,22 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let _g = self.0.commit_lock.lock();
         let _ = self.0.vectors.get_collection(collection).ok_or(VectorError::CollectionNotFound)?;
-        let current = self
-            .0
-            .vectors
-            .get(collection, id)?
-            .ok_or(VectorError::IdNotFound)?;
+        let current = self.0.vectors.get(collection, id)?.ok_or(VectorError::IdNotFound)?;
         let new_vec = vector.unwrap_or(current.vector);
         let new_meta = meta.unwrap_or(current.meta);
-        let event_data = serde_json::json!({
+        let data = serde_json::json!({
             "collection": collection,
             "id": id,
             "vector": new_vec.clone(),
             "meta": new_meta.clone(),
         });
-        let _event = self.append_event_durable("vector_updated", event_data)?;
-        self.0.vectors.upsert(
-            collection,
-            id,
-            VectorItem {
-                vector: new_vec,
-                meta: new_meta,
-            },
-        )?;
+        let event = self.0.events.next_record("vector_updated", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        self.0.vectors.apply_event(&event)?;
+        self.0.events.publish_record(event);
+        self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
     }
@@ -433,8 +442,13 @@ impl Engine {
             "collection": collection,
             "id": id,
         });
-        let _event = self.append_event_durable("vector_deleted", data)?;
-        self.0.vectors.delete(collection, id)?;
+        let event = self.0.events.next_record("vector_deleted", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        self.0.vectors.apply_event(&event)?;
+        self.0.events.publish_record(event);
+        self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
     }

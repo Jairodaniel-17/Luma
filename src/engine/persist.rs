@@ -1,6 +1,6 @@
 use crate::engine::events::EventRecord;
 use crate::engine::EventBus;
-use crate::vector::{PersistVectorSnapshot, VectorStore};
+use crate::vector::VectorStore;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -21,7 +21,6 @@ struct Inner {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
-    pub vectors: PersistVectorSnapshot,
     pub last_offset: u64,
 }
 
@@ -191,7 +190,7 @@ impl Persist {
     }
 }
 
-fn apply_event(state: &crate::engine::state::StateStore, vectors: &VectorStore, ev: &EventRecord) {
+fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore, ev: &EventRecord) {
     match ev.event_type.as_str() {
         "state_updated" => {
             if let Some(key) = ev.data.get("key").and_then(|v| v.as_str()) {
@@ -205,12 +204,6 @@ fn apply_event(state: &crate::engine::state::StateStore, vectors: &VectorStore, 
             if let Some(key) = ev.data.get("key").and_then(|v| v.as_str()) {
                 let _ = state.delete(key);
             }
-        }
-        "vector_collection_created" => {
-            let _ = vectors.apply_wal_create(&ev.data);
-        }
-        "vector_added" | "vector_upserted" | "vector_updated" | "vector_deleted" => {
-            let _ = vectors.apply_wal_item(ev.event_type.as_str(), &ev.data);
         }
         _ => {}
     }
