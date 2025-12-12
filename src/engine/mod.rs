@@ -1,6 +1,7 @@
 mod events;
 mod metrics;
 mod persist;
+mod state_db;
 mod state;
 
 use crate::config::Config;
@@ -17,6 +18,8 @@ pub enum EngineError {
     #[error("persistence error: {0}")]
     Persistence(#[from] std::io::Error),
     #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+    #[error(transparent)]
     State(#[from] state::StateError),
     #[error(transparent)]
     Vector(#[from] VectorError),
@@ -25,6 +28,7 @@ pub enum EngineError {
 struct Inner {
     config: Config,
     state: state::StateStore,
+    state_db: Option<state_db::StateDb>,
     vectors: VectorStore,
     events: events::EventBus,
     metrics: Arc<metrics::Metrics>,
@@ -45,12 +49,17 @@ impl Engine {
             None => None,
         };
 
+        let state_db = match &config.data_dir {
+            Some(dir) => Some(state_db::StateDb::open(dir).context("open state db")?),
+            None => None,
+        };
         let state = state::StateStore::new();
         let vectors = VectorStore::new();
 
         let engine = Self(Arc::new(Inner {
             config: config.clone(),
             state,
+            state_db,
             vectors,
             events,
             metrics,
@@ -98,16 +107,46 @@ impl Engine {
         };
 
         let mut since_offset = 0u64;
+        if let Some(db) = &self.0.state_db {
+            since_offset = since_offset.max(db.applied_offset().unwrap_or(0));
+        }
         if let Some(snapshot) = persist.load_snapshot().context("read snapshot")? {
-            self.0.state.load_snapshot(snapshot.state)?;
             self.0.vectors.load_snapshot(snapshot.vectors)?;
             self.0.events.set_next_offset(snapshot.last_offset + 1);
             since_offset = snapshot.last_offset;
         }
 
-        let applied = persist
-            .replay_wal_since(since_offset, &self.0.state, &self.0.vectors, &self.0.events)
-            .context("replay wal")?;
+        let mut applied = 0usize;
+        if let Some(db) = &self.0.state_db {
+            let vectors = self.0.vectors.clone();
+            let events = self.0.events.clone();
+            persist
+                .for_each_event_since(since_offset, |ev| {
+                    match ev.event_type.as_str() {
+                        "state_updated" => {
+                            let _ = db.apply_state_updated(&ev);
+                        }
+                        "state_deleted" => {
+                            let _ = db.apply_state_deleted(&ev);
+                        }
+                        "vector_collection_created" => {
+                            let _ = vectors.apply_wal_create(&ev.data);
+                        }
+                        "vector_added" | "vector_upserted" | "vector_updated" | "vector_deleted" => {
+                            let _ = vectors.apply_wal_item(ev.event_type.as_str(), &ev.data);
+                        }
+                        _ => {}
+                    }
+                    events.set_next_offset(ev.offset.saturating_add(1));
+                    applied += 1;
+                    true
+                })
+                .context("replay wal (db)")?;
+        } else {
+            applied = persist
+                .replay_wal_since(since_offset, &self.0.state, &self.0.vectors, &self.0.events)
+                .context("replay wal")?;
+        }
         tracing::info!(applied, "replayed wal events");
 
         Ok(())
@@ -118,13 +157,14 @@ impl Engine {
             return;
         }
         let interval_secs = self.0.config.snapshot_interval_secs;
-        let engine = self.clone();
+        let weak = Arc::downgrade(&self.0);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
                 interval.tick().await;
-                let engine = engine.clone();
+                let Some(inner) = weak.upgrade() else { break };
+                let engine = Engine(inner);
                 let res = tokio::task::spawn_blocking(move || engine.snapshot_once()).await;
                 match res {
                     Ok(Ok(())) => tracing::info!("snapshot ok"),
@@ -151,7 +191,6 @@ impl Engine {
             }
         }
         let snapshot = persist::Snapshot {
-            state: self.0.state.snapshot(),
             vectors: self.0.vectors.snapshot(),
             last_offset: self.0.events.last_published_offset(),
         };
@@ -167,12 +206,13 @@ impl Engine {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let engine = self.clone();
+        let weak = Arc::downgrade(&self.0);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let engine = engine.clone();
+                let Some(inner) = weak.upgrade() else { break };
+                let engine = Engine(inner);
                 let res = tokio::task::spawn_blocking(move || engine.expire_due_keys(1000)).await;
                 match res {
                     Ok(Ok(expired)) if expired > 0 => tracing::info!(expired, "ttl expired"),
@@ -185,10 +225,16 @@ impl Engine {
     }
 
     pub fn list_state(&self, prefix: Option<&str>, limit: usize) -> Vec<state::StateItem> {
+        if let Some(db) = &self.0.state_db {
+            return db.list(prefix, limit).unwrap_or_default();
+        }
         self.0.state.list(prefix, limit)
     }
 
     pub fn get_state(&self, key: &str) -> Option<state::StateItem> {
+        if let Some(db) = &self.0.state_db {
+            return db.get_state(key).ok().flatten();
+        }
         self.0.state.get(key)
     }
 
@@ -202,22 +248,12 @@ impl Engine {
         let _g = self.0.commit_lock.lock();
 
         let now = now_ms();
-        if let Some((_rev, Some(exp))) = self.0.state.peek_meta(&key) {
-            if exp <= now {
-                let _ = self.append_event_durable(
-                    "state_deleted",
-                    serde_json::json!({
-                        "key": key.clone(),
-                        "reason": "ttl",
-                    }),
-                )?;
-                let _ = self.0.state.delete(&key);
-                self.metrics().inc_state_delete();
-            }
-        }
-
-        let revision = self.0.state.prepare_put_revision(&key, if_revision)?;
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
+        let revision = if let Some(db) = &self.0.state_db {
+            db.prepare_put_revision(&key, if_revision)?
+        } else {
+            self.0.state.prepare_put_revision(&key, if_revision)?
+        };
 
         let event_data = serde_json::json!({
             "key": key,
@@ -227,13 +263,24 @@ impl Engine {
         });
         let value = event_data["value"].clone();
         let key = event_data["key"].as_str().unwrap_or_default().to_string();
-        let _event = self.append_event_durable("state_updated", event_data)?;
+        let event = self.0.events.next_record("state_updated", event_data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        if let Some(db) = &self.0.state_db {
+            db.apply_state_updated(&event)?;
+        }
+        self.0.events.publish_record(event.clone());
+        self.metrics().inc_events();
 
         self.metrics().inc_state_put();
-        let item = self
-            .0
-            .state
-            .apply_put_with_revision(key, value, revision, expires_at_ms);
+        let item = if let Some(db) = &self.0.state_db {
+            db.get_state(&key)?.ok_or_else(|| anyhow::anyhow!("state missing after put"))?
+        } else {
+            self.0
+                .state
+                .apply_put_with_revision(key, value, revision, expires_at_ms)
+        };
         Ok(item)
     }
 
@@ -244,7 +291,12 @@ impl Engine {
     pub fn delete_state_with_reason(&self, key: &str, reason: &'static str) -> Result<bool, EngineError> {
         let _g = self.0.commit_lock.lock();
 
-        if !self.0.state.exists_live(key) {
+        let exists = if let Some(db) = &self.0.state_db {
+            db.exists_live(key)?
+        } else {
+            self.0.state.exists_live(key)
+        };
+        if !exists {
             return Ok(false);
         }
 
@@ -252,9 +304,21 @@ impl Engine {
             "key": key,
             "reason": reason,
         });
-        let _event = self.append_event_durable("state_deleted", data)?;
+        let event = self.0.events.next_record("state_deleted", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        if let Some(db) = &self.0.state_db {
+            db.apply_state_deleted(&event)?;
+        }
+        self.0.events.publish_record(event);
+        self.metrics().inc_events();
 
-        let deleted = self.0.state.delete(key);
+        let deleted = if self.0.state_db.is_some() {
+            true
+        } else {
+            self.0.state.delete(key)
+        };
         if deleted {
             self.metrics().inc_state_delete();
         }
@@ -390,25 +454,38 @@ impl Engine {
     }
 
     fn expire_due_keys_locked(&self, now: u64, limit: usize) -> Result<usize, EngineError> {
-        let keys = self.0.state.expired_keys(now, limit);
+        let keys = if let Some(db) = &self.0.state_db {
+            db.expired_keys_due(now, limit).unwrap_or_default()
+        } else {
+            self.0.state.expired_keys(now, limit)
+        };
         let mut expired = 0usize;
         for key in keys {
-            if let Some((_rev, Some(exp))) = self.0.state.peek_meta(&key) {
-                if exp > now {
-                    continue;
-                }
-                let _ = self.append_event_durable(
-                    "state_deleted",
-                    serde_json::json!({
-                        "key": key,
-                        "reason": "ttl",
-                    }),
-                )?;
-                if self.0.state.delete(&key) {
-                    self.metrics().inc_state_delete();
-                    expired += 1;
-                }
+            let live = if let Some(db) = &self.0.state_db {
+                db.exists_live(&key).unwrap_or(false)
+            } else {
+                self.0.state.exists_live(&key)
+            };
+            if !live {
+                continue;
             }
+            let data = serde_json::json!({
+                "key": key,
+                "reason": "ttl",
+            });
+            let event = self.0.events.next_record("state_deleted", data);
+            if let Some(persist) = &self.0.persist {
+                persist.append_event(&event)?;
+            }
+            if let Some(db) = &self.0.state_db {
+                db.apply_state_deleted(&event)?;
+            } else {
+                let _ = self.0.state.delete(event.data["key"].as_str().unwrap_or_default());
+            }
+            self.0.events.publish_record(event);
+            self.metrics().inc_events();
+            self.metrics().inc_state_delete();
+            expired += 1;
         }
         Ok(expired)
     }

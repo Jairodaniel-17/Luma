@@ -85,7 +85,6 @@ impl StateStore {
         ttl_ms: Option<u64>,
         if_revision: Option<u64>,
     ) -> Result<StateItem, StateError> {
-        self.purge_one_if_expired(&key);
         let mut map = self.0.map.write();
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));

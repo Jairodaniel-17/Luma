@@ -386,5 +386,6 @@ fn map_engine_error(err: EngineError) -> ApiError {
         ),
         EngineError::Vector(v) => map_vector_error(v),
         EngineError::State(_) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
+        EngineError::Internal(_) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
     }
 }

@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
@@ -115,20 +116,12 @@ pub async fn stream(
                         yield Ok(to_sse(ev));
                     }
                 }
-                Some(Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n))) => {
-                    let from_offset = last_sent_offset.saturating_add(1);
-                    let to_offset = bus.last_published_offset().max(from_offset);
-                    last_sent_offset = to_offset;
-                    yield Ok(Event::default().event("gap").data(
-                        serde_json::json!({
-                            "from_offset": from_offset,
-                            "to_offset": to_offset,
-                            "dropped": n,
-                        })
-                        .to_string(),
-                    ));
+                Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
+                    if let Some(ev) = gap_event(n, &mut last_sent_offset, bus.last_published_offset()) {
+                        yield Ok(ev);
+                    }
                 }
-                Some(Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Closed)) | None => {
+                None => {
                     break;
                 }
             }
@@ -178,4 +171,37 @@ fn to_sse(ev: crate::engine::EventRecord) -> Event {
         .event(ev.event_type)
         .id(ev.offset.to_string())
         .data(data)
+}
+
+fn gap_event(n: u64, last_sent_offset: &mut u64, last_published_offset: u64) -> Option<Event> {
+    if n == 0 {
+        return None;
+    }
+    let from_offset = last_sent_offset.saturating_add(1);
+    let to_offset = last_published_offset.max(from_offset);
+    *last_sent_offset = to_offset;
+    Some(
+        Event::default().event("gap").data(
+            serde_json::json!({
+                "from_offset": from_offset,
+                "to_offset": to_offset,
+                "dropped": n,
+            })
+            .to_string(),
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gap_event_advances_offsets() {
+        let mut last = 10u64;
+        let ev = gap_event(7, &mut last, 25).unwrap();
+        assert_eq!(last, 25);
+        let s = format!("{:?}", ev);
+        assert!(s.contains("gap"));
+    }
 }

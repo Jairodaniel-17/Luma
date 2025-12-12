@@ -7,6 +7,7 @@ mod routes_vector;
 use crate::config::Config;
 use crate::engine::Engine;
 use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::time::Duration;
@@ -57,9 +58,10 @@ pub fn router(engine: Engine, config: Config) -> Router {
         .route("/v1/vector/:collection/get", get(routes_vector::get))
         .route("/v1/vector/:collection/search", post(routes_vector::search))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
-        .layer(TimeoutLayer::new(Duration::from_secs(
-            state.config.request_timeout_secs,
-        )))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(state.config.request_timeout_secs),
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(

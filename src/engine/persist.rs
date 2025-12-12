@@ -1,5 +1,4 @@
 use crate::engine::events::EventRecord;
-use crate::engine::state::PersistStateEntry;
 use crate::engine::EventBus;
 use crate::vector::{PersistVectorSnapshot, VectorStore};
 use parking_lot::Mutex;
@@ -22,7 +21,6 @@ struct Inner {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
-    pub state: Vec<(String, PersistStateEntry)>,
     pub vectors: PersistVectorSnapshot,
     pub last_offset: u64,
 }
