@@ -34,4 +34,3 @@ impl IntoResponse for ApiError {
         (self.status, body).into_response()
     }
 }
-

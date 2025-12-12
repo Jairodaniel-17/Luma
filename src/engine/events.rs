@@ -41,7 +41,11 @@ impl EventBus {
         self.0.sender.subscribe()
     }
 
-    pub fn next_record(&self, event_type: impl Into<String>, data: serde_json::Value) -> EventRecord {
+    pub fn next_record(
+        &self,
+        event_type: impl Into<String>,
+        data: serde_json::Value,
+    ) -> EventRecord {
         let offset = self.0.next_offset.fetch_add(1, Ordering::Relaxed);
         EventRecord {
             offset,

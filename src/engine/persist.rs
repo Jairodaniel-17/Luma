@@ -96,7 +96,11 @@ impl Persist {
             *current
         };
         let path = self.segment_path(seg);
-        let mut f = OpenOptions::new().create(true).write(true).open(path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         f.flush()?;
         f.sync_data()?;
 
@@ -194,9 +198,17 @@ fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore,
     match ev.event_type.as_str() {
         "state_updated" => {
             if let Some(key) = ev.data.get("key").and_then(|v| v.as_str()) {
-                let value = ev.data.get("value").cloned().unwrap_or(serde_json::Value::Null);
+                let value = ev
+                    .data
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 let expires_at_ms = ev.data.get("expires_at_ms").and_then(|v| v.as_u64());
-                let revision = ev.data.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
+                let revision = ev
+                    .data
+                    .get("revision")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
                 state.apply_wal_set(key.to_string(), value, revision, expires_at_ms);
             }
         }

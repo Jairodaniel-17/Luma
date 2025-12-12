@@ -1,8 +1,8 @@
 mod events;
 mod metrics;
 mod persist;
-mod state_db;
 mod state;
+mod state_db;
 
 use crate::config::Config;
 use crate::vector::{Metric, SearchHit, SearchRequest, VectorError, VectorItem, VectorStore};
@@ -38,13 +38,18 @@ struct Inner {
 
 impl Engine {
     pub fn new(config: Config) -> anyhow::Result<Self> {
-        let events = events::EventBus::new(config.event_buffer_size, config.live_broadcast_capacity);
+        let events =
+            events::EventBus::new(config.event_buffer_size, config.live_broadcast_capacity);
         let metrics = Arc::new(metrics::Metrics::default());
 
         let persist = match &config.data_dir {
             Some(dir) => Some(
-                persist::Persist::new(dir, config.wal_segment_max_bytes, config.wal_retention_segments)
-                    .context("init persistence")?,
+                persist::Persist::new(
+                    dir,
+                    config.wal_segment_max_bytes,
+                    config.wal_retention_segments,
+                )
+                .context("init persistence")?,
             ),
             None => None,
         };
@@ -131,7 +136,10 @@ impl Engine {
                         "state_deleted" => {
                             let _ = db.apply_state_deleted(&ev);
                         }
-                        "vector_collection_created" | "vector_added" | "vector_upserted" | "vector_updated"
+                        "vector_collection_created"
+                        | "vector_added"
+                        | "vector_upserted"
+                        | "vector_updated"
                         | "vector_deleted" => {
                             let _ = vectors.apply_event(&ev);
                         }
@@ -274,7 +282,8 @@ impl Engine {
 
         self.metrics().inc_state_put();
         let item = if let Some(db) = &self.0.state_db {
-            db.get_state(&key)?.ok_or_else(|| anyhow::anyhow!("state missing after put"))?
+            db.get_state(&key)?
+                .ok_or_else(|| anyhow::anyhow!("state missing after put"))?
         } else {
             self.0
                 .state
@@ -287,7 +296,11 @@ impl Engine {
         self.delete_state_with_reason(key, "explicit")
     }
 
-    pub fn delete_state_with_reason(&self, key: &str, reason: &'static str) -> Result<bool, EngineError> {
+    pub fn delete_state_with_reason(
+        &self,
+        key: &str,
+        reason: &'static str,
+    ) -> Result<bool, EngineError> {
         let _g = self.0.commit_lock.lock();
 
         let exists = if let Some(db) = &self.0.state_db {
@@ -355,9 +368,18 @@ impl Engine {
         Ok(())
     }
 
-    pub fn vector_add(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), EngineError> {
+    pub fn vector_add(
+        &self,
+        collection: &str,
+        id: &str,
+        item: VectorItem,
+    ) -> Result<(), EngineError> {
         let _g = self.0.commit_lock.lock();
-        let _ = self.0.vectors.get_collection(collection).ok_or(VectorError::CollectionNotFound)?;
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         if self.0.vectors.get(collection, id)?.is_some() {
             return Err(VectorError::IdExists.into());
         }
@@ -385,7 +407,11 @@ impl Engine {
         item: VectorItem,
     ) -> Result<(), EngineError> {
         let _g = self.0.commit_lock.lock();
-        let _ = self.0.vectors.get_collection(collection).ok_or(VectorError::CollectionNotFound)?;
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let data = serde_json::json!({
             "collection": collection,
             "id": id,
@@ -411,8 +437,16 @@ impl Engine {
         meta: Option<serde_json::Value>,
     ) -> Result<(), EngineError> {
         let _g = self.0.commit_lock.lock();
-        let _ = self.0.vectors.get_collection(collection).ok_or(VectorError::CollectionNotFound)?;
-        let current = self.0.vectors.get(collection, id)?.ok_or(VectorError::IdNotFound)?;
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        let current = self
+            .0
+            .vectors
+            .get(collection, id)?
+            .ok_or(VectorError::IdNotFound)?;
         let new_vec = vector.unwrap_or(current.vector);
         let new_meta = meta.unwrap_or(current.meta);
         let data = serde_json::json!({
@@ -434,7 +468,11 @@ impl Engine {
 
     pub fn vector_delete(&self, collection: &str, id: &str) -> Result<(), EngineError> {
         let _g = self.0.commit_lock.lock();
-        let _ = self.0.vectors.get_collection(collection).ok_or(VectorError::CollectionNotFound)?;
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         if self.0.vectors.get(collection, id)?.is_none() {
             return Err(VectorError::IdNotFound.into());
         }
@@ -453,11 +491,19 @@ impl Engine {
         Ok(())
     }
 
-    pub fn vector_get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {
+    pub fn vector_get(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<VectorItem>, VectorError> {
         self.0.vectors.get(collection, id)
     }
 
-    pub fn vector_search(&self, collection: &str, req: SearchRequest) -> Result<Vec<SearchHit>, VectorError> {
+    pub fn vector_search(
+        &self,
+        collection: &str,
+        req: SearchRequest,
+    ) -> Result<Vec<SearchHit>, VectorError> {
         self.metrics().inc_vector_op();
         self.0.vectors.search(collection, req)
     }
@@ -494,7 +540,10 @@ impl Engine {
             if let Some(db) = &self.0.state_db {
                 db.apply_state_deleted(&event)?;
             } else {
-                let _ = self.0.state.delete(event.data["key"].as_str().unwrap_or_default());
+                let _ = self
+                    .0
+                    .state
+                    .delete(event.data["key"].as_str().unwrap_or_default());
             }
             self.0.events.publish_record(event);
             self.metrics().inc_events();
@@ -503,25 +552,11 @@ impl Engine {
         }
         Ok(expired)
     }
-
-    fn append_event_durable(
-        &self,
-        event_type: &'static str,
-        data: serde_json::Value,
-    ) -> Result<events::EventRecord, EngineError> {
-        let record = self.0.events.next_record(event_type, data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&record)?;
-        }
-        self.0.events.publish_record(record.clone());
-        self.metrics().inc_events();
-        Ok(record)
-    }
 }
 
-pub use state::{StateError, StateItem};
 pub use events::{EventBus, EventRecord};
 pub use metrics::Metrics;
+pub use state::{StateError, StateItem};
 
 fn now_ms() -> u64 {
     let dur = std::time::SystemTime::now()

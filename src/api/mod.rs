@@ -50,7 +50,10 @@ pub fn router(engine: Engine, config: Config) -> Router {
         .route("/v1/state/:key", delete(routes_state::delete))
         .route("/v1/events", get(routes_events::events))
         .route("/v1/stream", get(routes_events::stream))
-        .route("/v1/vector/:collection", post(routes_vector::create_collection))
+        .route(
+            "/v1/vector/:collection",
+            post(routes_vector::create_collection),
+        )
         .route("/v1/vector/:collection/add", post(routes_vector::add))
         .route("/v1/vector/:collection/upsert", post(routes_vector::upsert))
         .route("/v1/vector/:collection/update", post(routes_vector::update))

@@ -188,7 +188,11 @@ impl StateStore {
         );
     }
 
-    pub fn prepare_put_revision(&self, key: &str, if_revision: Option<u64>) -> Result<u64, StateError> {
+    pub fn prepare_put_revision(
+        &self,
+        key: &str,
+        if_revision: Option<u64>,
+    ) -> Result<u64, StateError> {
         let now = now_ms();
         let map = self.0.map.read();
         let current = map.get(key).filter(|e| !is_expired(e, now));
@@ -256,6 +260,12 @@ impl StateStore {
     }
 }
 
+impl Default for StateStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistStateEntry {
     pub value: serde_json::Value,
@@ -287,22 +297,12 @@ mod tests {
         assert_eq!(item1.revision, 1);
 
         let item2 = s
-            .put(
-                "k".to_string(),
-                serde_json::json!({"a": 2}),
-                None,
-                Some(1),
-            )
+            .put("k".to_string(), serde_json::json!({"a": 2}), None, Some(1))
             .unwrap();
         assert_eq!(item2.revision, 2);
 
         assert!(matches!(
-            s.put(
-                "k".to_string(),
-                serde_json::json!({"a": 3}),
-                None,
-                Some(1),
-            ),
+            s.put("k".to_string(), serde_json::json!({"a": 3}), None, Some(1),),
             Err(StateError::RevisionMismatch)
         ));
 

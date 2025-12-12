@@ -53,7 +53,11 @@ async fn auth_missing_and_wrong() {
     let (base, shutdown) = start_with_config(base_config()).await;
     let client = reqwest::Client::new();
 
-    let ok = client.get(format!("{}/v1/health", base)).send().await.unwrap();
+    let ok = client
+        .get(format!("{}/v1/health", base))
+        .send()
+        .await
+        .unwrap();
     assert!(ok.status().is_success());
 
     let missing = client

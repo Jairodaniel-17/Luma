@@ -85,7 +85,9 @@ pub async fn put(
             "key too long",
         ));
     }
-    let estimated = serde_json::to_vec(&body.value).map(|v| v.len()).unwrap_or(0);
+    let estimated = serde_json::to_vec(&body.value)
+        .map(|v| v.len())
+        .unwrap_or(0);
     if estimated > state.config.max_json_bytes {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -142,7 +144,11 @@ pub async fn delete(
             "persistence_error",
             "failed to persist event",
         ),
-        _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
+        _ => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        ),
     })?;
     Ok(axum::Json(DeleteResponse { deleted }))
 }

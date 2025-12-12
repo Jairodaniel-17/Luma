@@ -27,9 +27,7 @@ impl StateDb {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = data_dir.as_ref().join("state.redb");
         let db = Database::create(&path).context("create/open redb")?;
-        let this = Self {
-            db: Arc::new(db),
-        };
+        let this = Self { db: Arc::new(db) };
         this.init_tables().context("init tables")?;
         Ok(this)
     }
@@ -53,7 +51,8 @@ impl StateDb {
         let Some(raw) = table.get(key.as_bytes())? else {
             return Ok(None);
         };
-        let stored: StoredValue = serde_json::from_slice(raw.value()).context("decode stored value")?;
+        let stored: StoredValue =
+            serde_json::from_slice(raw.value()).context("decode stored value")?;
         if stored.expires_at_ms.is_some_and(|e| e <= now) {
             return Ok(None);
         }
@@ -123,8 +122,15 @@ impl StateDb {
         Ok(out)
     }
 
-    pub fn prepare_put_revision(&self, key: &str, if_revision: Option<u64>) -> Result<u64, StateError> {
-        let tx = self.db.begin_read().map_err(|_| StateError::RevisionMismatch)?;
+    pub fn prepare_put_revision(
+        &self,
+        key: &str,
+        if_revision: Option<u64>,
+    ) -> Result<u64, StateError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|_| StateError::RevisionMismatch)?;
         let table = match tx.open_table(STATE) {
             Ok(t) => t,
             Err(_) => {
@@ -141,7 +147,7 @@ impl StateDb {
             .ok()
             .flatten()
             .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok())
-            .filter(|v| !v.expires_at_ms.is_some_and(|e| e <= now));
+            .filter(|v| v.expires_at_ms.is_none_or(|e| e > now));
 
         match current {
             Some(v) => {
@@ -167,9 +173,17 @@ impl StateDb {
             .get("key")
             .and_then(|v| v.as_str())
             .context("missing key")?;
-        let revision = ev.data.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
+        let revision = ev
+            .data
+            .get("revision")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
         let expires_at_ms = ev.data.get("expires_at_ms").and_then(|v| v.as_u64());
-        let value = ev.data.get("value").cloned().unwrap_or(serde_json::Value::Null);
+        let value = ev
+            .data
+            .get("value")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let mut wtx = self.db.begin_write()?;
         {
@@ -185,7 +199,7 @@ impl StateDb {
             if let Some(prev) = prev {
                 if let Some(exp) = prev.expires_at_ms {
                     let idx = expires_key(exp, key.as_bytes());
-                        let _ = expires.remove(idx.as_slice())?;
+                    let _ = expires.remove(idx.as_slice())?;
                 }
             }
 

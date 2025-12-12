@@ -30,12 +30,7 @@ async fn snapshot_and_wal_replay_no_loss() {
 
     for i in 0..200u32 {
         engine
-            .put_state(
-                format!("k:{i}"),
-                serde_json::json!({ "i": i }),
-                None,
-                None,
-            )
+            .put_state(format!("k:{i}"), serde_json::json!({ "i": i }), None, None)
             .unwrap();
     }
 
@@ -43,12 +38,7 @@ async fn snapshot_and_wal_replay_no_loss() {
 
     for i in 200..400u32 {
         engine
-            .put_state(
-                format!("k:{i}"),
-                serde_json::json!({ "i": i }),
-                None,
-                None,
-            )
+            .put_state(format!("k:{i}"), serde_json::json!({ "i": i }), None, None)
             .unwrap();
     }
 

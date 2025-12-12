@@ -354,11 +354,9 @@ fn map_vector_error(err: VectorError) -> ApiError {
             "not_found",
             "collection or id not found",
         ),
-        VectorError::IdNotFound => ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "id not found",
-        ),
+        VectorError::IdNotFound => {
+            ApiError::new(StatusCode::NOT_FOUND, "not_found", "id not found")
+        }
         VectorError::CollectionExists => ApiError::new(
             StatusCode::CONFLICT,
             "already_exists",
@@ -369,11 +367,9 @@ fn map_vector_error(err: VectorError) -> ApiError {
             "dim_mismatch",
             "vector dimension mismatch",
         ),
-        VectorError::IdExists => ApiError::new(
-            StatusCode::CONFLICT,
-            "already_exists",
-            "id already exists",
-        ),
+        VectorError::IdExists => {
+            ApiError::new(StatusCode::CONFLICT, "already_exists", "id already exists")
+        }
         VectorError::InvalidManifest | VectorError::Persistence => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "persistence_error",
@@ -390,7 +386,15 @@ fn map_engine_error(err: EngineError) -> ApiError {
             "failed to persist event",
         ),
         EngineError::Vector(v) => map_vector_error(v),
-        EngineError::State(_) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
-        EngineError::Internal(_) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
+        EngineError::State(_) => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        ),
+        EngineError::Internal(_) => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        ),
     }
 }

@@ -1,7 +1,7 @@
-use std::net::SocketAddr;
-use tracing_subscriber::EnvFilter;
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
+use std::net::SocketAddr;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,7 +18,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, "listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     engine.shutdown();
     Ok(())

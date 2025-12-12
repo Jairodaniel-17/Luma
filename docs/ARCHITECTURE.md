@@ -28,10 +28,17 @@ Si `DATA_DIR` está definido:
 Invariante: el evento se emite “en vivo” **después** de persistirse en WAL (cuando `DATA_DIR` está habilitado).
 
 ### Vector Store (v1)
-- Colecciones: `{dim, metric}`.
+- Colecciones: `{dim, metric}` con `hnsw_rs` por colecci¢n.
+- Layout en disco (por colecci¢n, cuando `DATA_DIR` est  definido):
+  - `vectors/<collection>/manifest.json`: `{dim, metric, applied_offset, live_count, total_records, upsert_count, file_len}`.
+  - `vectors/<collection>/vectors.bin`: stream binario `[u32 len][bincode<Record>]` (Upsert/Delete). No se usa `mmap` (s¢lo read/append).
 - Operaciones: create/add/upsert/update/delete/get/search.
-- Search: brute-force con `cosine` o `dot`.
-- Filters: igualdad exacta sobre `meta` (objeto JSON).
+- Search: s¢lo HNSW (`cosine` o `dot`), `k` limitado por config; filtros por igualdad exacta sobre `meta` JSON.
+- Deletes = tombstone en `vectors.bin` (queda deuda de compactaci¢n).
+- Arranque:
+  1. Leer `manifest`.
+  2. Reproducir `vectors.bin` en orden de append (normalizando vectores `dot`).
+  3. Reconstruir HNSW usando `upsert_count` como baseline de capacidad.
 
 ## SSE
 - Endpoint: `GET /v1/stream?since=...&types=...&key_prefix=...&collection=...`

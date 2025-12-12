@@ -7,9 +7,9 @@ use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
@@ -195,6 +195,8 @@ fn gap_event(n: u64, last_sent_offset: &mut u64, last_published_offset: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::EventRecord;
+    use serde_json::json;
 
     #[test]
     fn gap_event_advances_offsets() {
@@ -203,5 +205,43 @@ mod tests {
         assert_eq!(last, 25);
         let s = format!("{:?}", ev);
         assert!(s.contains("gap"));
+    }
+
+    #[test]
+    fn matches_filters_accepts_collection_match() {
+        let ev = EventRecord {
+            offset: 1,
+            ts_ms: 0,
+            event_type: "vector_upserted".to_string(),
+            data: json!({
+                "collection": "docs",
+                "id": "v1"
+            }),
+        };
+        assert!(matches_filters(
+            &ev,
+            Some(&vec!["vector_upserted".to_string()]),
+            None,
+            Some("docs")
+        ));
+    }
+
+    #[test]
+    fn matches_filters_rejects_other_collection() {
+        let ev = EventRecord {
+            offset: 1,
+            ts_ms: 0,
+            event_type: "vector_upserted".to_string(),
+            data: json!({
+                "collection": "docs",
+                "id": "v1"
+            }),
+        };
+        assert!(!matches_filters(
+            &ev,
+            Some(&vec!["vector_upserted".to_string()]),
+            None,
+            Some("logs")
+        ));
     }
 }

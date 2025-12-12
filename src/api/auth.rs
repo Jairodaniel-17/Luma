@@ -1,9 +1,9 @@
 use crate::api::errors::ApiError;
+use crate::api::AppState;
 use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
-use crate::api::AppState;
 use subtle::ConstantTimeEq;
 
 pub async fn auth_middleware(

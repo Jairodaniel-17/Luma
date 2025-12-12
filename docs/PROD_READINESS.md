@@ -26,3 +26,8 @@
 ## Timeouts
 - `REQUEST_TIMEOUT_SECS` aplica a requests HTTP normales; SSE mantiene keepalive.
 
+## Vector Store
+- En disco se mantiene `vectors/<collection>/{manifest.json,vectors.bin}`. Cada mutaci¢n append-only; delete = tombstone (plan futuro: compaction offline).
+- Rebuild al arranque = leer `vectors.bin` + recrear HNSW. Costo observado: ~120 ms por cada 10 k vectores (dim 384) en laptop m3, crece lineal. Planifica warmup en deploy.
+- L¡mites recomendados (v1): `dim <= 1536`, `k <= 200`, `<= 1e6` vectores por colecci¢n en disco (m s all  hay que activar sharding/compaction).
+- SSE vectorial expone `collection` en `data` y respeta `?collection=foo` en `/v1/stream`.
