@@ -374,6 +374,11 @@ fn map_vector_error(err: VectorError) -> ApiError {
             "already_exists",
             "id already exists",
         ),
+        VectorError::InvalidManifest | VectorError::Persistence => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "persistence_error",
+            "vector persistence error",
+        ),
     }
 }
 
