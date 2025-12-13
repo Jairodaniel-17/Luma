@@ -213,7 +213,7 @@ Deja ganchos claros para escalar después sin reescribir todo:
 - `vector.search` valida dimensión y métrica; devuelve top-k correcto.
 - `add/upsert/update/delete` actualizan index y emiten eventos SSE.
 - Manejo de errores claro (HTTP codes + JSON error).
-- Config simple: `PORT`, `SNAPSHOT_INTERVAL`, `MAX_LOG_MB`, etc. (`API_KEY` queda opcional mientras auth siga desactivada).
+- Config simple: `PORT_RUST_KISS_VDB`, `SNAPSHOT_INTERVAL`, `MAX_LOG_MB`, etc. (`API_KEY` queda opcional mientras auth siga desactivada).
 - Documentación suficiente para que alguien lo use sin preguntarte nada.
 
 ---

@@ -2,10 +2,18 @@ $ErrorActionPreference = "Stop"
 
 param(
   [int]$N = 1000,
-  [string]$Base = "http://localhost:8080",
+  [string]$Base,
   [string]$Since = "0",
   [string]$Types = "state_updated,state_deleted,vector_added,vector_upserted,vector_updated,vector_deleted,gap"
 )
+
+if (-not $PSBoundParameters.ContainsKey('Base') -or [string]::IsNullOrWhiteSpace($Base)) {
+  $port = $env:PORT_RUST_KISS_VDB
+  if ([string]::IsNullOrWhiteSpace($port)) {
+    $port = "9917"
+  }
+  $Base = "http://localhost:$port"
+}
 
 $url = "$Base/v1/stream?since=$Since&types=$Types"
 

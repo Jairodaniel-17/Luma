@@ -35,10 +35,10 @@ cargo run --bin rust-kiss-vdb -- --logs info
 ```
 
 1. **SSE**  
-   `curl -N "http://localhost:8080/v1/stream?since=0"`
+   `curl -N "http://localhost:9917/v1/stream?since=0"`
 2. **Docs vivas**  
-   - Swagger UI: <http://localhost:8080/docs>  
-   - OpenAPI: <http://localhost:8080/openapi.yaml>
+   - Swagger UI: <http://localhost:9917/docs>  
+   - OpenAPI: <http://localhost:9917/openapi.yaml>
 3. **Demo end-to-end**  
    `scripts\demo.ps1` (crea coleccion vectorial, publica estado y muestra eventos).
 
@@ -50,14 +50,14 @@ Variables de entorno criticas:
 
 | Variable | Default | Nota |
 | --- | --- | --- |
-| `PORT` | `8080` | Puerto HTTP unico. |
+| `PORT_RUST_KISS_VDB` | `9917` | Puerto HTTP unico (CLI `--port` manda si se define). |
 | `DATA_DIR` | vacio | Activa WAL segmentado + snapshot + storage vectorial en disco. |
 | `SNAPSHOT_INTERVAL_SECS` | `30` | Bloquea WAL breve y rota segmentos. |
 | `EVENT_BUFFER_SIZE` | `10000` | Buffer de replay in-memory. |
 | `LIVE_BROADCAST_CAPACITY` | `4096` | Fijar mas alto si hay bursts SSE. |
 | `MAX_*` | ver `docs/CONFIG.md` | Limites anti-DoS (body/json/key/id/dim/k). |
 
-Flag CLI: `--logs info|warning|error|critical`.
+Flags CLI: `--logs info|warning|error|critical`, `--port <u16>` (prioridad: CLI `--port` -> `PORT_RUST_KISS_VDB` -> `9917`).
 
 Ejemplos avanzados en `docs/CONFIG.md`.
 

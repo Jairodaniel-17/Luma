@@ -1,6 +1,10 @@
 $ErrorActionPreference = "Stop"
 
-$base = "http://localhost:8080"
+$port = $env:PORT_RUST_KISS_VDB
+if ([string]::IsNullOrWhiteSpace($port)) {
+  $port = "9917"
+}
+$base = "http://localhost:$port"
 
 Write-Host "Create collection docs"
 curl.exe -sS -X POST "$base/v1/vector/docs" -H "Content-Type: application/json" -d "{\"dim\":3,\"metric\":\"cosine\"}" | Out-Host

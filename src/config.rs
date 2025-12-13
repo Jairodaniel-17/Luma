@@ -23,10 +23,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let port = std::env::var("PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8080);
+        let port = resolve_port();
 
         let api_key = std::env::var("API_KEY").unwrap_or_else(|_| "dev".to_string());
         let data_dir = std::env::var("DATA_DIR").ok();
@@ -118,4 +115,34 @@ impl Config {
             cors_allowed_origins,
         })
     }
+}
+
+fn resolve_port() -> u16 {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--port" {
+            if let Some(value) = args.next() {
+                if let Ok(port) = value.parse::<u16>() {
+                    return port;
+                }
+                eprintln!(
+                    "Valor de puerto invalido `{value}` para --port. Cayendo a otras fuentes."
+                );
+            } else {
+                eprintln!("`--port` requiere un valor. Cayendo a otras fuentes.");
+            }
+            continue;
+        }
+    }
+
+    if let Ok(value) = std::env::var("PORT_RUST_KISS_VDB") {
+        if let Ok(port) = value.parse::<u16>() {
+            return port;
+        }
+        eprintln!(
+            "Valor de puerto invalido `{value}` para `PORT_RUST_KISS_VDB`. Usando valor por defecto."
+        );
+    }
+
+    9917
 }

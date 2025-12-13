@@ -2,9 +2,17 @@ $ErrorActionPreference = "Stop"
 
 param(
   [int]$N = 2000,
-  [string]$Base = "http://localhost:8080",
+  [string]$Base,
   [string]$Prefix = "load:"
 )
+
+if (-not $PSBoundParameters.ContainsKey('Base') -or [string]::IsNullOrWhiteSpace($Base)) {
+  $port = $env:PORT_RUST_KISS_VDB
+  if ([string]::IsNullOrWhiteSpace($port)) {
+    $port = "9917"
+  }
+  $Base = "http://localhost:$port"
+}
 
 Write-Host "Writing $N state keys..."
 for ($i = 0; $i -lt $N; $i++) {

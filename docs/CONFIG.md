@@ -2,7 +2,7 @@
 
 Variables de entorno:
 
-- `PORT` (default `8080`)
+- `PORT_RUST_KISS_VDB` (default `9917`; CLI `--port` tiene prioridad)
 - `API_KEY` (default `dev`, actualmente ignorado hasta reintroducir auth)
 - `DATA_DIR` (opcional; si existe habilita WAL + snapshots)
 - `SNAPSHOT_INTERVAL_SECS` (default `30`)
@@ -26,10 +26,15 @@ Flags de arranque:
 
 Ejemplo:
 ```bash
-set PORT=8080
+set PORT_RUST_KISS_VDB=12000
 set DATA_DIR=.\data
 set SNAPSHOT_INTERVAL_SECS=10
 set WAL_SEGMENT_MAX_BYTES=16777216
 set WAL_RETENTION_SEGMENTS=16
 cargo run --bin rust-kiss-vdb -- --logs warning
+```
+
+Override puntual via CLI:
+```bash
+cargo run --bin rust-kiss-vdb -- --port 13000
 ```
