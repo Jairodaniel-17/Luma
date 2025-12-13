@@ -91,8 +91,8 @@ Debe soportar:
 
 ## Autenticación
 
-- API Key en header: `Authorization: Bearer <key>` (v1)
-- Rate limiting opcional simple (token bucket)
+- La v1 actual expone los endpoints sin autenticación interna. Documenta cómo protegerlos detrás de un proxy o deja hooks claros para reactivar `Authorization: Bearer <key>` cuando sea necesario.
+- Rate limiting opcional simple (token bucket) sigue siendo deseable cuando se reintroduzca auth.
 
 ## HTTP Endpoints sugeridos
 
@@ -213,7 +213,7 @@ Deja ganchos claros para escalar después sin reescribir todo:
 - `vector.search` valida dimensión y métrica; devuelve top-k correcto.
 - `add/upsert/update/delete` actualizan index y emiten eventos SSE.
 - Manejo de errores claro (HTTP codes + JSON error).
-- Config simple: `PORT`, `API_KEY`, `SNAPSHOT_INTERVAL`, `MAX_LOG_MB`, etc.
+- Config simple: `PORT`, `SNAPSHOT_INTERVAL`, `MAX_LOG_MB`, etc. (`API_KEY` queda opcional mientras auth siga desactivada).
 - Documentación suficiente para que alguien lo use sin preguntarte nada.
 
 ---

@@ -52,7 +52,6 @@ async fn sse_receives_state_updated() {
 
     let resp = client
         .get(format!("{}/v1/events?types=state_updated&since=0", base))
-        .header("Authorization", "Bearer test")
         .send()
         .await
         .unwrap();
@@ -60,7 +59,6 @@ async fn sse_receives_state_updated() {
 
     let put_fut = client
         .put(format!("{}/v1/state/job:sse", base))
-        .header("Authorization", "Bearer test")
         .json(&serde_json::json!({"value":{"progress":1}}))
         .send();
 

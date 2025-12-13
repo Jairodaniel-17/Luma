@@ -6,7 +6,6 @@ Objetivo: DB single-node KISS con **State Store + Event Store + SSE + Vector Sto
 
 ### API HTTP (Control Plane)
 - `axum` + `tokio`.
-- Auth v1: `Authorization: Bearer <API_KEY>`.
 - Endpoints: `state`, `vector`, `events (SSE)`, `health`, `metrics`.
 
 ### Engine (State + Events)
