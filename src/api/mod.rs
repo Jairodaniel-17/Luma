@@ -15,7 +15,6 @@ use std::time::Duration;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
-
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Engine,
