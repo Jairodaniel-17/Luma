@@ -51,7 +51,6 @@ async fn state_put_get() {
 
     let put = client
         .put(format!("{}/v1/state/job:1", base))
-        .header("Authorization", "Bearer test")
         .json(&serde_json::json!({"value":{"progress":1}}))
         .send()
         .await
@@ -60,7 +59,6 @@ async fn state_put_get() {
 
     let got = client
         .get(format!("{}/v1/state/job:1", base))
-        .header("Authorization", "Bearer test")
         .send()
         .await
         .unwrap();
@@ -79,7 +77,6 @@ async fn vector_create_upsert_search() {
 
     let create = client
         .post(format!("{}/v1/vector/docs", base))
-        .header("Authorization", "Bearer test")
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .send()
         .await
@@ -88,7 +85,6 @@ async fn vector_create_upsert_search() {
 
     let upsert = client
         .post(format!("{}/v1/vector/docs/upsert", base))
-        .header("Authorization", "Bearer test")
         .json(&serde_json::json!({"id":"a","vector":[1.0,0.0],"meta":{"tag":"x"}}))
         .send()
         .await
@@ -97,7 +93,6 @@ async fn vector_create_upsert_search() {
 
     let search = client
         .post(format!("{}/v1/vector/docs/search", base))
-        .header("Authorization", "Bearer test")
         .json(&serde_json::json!({"vector":[0.9,0.1],"k":1,"include_meta":true}))
         .send()
         .await

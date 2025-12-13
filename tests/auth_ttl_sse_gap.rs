@@ -49,36 +49,6 @@ fn base_config() -> Config {
 }
 
 #[tokio::test]
-async fn auth_missing_and_wrong() {
-    let (base, shutdown) = start_with_config(base_config()).await;
-    let client = reqwest::Client::new();
-
-    let ok = client
-        .get(format!("{}/v1/health", base))
-        .send()
-        .await
-        .unwrap();
-    assert!(ok.status().is_success());
-
-    let missing = client
-        .get(format!("{}/v1/state/x", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), 401);
-
-    let wrong = client
-        .get(format!("{}/v1/state/x", base))
-        .header("Authorization", "Bearer wrong")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(wrong.status(), 401);
-
-    let _ = shutdown.send(());
-}
-
-#[tokio::test]
 async fn ttl_emits_event() {
     let (base, shutdown) = start_with_config(base_config()).await;
     let client = reqwest::Client::new();
@@ -88,7 +58,6 @@ async fn ttl_emits_event() {
             "{}/v1/stream?types=state_deleted&key_prefix=ttl:",
             base
         ))
-        .header("Authorization", "Bearer test")
         .send()
         .await
         .unwrap();
@@ -96,7 +65,6 @@ async fn ttl_emits_event() {
 
     let put = client
         .put(format!("{}/v1/state/ttl:1", base))
-        .header("Authorization", "Bearer test")
         .json(&serde_json::json!({"value":{"v":1},"ttl_ms":50}))
         .send()
         .await
@@ -132,7 +100,6 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
 
     let resp = client
         .get(format!("{}/v1/stream?types=state_updated&since=0", base))
-        .header("Authorization", "Bearer test")
         .send()
         .await
         .unwrap();
@@ -144,7 +111,6 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
     for i in 0..5000u32 {
         let _ = client
             .put(format!("{}/v1/state/lag:{}", base, i))
-            .header("Authorization", "Bearer test")
             .json(&serde_json::json!({"value":{"i":i}}))
             .send()
             .await

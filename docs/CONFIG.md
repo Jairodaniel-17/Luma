@@ -3,7 +3,7 @@
 Variables de entorno:
 
 - `PORT` (default `8080`)
-- `API_KEY` (default `dev`)
+- `API_KEY` (default `dev`, actualmente ignorado hasta reintroducir auth)
 - `DATA_DIR` (opcional; si existe habilita WAL + snapshots)
 - `SNAPSHOT_INTERVAL_SECS` (default `30`)
 - `EVENT_BUFFER_SIZE` (default `10000`)
@@ -23,7 +23,6 @@ Variables de entorno:
 Ejemplo:
 ```bash
 set PORT=8080
-set API_KEY=dev
 set DATA_DIR=.\data
 set SNAPSHOT_INTERVAL_SECS=10
 set WAL_SEGMENT_MAX_BYTES=16777216
