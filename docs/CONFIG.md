@@ -20,6 +20,10 @@ Variables de entorno:
 - `MAX_K` (default `256`)
 - `CORS_ALLOWED_ORIGINS` (opcional; lista separada por comas)
 
+Flags de arranque:
+
+- `--logs info|warning|error|critical` (default `info`; controla el nivel de logging sin tocar `RUST_LOG`)
+
 Ejemplo:
 ```bash
 set PORT=8080
@@ -27,4 +31,5 @@ set DATA_DIR=.\data
 set SNAPSHOT_INTERVAL_SECS=10
 set WAL_SEGMENT_MAX_BYTES=16777216
 set WAL_RETENTION_SEGMENTS=16
+cargo run --bin rust-kiss-vdb -- --logs warning
 ```

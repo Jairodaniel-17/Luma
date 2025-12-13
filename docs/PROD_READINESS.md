@@ -32,6 +32,10 @@
 
 - `REQUEST_TIMEOUT_SECS` aplica a requests HTTP normales; SSE mantiene keepalive.
 
+## Logs
+
+- Usa `--logs info|warning|error|critical` para ajustar el nivel sin tocar `RUST_LOG`. En producción se recomienda `--logs warning` + redirect estándar a tu stack centralizado.
+
 ## Vector Store
 
 - En disco se mantiene `vectors/<collection>/{manifest.json,vectors.bin}`. Cada mutaci¢n append-only; delete = tombstone (plan futuro: compaction offline).

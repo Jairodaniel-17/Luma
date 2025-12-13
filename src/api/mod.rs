@@ -1,5 +1,6 @@
 mod auth;
 mod errors;
+mod routes_docs;
 mod routes_events;
 mod routes_state;
 mod routes_vector;
@@ -41,7 +42,8 @@ pub fn router(engine: Engine, config: Config) -> Router {
                 .allow_methods(Any)
         }
     };
-    Router::new()
+    Router::<AppState>::new()
+        .merge(routes_docs::routes_docs())
         .route("/v1/health", get(routes_state::health))
         .route("/v1/metrics", get(routes_state::metrics))
         .route("/v1/state", get(routes_state::list))
