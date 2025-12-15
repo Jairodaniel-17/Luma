@@ -1,12 +1,15 @@
 mod auth;
 mod errors;
+mod routes_doc;
 mod routes_docs;
 mod routes_events;
+mod routes_sql;
 mod routes_state;
 mod routes_vector;
 
 use crate::config::Config;
 use crate::engine::Engine;
+use crate::sqlite::SqliteService;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
@@ -19,10 +22,15 @@ use tower_http::trace::TraceLayer;
 pub struct AppState {
     pub engine: Engine,
     pub config: Config,
+    pub sqlite: Option<SqliteService>,
 }
 
-pub fn router(engine: Engine, config: Config) -> Router {
-    let state = AppState { engine, config };
+pub fn router(engine: Engine, config: Config, sqlite: Option<SqliteService>) -> Router {
+    let state = AppState {
+        engine,
+        config,
+        sqlite,
+    };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
             .allow_origin(Any)
@@ -46,9 +54,14 @@ pub fn router(engine: Engine, config: Config) -> Router {
         .route("/v1/health", get(routes_state::health))
         .route("/v1/metrics", get(routes_state::metrics))
         .route("/v1/state", get(routes_state::list))
+        .route("/v1/state/batch_put", post(routes_state::batch_put))
         .route("/v1/state/:key", get(routes_state::get))
         .route("/v1/state/:key", put(routes_state::put))
         .route("/v1/state/:key", delete(routes_state::delete))
+        .route("/v1/doc/:collection/:id", put(routes_doc::put))
+        .route("/v1/doc/:collection/:id", get(routes_doc::get))
+        .route("/v1/doc/:collection/:id", delete(routes_doc::delete))
+        .route("/v1/doc/:collection/find", post(routes_doc::find))
         .route("/v1/events", get(routes_events::events))
         .route("/v1/stream", get(routes_events::stream))
         .route(
@@ -57,10 +70,20 @@ pub fn router(engine: Engine, config: Config) -> Router {
         )
         .route("/v1/vector/:collection/add", post(routes_vector::add))
         .route("/v1/vector/:collection/upsert", post(routes_vector::upsert))
+        .route(
+            "/v1/vector/:collection/upsert_batch",
+            post(routes_vector::upsert_batch),
+        )
         .route("/v1/vector/:collection/update", post(routes_vector::update))
         .route("/v1/vector/:collection/delete", post(routes_vector::delete))
+        .route(
+            "/v1/vector/:collection/delete_batch",
+            post(routes_vector::delete_batch),
+        )
         .route("/v1/vector/:collection/get", get(routes_vector::get))
         .route("/v1/vector/:collection/search", post(routes_vector::search))
+        .route("/v1/sql/query", post(routes_sql::query))
+        .route("/v1/sql/exec", post(routes_sql::exec))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

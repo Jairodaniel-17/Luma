@@ -1,4 +1,4 @@
-use crate::api::errors::ApiError;
+use crate::api::errors::{ApiError, ErrorBody};
 use crate::api::AppState;
 use crate::engine::EngineError;
 use crate::vector::{Metric, SearchRequest, VectorError, VectorItem};
@@ -50,7 +50,7 @@ pub async fn create_collection(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AddBody {
     pub id: String,
     pub vector: Vec<f32>,
@@ -60,6 +60,29 @@ pub struct AddBody {
 #[derive(Debug, Serialize)]
 pub struct OkResponse {
     pub ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertBatchBody {
+    pub items: Vec<AddBody>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteBatchBody {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorBatchResponse {
+    pub results: Vec<VectorBatchResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum VectorBatchResult {
+    Upserted { id: String },
+    Deleted { id: String },
+    Error { id: String, error: ErrorBody },
 }
 
 pub async fn add(
@@ -162,6 +185,126 @@ pub async fn upsert(
     Ok(axum::Json(OkResponse { ok: true }))
 }
 
+pub async fn upsert_batch(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<UpsertBatchBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if collection.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection too long",
+        ));
+    }
+    if body.items.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "items required",
+        ));
+    }
+    if body.items.len() > state.config.max_vector_batch {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "too many items",
+        ));
+    }
+    let mut results = Vec::with_capacity(body.items.len());
+    for op in body.items {
+        let AddBody { id, vector, meta } = op;
+        if id.len() > state.config.max_id_len {
+            results.push(VectorBatchResult::Error {
+                id,
+                error: ErrorBody {
+                    error: "invalid_argument",
+                    message: "id too long".into(),
+                },
+            });
+            continue;
+        }
+        if vector.len() > state.config.max_vector_dim {
+            results.push(VectorBatchResult::Error {
+                id,
+                error: ErrorBody {
+                    error: "invalid_argument",
+                    message: "vector too large".into(),
+                },
+            });
+            continue;
+        }
+        if let Some(meta) = &meta {
+            let estimated = serde_json::to_vec(meta).map(|v| v.len()).unwrap_or(0);
+            if estimated > state.config.max_json_bytes {
+                results.push(VectorBatchResult::Error {
+                    id,
+                    error: ErrorBody {
+                        error: "payload_too_large",
+                        message: "meta too large".into(),
+                    },
+                });
+                continue;
+            }
+        }
+        match state.engine.vector_upsert(
+            &collection,
+            &id,
+            VectorItem {
+                vector,
+                meta: meta.unwrap_or(serde_json::Value::Null),
+            },
+        ) {
+            Ok(_) => results.push(VectorBatchResult::Upserted { id }),
+            Err(EngineError::Vector(VectorError::DimMismatch)) => {
+                results.push(VectorBatchResult::Error {
+                    id,
+                    error: ErrorBody {
+                        error: "dim_mismatch",
+                        message: "vector dimension mismatch".into(),
+                    },
+                });
+            }
+            Err(EngineError::Vector(VectorError::CollectionNotFound)) => {
+                return Err(map_vector_error(VectorError::CollectionNotFound));
+            }
+            Err(EngineError::Vector(VectorError::InvalidManifest)) => {
+                return Err(map_vector_error(VectorError::InvalidManifest));
+            }
+            Err(EngineError::Vector(VectorError::Persistence)) => {
+                return Err(map_vector_error(VectorError::Persistence));
+            }
+            Err(EngineError::Vector(VectorError::IdExists)) => {
+                results.push(VectorBatchResult::Error {
+                    id,
+                    error: ErrorBody {
+                        error: "already_exists",
+                        message: "id already exists".into(),
+                    },
+                });
+            }
+            Err(EngineError::Persistence(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "persistence_error",
+                    "failed to persist vector",
+                ));
+            }
+            Err(EngineError::Internal(_)) | Err(EngineError::State(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "internal error",
+                ));
+            }
+            Err(EngineError::Vector(other)) => {
+                return Err(map_vector_error(other));
+            }
+        }
+    }
+    Ok(axum::Json(VectorBatchResponse { results }))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateBody {
     pub id: String,
@@ -214,7 +357,7 @@ pub async fn update(
     Ok(axum::Json(OkResponse { ok: true }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DeleteBody {
     pub id: String,
 }
@@ -248,6 +391,83 @@ pub async fn delete(
         .vector_delete(&collection, &body.id)
         .map_err(map_engine_error)?;
     Ok(axum::Json(DeleteResponse { deleted: true }))
+}
+
+pub async fn delete_batch(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<DeleteBatchBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if collection.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection too long",
+        ));
+    }
+    if body.ids.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "ids required",
+        ));
+    }
+    if body.ids.len() > state.config.max_vector_batch {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "too many ids",
+        ));
+    }
+    let mut results = Vec::with_capacity(body.ids.len());
+    for id in body.ids {
+        if id.len() > state.config.max_id_len {
+            results.push(VectorBatchResult::Error {
+                id,
+                error: ErrorBody {
+                    error: "invalid_argument",
+                    message: "id too long".into(),
+                },
+            });
+            continue;
+        }
+        match state.engine.vector_delete(&collection, &id) {
+            Ok(_) => results.push(VectorBatchResult::Deleted { id }),
+            Err(EngineError::Vector(VectorError::IdNotFound)) => {
+                results.push(VectorBatchResult::Error {
+                    id,
+                    error: ErrorBody {
+                        error: "not_found",
+                        message: "id not found".into(),
+                    },
+                });
+            }
+            Err(EngineError::Vector(VectorError::CollectionNotFound)) => {
+                return Err(map_vector_error(VectorError::CollectionNotFound));
+            }
+            Err(EngineError::Vector(VectorError::InvalidManifest)) => {
+                return Err(map_vector_error(VectorError::InvalidManifest));
+            }
+            Err(EngineError::Vector(VectorError::Persistence)) => {
+                return Err(map_vector_error(VectorError::Persistence));
+            }
+            Err(EngineError::Persistence(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "persistence_error",
+                    "failed to persist vector",
+                ));
+            }
+            Err(_) => {
+                return Err(ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "internal error",
+                ));
+            }
+        }
+    }
+    Ok(axum::Json(VectorBatchResponse { results }))
 }
 
 #[derive(Debug, Deserialize)]

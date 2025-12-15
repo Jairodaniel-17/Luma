@@ -140,6 +140,59 @@ pub fn store_manifest(layout: &CollectionLayout, manifest: &Manifest) -> std::io
     write_manifest(layout, manifest)
 }
 
+pub fn rewrite_collection(
+    layout: &CollectionLayout,
+    manifest: &Manifest,
+    items: &HashMap<String, VectorItem>,
+) -> std::io::Result<Manifest> {
+    std::fs::create_dir_all(&layout.dir)?;
+    let tmp = layout.dir.join("vectors.bin.compacting");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)?;
+    let mut total_bytes = 0u64;
+    let mut total_records = 0u64;
+    let mut upserts = 0u64;
+
+    let mut entries: Vec<_> = items.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (id, item) in entries {
+        let record = Record {
+            offset: 0,
+            op: RecordOp::Upsert,
+            id: id.clone(),
+            vector: Some(item.vector.clone()),
+            meta: Some(item.meta.clone()),
+        };
+        let disk = disk_record_from(&record)?;
+        let payload = bincode::serialize(&disk).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "bincode serialize")
+        })?;
+        let len = payload.len() as u32;
+        file.write_all(&len.to_le_bytes())?;
+        file.write_all(&payload)?;
+        total_bytes = total_bytes.saturating_add(4 + payload.len() as u64);
+        total_records = total_records.saturating_add(1);
+        if record.op == RecordOp::Upsert {
+            upserts = upserts.saturating_add(1);
+        }
+    }
+    file.flush()?;
+    file.sync_data()?;
+    std::fs::rename(&tmp, &layout.bin_path)?;
+
+    let mut new_manifest = manifest.clone();
+    new_manifest.total_records = total_records;
+    new_manifest.live_count = items.len();
+    new_manifest.upsert_count = upserts;
+    new_manifest.file_len = total_bytes;
+    store_manifest(layout, &new_manifest)?;
+    Ok(new_manifest)
+}
+
 fn read_records(
     layout: &CollectionLayout,
     manifest: &Manifest,

@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let engine = Engine::new(config.clone()).unwrap();
-    let app = api::router(engine, config);
+    let app = api::router(engine, config, None);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -29,6 +29,7 @@ async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
 fn base_config() -> Config {
     Config {
         port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
         data_dir: None,
         snapshot_interval_secs: 3600,
@@ -44,7 +45,12 @@ fn base_config() -> Config {
         max_vector_dim: 4096,
         max_k: 256,
         max_json_bytes: 64 * 1024,
+        max_state_batch: 256,
+        max_vector_batch: 256,
+        max_doc_find: 100,
         cors_allowed_origins: None,
+        sqlite_enabled: false,
+        sqlite_path: None,
     }
 }
 

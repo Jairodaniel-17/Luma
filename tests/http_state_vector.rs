@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 async fn start() -> (String, oneshot::Sender<()>) {
     let config = Config {
         port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
         data_dir: None,
         snapshot_interval_secs: 30,
@@ -22,10 +23,15 @@ async fn start() -> (String, oneshot::Sender<()>) {
         max_vector_dim: 4096,
         max_k: 256,
         max_json_bytes: 64 * 1024,
+        max_state_batch: 256,
+        max_vector_batch: 256,
+        max_doc_find: 100,
         cors_allowed_origins: None,
+        sqlite_enabled: false,
+        sqlite_path: None,
     };
     let engine = Engine::new(config.clone()).unwrap();
-    let app = api::router(engine, config);
+    let app = api::router(engine, config, None);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -100,6 +106,42 @@ async fn vector_create_upsert_search() {
     assert!(search.status().is_success());
     let v: serde_json::Value = search.json().await.unwrap();
     assert_eq!(v["hits"][0]["id"], "a");
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn docstore_put_get_find() {
+    let (base, shutdown) = start().await;
+    let client = reqwest::Client::new();
+
+    let put = client
+        .put(format!("{}/v1/doc/users/u1", base))
+        .json(&serde_json::json!({"name":"Ada","role":"admin"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let get = client
+        .get(format!("{}/v1/doc/users/u1", base))
+        .send()
+        .await
+        .unwrap();
+    assert!(get.status().is_success());
+    let doc: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(doc["doc"]["name"], "Ada");
+
+    let find = client
+        .post(format!("{}/v1/doc/users/find", base))
+        .json(&serde_json::json!({"filter":{"role":"admin"},"limit":10}))
+        .send()
+        .await
+        .unwrap();
+    assert!(find.status().is_success());
+    let v: serde_json::Value = find.json().await.unwrap();
+    assert!(v["documents"].as_array().unwrap().len() >= 1);
+    assert_eq!(v["documents"][0]["doc"]["role"], "admin");
 
     let _ = shutdown.send(());
 }

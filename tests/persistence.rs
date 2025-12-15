@@ -8,6 +8,7 @@ async fn snapshot_and_wal_replay_no_loss() {
 
     let config = Config {
         port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
         data_dir: Some(data_dir.clone()),
         snapshot_interval_secs: 3600,
@@ -23,7 +24,12 @@ async fn snapshot_and_wal_replay_no_loss() {
         max_vector_dim: 4096,
         max_k: 256,
         max_json_bytes: 64 * 1024,
+        max_state_batch: 256,
+        max_vector_batch: 256,
+        max_doc_find: 100,
         cors_allowed_origins: None,
+        sqlite_enabled: false,
+        sqlite_path: None,
     };
 
     let engine = Engine::new(config.clone()).unwrap();
@@ -58,6 +64,7 @@ async fn state_survives_restart_without_wal() {
 
     let config = Config {
         port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
         data_dir: Some(data_dir.clone()),
         snapshot_interval_secs: 3600,
@@ -73,7 +80,12 @@ async fn state_survives_restart_without_wal() {
         max_vector_dim: 4096,
         max_k: 256,
         max_json_bytes: 64 * 1024,
+        max_state_batch: 256,
+        max_vector_batch: 256,
+        max_doc_find: 100,
         cors_allowed_origins: None,
+        sqlite_enabled: false,
+        sqlite_path: None,
     };
 
     let engine = Engine::new(config.clone()).unwrap();

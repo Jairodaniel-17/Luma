@@ -6,6 +6,7 @@ use serde_json::json;
 fn config_with_dir(dir: &str) -> Config {
     Config {
         port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
         data_dir: Some(dir.to_string()),
         snapshot_interval_secs: 3600,
@@ -21,7 +22,12 @@ fn config_with_dir(dir: &str) -> Config {
         max_vector_dim: 4096,
         max_k: 256,
         max_json_bytes: 64 * 1024,
+        max_state_batch: 256,
+        max_vector_batch: 256,
+        max_doc_find: 100,
         cors_allowed_origins: None,
+        sqlite_enabled: false,
+        sqlite_path: None,
     }
 }
 

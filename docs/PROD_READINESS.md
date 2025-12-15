@@ -2,8 +2,9 @@
 
 ## Requisitos mínimos
 
-- **Durability**: define `DATA_DIR` en producción (habilita WAL segmentado + snapshot).
-- **Auth**: la v1 **no** aplica autenticación interna; publica detrás de un proxy/API Gateway si necesitas control de acceso.
+- **Durabilidad**: define `DATA_DIR` en producción (habilita WAL segmentado + snapshots).
+- **Bind seguro**: sin flags el binario sólo escucha en `127.0.0.1`. Usa `--bind 0.0.0.0` o `--unsafe-bind` sólo si lo pones detrás de un proxy.
+- **Auth**: exporta `RUSTKISS_API_KEY`/`API_KEY` para exigir `Authorization: Bearer …`. Si no lo haces, las rutas quedan abiertas (útil para laboratorio, no prod).
 
 ## SSE tuning
 
@@ -38,7 +39,14 @@
 
 ## Vector Store
 
-- En disco se mantiene `vectors/<collection>/{manifest.json,vectors.bin}`. Cada mutaci¢n append-only; delete = tombstone (plan futuro: compaction offline).
-- Rebuild al arranque = leer `vectors.bin` + recrear HNSW. Costo observado: ~120 ms por cada 10 k vectores (dim 384) en laptop m3, crece lineal. Planifica warmup en deploy.
-- L¡mites recomendados (v1): `dim <= 1536`, `k <= 200`, `<= 1e6` vectores por colecci¢n en disco (más all  hay que activar sharding/compaction).
-- SSE vectorial expone `collection` en `data` y respeta `?collection=foo` en `/v1/stream`.
+- En disco se mantiene `vectors/<collection>/{manifest.json,vectors.bin}`. Cada mutaci¢n es append-only; borra = tombstone. Usa `rust-kiss-vdb vacuum --collection <name>` para compactar sin reiniciar.
+- Rebuild al arranque = leer `vectors.bin` + recrear segmentos/HNSW. Costo observado: ~120 ms por cada 10k vectores (dim 384) en laptop m3.
+- Límites recomendados (v1): `dim <= 1536`, `k <= 200`, `<= 1e6` vectores por colección (más allá considera sharding o instancias extra).
+- SSE vectorial expone `collection` en `data` y respeta `?collection=foo` en `/v1/stream`. También se envía `event: vector_*` para auditar ingestas.
+- Los filtros por metadata usan un índice exact-match; dimensiona la RAM según tu cardinalidad.
+
+## DocStore / SQL
+
+- DocStore vive sobre KV (`doc:{collection}:{id}` + `docidx:*`). Ideal para dashboards/configuraciones ligeras.
+- SQLite embebido (`SQLITE_ENABLED=1`) comparte proceso pero NO WAL; respáldalo como parte del backup del `DATA_DIR`.
+- Ambos módulos reutilizan el middleware de auth/API key; si no los necesitas mantenlos desactivados.

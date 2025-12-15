@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import fitz  # PyMuPDF
 import httpx
+from rustkissvdb import Client as RustClient, RustKissVDBError
 
 # ---------------------------
 #  RustKissVDB minimal client
@@ -14,42 +15,31 @@ import httpx
 class RustKissVDBClient:
     def __init__(self, base_url: Optional[str] = None, timeout: float = 60.0):
         port = int(os.getenv("PORT_RUST_KISS_VDB", "9917"))
-        self.base_url = (base_url or f"http://localhost:{port}").rstrip("/")
-        self.http = httpx.Client(timeout=timeout)
-
-    def _url(self, path: str) -> str:
-        return f"{self.base_url}{path}"
-
-    def _raise(self, r: httpx.Response) -> None:
-        if r.status_code >= 400:
-            try:
-                data = r.json()
-                msg = f"{data.get('error')} - {data.get('message')}"
-            except Exception:
-                msg = r.text
-            raise RuntimeError(f"HTTP {r.status_code}: {msg}")
+        resolved = (base_url or f"http://localhost:{port}").rstrip("/")
+        api_key = os.getenv("RUSTKISS_API_KEY")
+        self._client = RustClient(base_url=resolved, api_key=api_key, timeout=timeout)
 
     def health(self) -> bool:
-        r = self.http.get(self._url("/v1/health"))
-        self._raise(r)
+        self._client.request("GET", "/v1/health")
         return True
 
     def state_put(self, key: str, value: Any) -> Dict[str, Any]:
-        r = self.http.put(self._url(f"/v1/state/{key}"), json={"value": value})
-        self._raise(r)
-        return r.json()
+        return self._client.state.put(key, value=value)
 
     def vector_create(self, collection: str, dim: int, metric: str = "cosine") -> None:
-        r = self.http.post(self._url(f"/v1/vector/{collection}"), json={"dim": dim, "metric": metric})
-        if r.status_code not in (200, 409):  # 409 Already exists
-            self._raise(r)
+        try:
+            self._client.vector.create_collection(collection, dim=dim, metric=metric)
+        except RustKissVDBError as exc:
+            if "already_exists" not in str(exc):
+                raise
 
     def vector_upsert(self, collection: str, _id: str, vector: List[float], meta: Any) -> None:
-        r = self.http.post(
-            self._url(f"/v1/vector/{collection}/upsert"),
-            json={"id": _id, "vector": vector, "meta": meta},
+        self._client.vector.upsert(
+            collection,
+            vector_id=_id,
+            vector=vector,
+            meta=meta,
         )
-        self._raise(r)
 
 
 # ---------------------------
@@ -114,7 +104,7 @@ def read_pdf_pages(pdf_path: str) -> List[Dict[str, Any]]:
 
 
 def main():
-    PDF_PATH = r"C:\Users\jairo\Downloads\JDMT_EXAME FINAL DE PORTUGUÊS.pdf"
+    PDF_PATH = os.getenv("PDF_PATH", r"C:\Users\jairo\Downloads\JDMT_EXAME FINAL DE PORTUGUÊS.pdf")
 
     COLLECTION = os.getenv("VDB_COLLECTION", "docs_portugues_exam").replace("-", "_")
     METRIC = os.getenv("VDB_METRIC", "cosine")

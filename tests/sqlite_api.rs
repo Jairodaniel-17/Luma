@@ -1,16 +1,15 @@
-use futures_util::StreamExt;
 use rust_kiss_vdb::api;
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
 use std::net::SocketAddr;
 use tokio::sync::oneshot;
 
-async fn start() -> (String, oneshot::Sender<()>) {
+async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
     let config = Config {
         port: 0,
         bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
-        data_dir: None,
+        data_dir: Some(data_dir),
         snapshot_interval_secs: 30,
         event_buffer_size: 1000,
         live_broadcast_capacity: 1024,
@@ -28,11 +27,17 @@ async fn start() -> (String, oneshot::Sender<()>) {
         max_vector_batch: 256,
         max_doc_find: 100,
         cors_allowed_origins: None,
-        sqlite_enabled: false,
+        sqlite_enabled: true,
         sqlite_path: None,
     };
     let engine = Engine::new(config.clone()).unwrap();
-    let app = api::router(engine, config, None);
+    let sqlite = Some(
+        rust_kiss_vdb::sqlite::SqliteService::new(
+            config.data_dir.as_ref().unwrap().to_string() + "/sqlite/rustkiss.db",
+        )
+        .unwrap(),
+    );
+    let app = api::router(engine, config, sqlite);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -52,40 +57,37 @@ async fn start() -> (String, oneshot::Sender<()>) {
 }
 
 #[tokio::test]
-async fn sse_receives_state_updated() {
-    let (base, shutdown) = start().await;
+async fn sqlite_exec_and_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_string_lossy().to_string();
+    let (base, shutdown) = start_with_sqlite(data_dir).await;
     let client = reqwest::Client::new();
 
-    let resp = client
-        .get(format!("{}/v1/events?types=state_updated&since=0", base))
+    let create = client
+        .post(format!("{}/v1/sql/exec", base))
+        .json(&serde_json::json!({"sql":"CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT)","params":[]}))
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert!(create.status().is_success());
 
-    let put_fut = client
-        .put(format!("{}/v1/state/job:sse", base))
-        .json(&serde_json::json!({"value":{"progress":1}}))
-        .send();
+    let insert = client
+        .post(format!("{}/v1/sql/exec", base))
+        .json(&serde_json::json!({"sql":"INSERT INTO notes(body) VALUES (?)","params":["hola"]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(insert.status().is_success());
 
-    let mut stream = resp.bytes_stream();
-    let _put = put_fut.await.unwrap();
-
-    let mut buf = String::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => panic!("timeout waiting for sse"),
-            chunk = stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.unwrap();
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                if buf.contains("event:state_updated") || buf.contains("event: state_updated") {
-                    break;
-                }
-            }
-        }
-    }
+    let query = client
+        .post(format!("{}/v1/sql/query", base))
+        .json(&serde_json::json!({"sql":"SELECT body FROM notes","params":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(query.status().is_success());
+    let body: serde_json::Value = query.json().await.unwrap();
+    assert_eq!(body["rows"][0]["body"], "hola");
 
     let _ = shutdown.send(());
 }

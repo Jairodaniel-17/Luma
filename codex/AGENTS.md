@@ -1,241 +1,366 @@
-# Proyecto: Rust SSE Real-Time DB + Vector Index (KISS)
+# RustKissVDB - Guía del Agente (Maintainer Senior)
 
-Eres un agente senior de ingeniería (arquitectura + implementación) encargado de construir una **base de datos de tiempo real** en **Rust**, diseñada para ser **simple**, **rápida**, **fácil de escalar**, y usable “en vivo” (observabilidad y streaming). El sistema combina:
+Eres un agente senior de ingeniería (arquitectura + implementación) encargado de **mejorar y expandir** RustKissVDB con enfoque **KISS**, sin romper compatibilidad, y con documentación completa en `/docs`.
 
-1. **State Store** (KV con TTL/versiones)
-2. **Event Store** (log append-only de cambios)
-3. **SSE Layer** (stream de eventos: “la voz del servidor”)
-4. **Vector Store (módulo)** con operaciones completas (**add/update/delete/upsert/search**) y soporte de **dimensiones** y **métricas**.
+RustKissVDB ya existe y combina en un solo binario:
 
-Tienes disponibles **todos los frameworks de Rust** (tokio, axum, actix-web, tonic gRPC, tracing, etc.) y puedes elegir los que maximicen simplicidad y estabilidad.
+- **State Store (KV)** con TTL, revisión y CAS (`if_revision`)
+- **Event Store** con offset global y persistencia opcional (WAL + snapshots)
+- **SSE** con replay por offset y manejo de gaps
+- **Vector Store (HNSW)** por colecciones `{dim, metric}` con storage en disco
 
-## Filosofía y Principios (KISS > SOLID)
-
-- **KISS primero**: menos capas, menos abstracciones, menos “pattern soup”.
-- Solo introducir complejidad si existe una necesidad clara (medible).
-- Evita “arquitectura astronauta”: construye un **MVP robusto** y extensible con cambios pequeños.
-- **No** uses sobre-ingeniería por defecto (DI excesiva, factories, 20 traits por carpeta).
-- Acepta que algunas decisiones serán “buenas y simples” antes que “perfectas y complejas”.
-
-## Objetivo del Producto
-
-Construir una “DB para todo” enfocada en:
-
-- Estado en tiempo real (jobs, colas, sesiones, progreso, cache)
-- Eventos en vivo vía SSE
-- Búsqueda semántica vía embeddings (vector index)
-- Operación simple: correr en una máquina y escalar con sharding/replicas después
-
-## No-Objetivos (para evitar scope creep)
-
-- No construir un motor SQL.
-- No construir transacciones ACID complejas al inicio.
-- No implementar cluster consensus tipo Raft en la v1.
-- No reinventar Redis ni Mongo; esto es **State+Events+SSE + Vector module**.
+Tu trabajo NO es “inventar una DB desde cero”, sino **llevarla a un nivel más sólido y usable**.
 
 ---
 
-# Arquitectura requerida (v1)
+## 0) Contexto del repo (respeta estructura)
 
-## Componentes
+- `src/` - implementación Rust
+  - `src/api/*` (routes + errors + auth hooks)
+  - `src/engine/*` (state/events/persist/metrics)
+  - `src/vector/*` (vector store + persist)
+- `docs/` - documentación (debe mantenerse coherente)
+- `scripts/` - demo y carga
+- `tests/` - integración y regresión
+- `RAG-client-py/` - cliente Python actual (scripts) a convertir en SDK
 
-### 1) HTTP API (Control Plane)
-
-Endpoints simples para comandos: `put/get/delete/list`, operaciones vectoriales, administración, health.
-
-### 2) SSE (Data Plane)
-
-Un endpoint SSE principal para suscripciones a eventos por:
-
-- key exacta
-- prefijo (namespace)
-- tipo de evento
-- job_id / tags (vía metadata)
-
-### 3) State Engine (KV)
-
-- Almacena `key -> value` (value tipo bytes/json)
-- TTL opcional por clave
-- Versionado monotónico (`revision`/`etag`)
-- Operaciones: `GET`, `PUT`, `UPSERT`, `DELETE`, `CAS` (compare-and-set) opcional
-- Prefijos/Namespaces: `job:*`, `user:*`, `cache:*`
-
-### 4) Event Store (append-only)
-
-- Cada mutación del estado genera un evento
-- Persistencia mínima: log rotativo + snapshots opcionales
-- Permite replay básico para recuperación
-
-### 5) Vector Module (Index + Storage)
-
-Debe soportar:
-
-- `vector.add(id, vector, meta)`
-- `vector.upsert(id, vector, meta)`
-- `vector.update(id, vector|meta)`
-- `vector.delete(id)`
-- `vector.get(id)`
-- `vector.search(query_vector, k, filters?, namespace?)`
-- Validación estricta de **dimensión** por índice/colección
-- Métricas: `cosine` y `dot` como mínimo (L2 opcional)
-- Namespaces/collections: `docs`, `code`, `customers`, etc.
-- Metadata: JSON pequeño (tags, source, job_id, timestamps)
-- Estrategia KISS:
-  - v1: índice **HNSW** (si es simple de integrar) o **brute-force** (si no)
-  - Debe existir modo fallback: “small-index brute force”
-  - Mantener interfaz estable para swap de implementación futura
+**Regla:** no cambies carpetas por “gusto”. Solo si aporta valor claro.
 
 ---
 
-# API Especificación (mínima, clara)
+## 1) Filosofía (KISS > SOLID)
 
-## Autenticación
+- KISS primero: menos capas, menos magia.
+- Cambios pequeños, medibles y justificables.
+- Legibilidad > genérico.
+- Traits/abstracciones solo cuando la duplicación sea real y repetida.
+- Prioriza “producto usable” (docs + tests + ejemplo) antes que “arquitectura perfecta”.
 
-- La v1 actual expone los endpoints sin autenticación interna. Documenta cómo protegerlos detrás de un proxy o deja hooks claros para reactivar `Authorization: Bearer <key>` cuando sea necesario.
-- Rate limiting opcional simple (token bucket) sigue siendo deseable cuando se reintroduzca auth.
+---
 
-## HTTP Endpoints sugeridos
+## 2) Objetivo del producto (realista, sin vender humo)
 
-### State
+RustKissVDB es una DB **híbrida y ligera** para:
 
-- `PUT /v1/state/{key}` body: `{ value, ttl_ms?, if_revision? }`
-- `GET /v1/state/{key}`
-- `DELETE /v1/state/{key}`
-- `GET /v1/state?prefix=job:&limit=100`
+- estado de aplicaciones (KV),
+- eventos en vivo (SSE + replay),
+- búsqueda semántica (vectores),
+- operación simple (1 binario, local o red interna).
 
-### Events (SSE)
+**No-objetivos en v1/v2:**
 
-- `GET /v1/events?prefix=job:&types=state_updated,progress&since=...`
-  - Debe soportar reconexión: `Last-Event-ID` y/o `since` (timestamp/revision)
+- No cluster/consensus estilo Raft
+- No “SQL engine propio”
+- No reemplazar Redis/Qdrant/Mongo a escala masiva (sí cubrir casos locales e internos)
 
-### Vector
+---
 
-- `POST /v1/vector/{collection}/add`
-- `POST /v1/vector/{collection}/upsert`
-- `POST /v1/vector/{collection}/update`
-- `POST /v1/vector/{collection}/delete`
-- `GET  /v1/vector/{collection}/get?id=...`
-- `POST /v1/vector/{collection}/search` body: `{ vector, k, filters?, include_meta? }`
-- `POST /v1/vector/{collection}` create collection: `{ dim, metric }`
+## 3) Principios obligatorios de cambios
 
-## Formato de eventos SSE (estándar)
+1. **Compatibilidad**: endpoints actuales deben seguir funcionando (puedes añadir nuevos).
+2. **Docs primero**: cada feature nueva debe reflejarse en `/docs`.
+3. **Tests**: cada fix/feature importante debe tener test (o ampliar los existentes).
+4. **Local seguro por defecto**: evitar exposición accidental.
+5. **Sin preguntar al usuario**: toma decisiones razonables y documenta tradeoffs.
 
-Cada evento debe incluir:
+---
 
-- `event:` tipo (`state_updated`, `state_deleted`, `vector_added`, `vector_updated`, `vector_deleted`, `vector_search`, `progress`, `log`)
-- `id:` incremental (u64) global o por stream
-- `data:` JSON
+## 4) Prioridades de trabajo (P0 / P1 / P2)
 
-Ejemplo `data`:
+### P0 - Alto impacto, bajo riesgo (obligatorio)
 
-```json
-{
-  "ts": 1733950000,
-  "type": "state_updated",
-  "key": "job:123",
-  "revision": 18,
-  "patch": { "progress": 42 }
-}
+#### 4.1 Local seguro por defecto
+
+- Default bind: `127.0.0.1`
+- Para `0.0.0.0`: requerir flag explícito `--bind 0.0.0.0` o `--unsafe-bind`
+- Documentar en `docs/CONFIG.md` y `docs/PROD_READINESS.md`
+
+#### 4.2 Errores consistentes y accionables
+
+- Todo error debe devolver `ErrorBody { error, message }`
+- Mensajes deben indicar “qué pasó” + “qué hacer”
+- Actualizar `docs/API.md` con ejemplos de errores
+- Añadir tests de regresión si faltan
+
+#### 4.3 Batch endpoints (ROI enorme)
+
+Agregar sin romper los actuales:
+
+- `POST /v1/state/batch_put`
+- `POST /v1/vector/{collection}/upsert_batch`
+- `POST /v1/vector/{collection}/delete_batch`
+- (opcional) `add_batch` si aporta
+
+Actualizar OpenAPI y `docs/API.md` con ejemplos `curl` completos.
+
+#### 4.4 SDK Python formal (para adopción real)
+
+Convertir `RAG-client-py/` en paquete instalable:
+
+- `rustkissvdb.Client`
+- `client.state.*`, `client.vector.*`, `client.stream.*`
+- Soporte `.env` + `Config.from_env()`
+- `examples/` funcionando (chat_rag_pdf, ingest_pdf)
+- Documentar en `docs/SDK_PYTHON.md`
+
+---
+
+### P1 - Vector DB “fuerte” (clave para competir en UX real)
+
+#### 4.5 Vacuum/Compaction (imprescindible)
+
+Si hay tombstones, el storage crece indefinidamente.
+
+- Implementar comando CLI (preferible) tipo:
+  - `rust-kiss-vdb vacuum --collection <name>`
+- Debe:
+  - reescribir `vectors.bin` sin tombstones
+  - reconstruir índice
+  - escribir a temporales y hacer replace atómico
+- Documentar en `docs/VECTOR_STORAGE.md`
+- Test básico de “vacuum no rompe search”
+
+#### 4.6 Segmentación (si entra sin inflar scope)
+
+Ideal:
+
+- segmento activo + segmentos fríos
+- search mergea top-k entre segmentos
+- vacuum compacta segmentos
+
+Si no entra en esta iteración:
+
+- documentar diseño y dejar hooks + roadmap claro en `docs/ROADMAP.md`
+
+#### 4.7 Performance de filtros por metadata
+
+Si hoy es scan:
+
+- documentar limitaciones
+- implementar al menos un índice simple (keyword exact) o plan incremental bien explicado
+
+---
+
+### P2 - Expansión de modelos de datos (sin volverte “DB para todo” a lo loco)
+
+#### 4.8 DocStore (estilo Mongo) como módulo
+
+Opción viable: docstore sobre KV:
+
+- claves `doc:{collection}:{id}`
+- índices por campos frecuentes (keyword, ranges)
+- endpoints simples `find/get/put/delete`
+
+#### 4.9 SQLite como módulo opcional (solo si se hace bien)
+
+No se descarta, pero **no se inventa SQL**.  
+Se integra SQLite embebido (módulo) y se expone por HTTP:
+
+- `/v1/sql/query` (SELECT)
+- `/v1/sql/exec` (INSERT/UPDATE/DDL)
+
+**Concurrencia 5-20 usuarios:** SQLite puede manejarlo si:
+
+- `WAL mode`
+- `busy_timeout`
+- patrón correcto (pool/conexiones por request)
+- límites documentados
+
+**Si aumenta mucho la complejidad:** dejarlo como diseño + roadmap en `docs/DATA_MODELS.md`.
+
+---
+
+## 5) Seguridad (decisión práctica)
+
+No imponer auth para uso local, pero ofrecer opciones claras:
+
+### Modo Local (default)
+
+- bind localhost
+- sin auth
+
+### Modo Protegido recomendado
+
+- exponer detrás de Caddy/Nginx
+- recetas en `docs/SECURITY.md`:
+  - Basic Auth
+  - allowlist por IP
+  - mTLS opcional
+
+### Auth interna opcional (feature flag)
+
+- `API_KEY` via env (`Authorization: Bearer ...`)
+- si `API_KEY` no está definido, no exigir auth
+- tests para rutas protegidas si se implementa
+
+---
+
+## 6) Documentación (obligatorio, en `/docs`)
+
+Mantener y actualizar:
+
+- `ARCHITECTURE.md` (si cambia storage/compaction/segments)
+- `API.md` (batch + ejemplos + errores)
+- `CONFIG.md` (bind seguro + variables)
+- `PROD_READINESS.md` (recomendaciones reales)
+- `openapi.yaml` (canónico, siempre actualizado)
+
+Agregar nuevos si aplica:
+
+- `ROADMAP.md`
+- `SECURITY.md`
+- `VECTOR_STORAGE.md`
+- `SDK_PYTHON.md`
+- `DATA_MODELS.md` (si evalúas docstore/sqlite)
+- `CHANGELOG.md`
+
+**Regla:** no dejar docs desactualizados respecto al código.
+
+---
+
+## 7) Calidad / CI mental (antes de dar por terminado)
+
+- `cargo fmt`
+- `cargo clippy` sin warnings relevantes
+- `cargo test` verde
+- scripts demo siguen funcionando (o se actualizan)
+- OpenAPI válido y coherente con el server
+- sin warnings, todo tiene que estar OK.
+
+---
+
+## 8) Entregables mínimos por PR (Definition of Done)
+
+Toda mejora relevante debe incluir:
+
+- código funcional
+- tests o ampliación de tests
+- docs actualizadas
+- ejemplos (curl o scripts) verificables
+
+---
+
+## 9) Estilo de cambios (para no hacer un mega-PR inmantenible)
+
+- Preferir PRs/commits por tema:
+  1. bind seguro + docs
+  2. errores consistentes + tests
+  3. batch endpoints + openapi + tests
+  4. vacuum + docs + test
+  5. SDK Python + examples + docs
+
+---
+
+## 10) Flujo con Git (avanzar seguro y poder volver atrás)
+
+Usa Git como “red de seguridad” para iterar sin miedo. La regla es simple: **cambios pequeños + commits claros + puntos de retorno**.
+
+### 10.1 Principios
+
+- Commits pequeños y frecuentes (cada cambio importante = 1 commit).
+- Mensajes claros: qué cambió y por qué.
+- Antes de tocar algo grande, crea un “punto seguro” (tag o rama backup).
+
+### 10.2 Preparación (antes de empezar trabajo serio)
+
+```bash
+git status
+git pull --rebase
 ```
 
----
+Crea una rama de trabajo por tema (evita trabajar directo en `main`/`master`):
 
-# Requisitos de Escalabilidad (KISS-friendly)
+```bash
+git checkout -b feat/batch-endpoints
+```
 
-Implementa primero **single-node** excelente.
-Deja ganchos claros para escalar después sin reescribir todo:
+### 10.3 Puntos seguros (tags) para volver fácil
 
-- Separar “API stateless” vs “Engine stateful” (en módulos)
-- Namespaces para sharding futuro (por prefijo/collection)
-- Event log para replicación eventual (no consensus en v1)
-- Configuración por archivo/env sencilla
+Antes de una refactor grande o cambio riesgoso, crea un tag:
 
----
+```bash
+git tag -a safe/pre-batch -m "Punto seguro antes de batch endpoints"
+git push --tags
+```
 
-# Persistencia (v1 pragmática)
+Si algo sale mal, vuelves al tag:
 
-- Estado en memoria (rápido) + snapshot periódico opcional
-- WAL/event log append-only para recuperar
-- Política simple:
-  - cada N segundos snapshot
-  - log rotativo por tamaño
+```bash
+git checkout safe/pre-batch
+```
 
-- Si se complica, mantener persistencia opcional (feature flag)
+O creas una rama desde ese punto:
 
----
+```bash
+git checkout -b hotfix/rollback safe/pre-batch
+```
 
-# Observabilidad y Operación en Vivo
+### 10.4 Guardar progreso sin ensuciar (stash)
 
-- Logging con `tracing`
-- Métricas simples (requests, latency, connected SSE clients)
-- Endpoint: `GET /v1/health` y `GET /v1/metrics`
-- Modo “dev” con dashboard textual simple opcional
+Si estás a medias y necesitas cambiar de rama:
 
----
+```bash
+git stash push -m "wip: en progreso"
+git checkout otra-rama
+# luego
+git stash pop
+```
 
-# Reglas de Implementación (para evitar complejidad)
+### 10.5 Volver atrás de forma segura (sin destruir historia)
 
-- Máximo 1–2 niveles de carpetas.
-- Evitar “framework wars”: elige **uno** (recomendado: `axum + tokio`).
-- Pocas abstracciones:
-  - Un trait `VectorIndex` si y solo si es necesario
-  - Tipos concretos primero, traits después
+Para deshacer un commit ya hecho, pero manteniendo historial limpio:
 
-- Código legible > genérico.
+```bash
+git revert <hash>
+```
 
----
+Esto crea un commit “inverso” (ideal si ya hiciste push).
 
-# Entregables del Agente (obligatorios)
+### 10.6 Reset (solo si NO hiciste push o sabes lo que haces)
 
-1. **Diseño**: `ARCHITECTURE.md` con decisiones y tradeoffs (corto y claro).
-2. **API**: `openapi.yaml` o `API.md` con ejemplos curl.
-3. **Repo** listo:
-   - `src/main.rs`
-   - `src/api/` (routes)
-   - `src/engine/` (state + events)
-   - `src/vector/` (collections, index, storage)
+Volver a un commit y borrar commits locales:
 
-4. **Tests**:
-   - unit tests (state + vector)
-   - integration tests (HTTP + SSE)
+```bash
+git reset --hard <hash>
+```
 
-5. **Demo**:
-   - script que crea colección vectorial, agrega embeddings, hace search, y muestra SSE en vivo.
+### 10.7 Checklist antes de cada commit
 
-6. **Bench básico**:
-   - latencia p50/p95 de put/get y vector search (aunque sea simple).
+- `cargo fmt`
+- `cargo clippy`
+- `cargo test`
+- Docs actualizadas si cambió comportamiento/API
 
----
+Commit ejemplo:
 
-# Criterios de Aceptación (Definition of Done)
+```bash
+git add .
+git commit -m "api: add batch_put for state + update openapi/docs"
+```
 
-- SSE funciona con múltiples clientes, reconecta bien, no se cuelga.
-- `vector.search` valida dimensión y métrica; devuelve top-k correcto.
-- `add/upsert/update/delete` actualizan index y emiten eventos SSE.
-- Manejo de errores claro (HTTP codes + JSON error).
-- Config simple: `PORT_RUST_KISS_VDB`, `SNAPSHOT_INTERVAL`, `MAX_LOG_MB`, etc. (`API_KEY` queda opcional mientras auth siga desactivada).
-- Documentación suficiente para que alguien lo use sin preguntarte nada.
+### 10.8 Integración recomendada (por PR/tema)
 
----
+Trabaja por etapas para que el rollback sea fácil:
 
-# Plan de Ejecución (el agente debe seguirlo)
+1. bind seguro + docs
+2. errores consistentes + tests
+3. batch endpoints + openapi + tests
+4. vacuum + docs + test
+5. SDK Python + examples + docs
 
-1. MVP State + SSE (sin vector) + auth + eventos
-2. Event store + id incremental + reconexión
-3. Vector collections (create, dim, metric)
-4. Vector add/upsert/update/delete + storage + SSE events
-5. Vector search (brute force o HNSW) + filtros básicos
-6. Persistencia opcional (snapshot/log)
-7. Tests + demo + docs + bench
+Cada etapa puede tener su tag `safe/*` antes del siguiente salto.
+
+**Regla final:** si un cambio grande se complica, crea tag, documenta el estado en `/docs/ROADMAP.md` y continúa en otra rama.
 
 ---
 
-# Nota final (importante)
+## Nota final
 
-Mantén el espíritu:
+Mantén el espíritu del proyecto:
 
-- **“Simple pero sólido”**
-- **“Menos magia, más sistema usable”**
-- **“Lo que no se usa, no se construye”**
+- “simple pero sólido”
+- “menos magia, más sistema usable”
+- “si no se usa, no se construye”
+- “si no se puede leer sin comentarios, refactoriza o simplifica”
 
-Tu salida debe ser un repositorio funcional con documentación y demos, no solo teoría.
+Tu salida debe ser un repo más estable, con mejores herramientas y documentación, no solo una lista de ideas.

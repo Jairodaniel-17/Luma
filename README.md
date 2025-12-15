@@ -6,11 +6,13 @@ Base de datos en Rust con enfoque KISS que combina **State Store + Event Store +
 
 ## Que incluye
 
-- **HTTP API (axum + tokio)**: endpoints `state`, `vector`, `stream`, `health`, `metrics`.
+- **HTTP API (axum + tokio)**: endpoints `state`, `vector`, `doc`, `sql`, `stream`, `health`, `metrics`.
 - **SSE Event Stream**: `GET /v1/stream` con replay por offset, filtros por tipo/prefijo/coleccion y manejo de gaps.
 - **State Engine**: KV in-memory con TTL, revision incremental y soporte CAS (`if_revision`).
 - **Event Store**: offset global u64, WAL segmentado y snapshot opcional cuando apuntas `DATA_DIR`.
 - **Vector Store (HNSW)**: colecciones `{dim, metric}`, operaciones completas `add/upsert/update/delete/get/search` y filtros exactos sobre `meta`.
+- **DocStore + SQLite opcional**: documentos JSON con índices keyword y módulo SQL embebido protegido por API key.
+- **SDK Python** (`RAG-client-py/src/rustkissvdb`): cliente sin dependencias raras (`httpx`).
 
 ## Arquitectura en 30s
 
@@ -50,12 +52,12 @@ Variables de entorno criticas:
 
 | Variable | Default | Nota |
 | --- | --- | --- |
-| `PORT_RUST_KISS_VDB` | `9917` | Puerto HTTP unico (CLI `--port` manda si se define). |
-| `DATA_DIR` | vacio | Activa WAL segmentado + snapshot + storage vectorial en disco. |
-| `SNAPSHOT_INTERVAL_SECS` | `30` | Bloquea WAL breve y rota segmentos. |
-| `EVENT_BUFFER_SIZE` | `10000` | Buffer de replay in-memory. |
-| `LIVE_BROADCAST_CAPACITY` | `4096` | Fijar mas alto si hay bursts SSE. |
-| `MAX_*` | ver `docs/CONFIG.md` | Limites anti-DoS (body/json/key/id/dim/k). |
+| `PORT_RUST_KISS_VDB` | `9917` | Puerto HTTP único (CLI `--port` manda si se define). |
+| `BIND_ADDR` / `--bind` | `127.0.0.1` | Si necesitas exponer usa `--bind 0.0.0.0` o `--unsafe-bind`. |
+| `RUSTKISS_API_KEY` / `API_KEY` | `dev` | Token Bearer opcional (recomendado en prod). |
+| `DATA_DIR` | vacío | Activa WAL + snapshots + storage vectorial en disco. |
+| `SQLITE_ENABLED` | `0` | Habilita `/v1/sql/*` (requiere `DATA_DIR`). |
+| `MAX_*` | ver `docs/CONFIG.md` | Límites anti-DoS (body/json/key/id/dim/k/batch/docfind). |
 
 Flags CLI: `--logs info|warning|error|critical`, `--port <u16>` (prioridad: CLI `--port` -> `PORT_RUST_KISS_VDB` -> `9917`).
 
@@ -63,12 +65,14 @@ Ejemplos avanzados en `docs/CONFIG.md`.
 
 ## API Surface
 
-- **State**: `PUT/GET/DELETE /v1/state/{key}`, `GET /v1/state?prefix=&limit=` (ver ejemplos en `docs/API.md`).
-- **Vector**: `POST /v1/vector/{collection}` + `add/upsert/update/delete/get/search`.
+- **State**: `PUT/GET/DELETE /v1/state/{key}`, `GET /v1/state?prefix=&limit=`, `POST /v1/state/batch_put`.
+- **Vector**: `POST /v1/vector/{collection}` + `add/upsert/update/delete/get/search`, `*_batch`.
+- **DocStore**: `PUT/GET/DELETE /v1/doc/{collection}/{id}`, `POST /v1/doc/{collection}/find`.
+- **SQLite (opcional)**: `POST /v1/sql/query`, `POST /v1/sql/exec`.
 - **Events**: `GET /v1/stream?since=<offset>&types=...&key_prefix=...&collection=...`.
 - **Ops**: `GET /v1/health`, `GET /v1/metrics`.
 
-Sin autenticacion en v1; protege detras de tu API Gateway hasta que se reintroduzca `API_KEY`. Consulta `docs/API.md` para `curl` listos.
+Protege con API key y/o reverse proxy si lo expones fuera de localhost. Consulta `docs/API.md` para `curl` listos.
 
 ## Docs de apoyo
 
@@ -76,10 +80,13 @@ Sin autenticacion en v1; protege detras de tu API Gateway hasta que se reintrodu
 | --- | --- |
 | `docs/ARCHITECTURE.md` | Decisiones de diseno de engine, SSE, WAL y vector store. |
 | `docs/API.md` | Cheatsheet de endpoints y ejemplos `curl`. |
-| `docs/CONFIG.md` | Todas las variables/limites y ejemplo de arranque. |
+| `docs/CONFIG.md` | Todas las variables/límites y ejemplo de arranque. |
 | `docs/DEMO.md` | Pasos del demo para ver SSE + vector en vivo. |
 | `docs/BENCH.md` | Como correr el micro bench (`cargo run --release --bin bench`). |
 | `docs/PROD_READINESS.md` | Checklist para llevarlo a produccion (durability, CORS, limites, tuning SSE). |
+| `docs/SECURITY.md` | Modos de despliegue (local/proxy/API key). |
+| `docs/VECTOR_STORAGE.md` | Segmentos, compaction y estructura de archivos. |
+| `docs/SDK_PYTHON.md` | Uso del cliente Python + ejemplos. |
 
 ## Demo y Bench
 

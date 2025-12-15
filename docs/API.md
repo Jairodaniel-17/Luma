@@ -1,6 +1,11 @@
 # API (v1)
 
-> No hay autenticación en esta versión; todos los ejemplos omiten `Authorization`.
+> Si defines `RUSTKISS_API_KEY` (o `API_KEY`) debes enviar `Authorization: Bearer <token>`. Ejemplos omitidos para mantenerlos legibles.
+
+Formato de error uniforme:
+```json
+{ "error": "not_found", "message": "document not found" }
+```
 
 ## Health / Metrics
 
@@ -36,6 +41,25 @@ curl "http://localhost:9917/v1/state/job:123"
 
 ### LIST
 `GET /v1/state?prefix=job:&limit=100`
+
+### BATCH PUT
+`POST /v1/state/batch_put`
+
+```bash
+curl -X POST "http://localhost:9917/v1/state/batch_put" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"operations\":[{\"key\":\"bulk:1\",\"value\":{\"x\":1}},{\"key\":\"bulk:2\",\"value\":{\"x\":2}}]}"
+```
+
+Respuesta:
+```json
+{
+  "results": [
+    { "status": "ok", "key": "bulk:1", "revision": 1 },
+    { "status": "error", "key": "bulk:2", "error": { "error": "invalid_argument", "message": "value too large" } }
+  ]
+}
+```
 
 ## Events (SSE)
 
@@ -80,3 +104,56 @@ curl -X POST "http://localhost:9917/v1/vector/docs/search" ^
   -H "Content-Type: application/json" ^
   -d "{\"vector\":[0.9,0.1,0],\"k\":3,\"filters\":{\"tag\":\"x\"},\"include_meta\":true}"
 ```
+
+### Batch
+
+- `POST /v1/vector/{collection}/upsert_batch`
+- `POST /v1/vector/{collection}/delete_batch`
+
+```bash
+curl -X POST "http://localhost:9917/v1/vector/docs/upsert_batch" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[{\"id\":\"v1\",\"vector\":[0.1,0.2],\"meta\":{\"tag\":\"a\"}}]}"
+```
+
+Respuesta: `{"results":[{"status":"upserted","id":"v1"}]}`
+
+## DocStore
+
+- `PUT /v1/doc/{collection}/{id}`
+- `GET /v1/doc/{collection}/{id}`
+- `DELETE /v1/doc/{collection}/{id}`
+- `POST /v1/doc/{collection}/find`
+
+```bash
+curl -X PUT "http://localhost:9917/v1/doc/tickets/tk_1" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"title\":\"Bug 1\",\"severity\":\"high\"}"
+
+curl -X POST "http://localhost:9917/v1/doc/tickets/find" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"filter\":{\"severity\":\"high\"},\"limit\":20}"
+```
+
+Respuesta:
+```json
+{
+  "documents": [
+    { "id": "tk_1", "revision": 2, "doc": { "title": "Bug 1", "severity": "high" } }
+  ]
+}
+```
+
+## SQL (opcional)
+
+- `POST /v1/sql/query`
+- `POST /v1/sql/exec`
+
+```bash
+curl -X POST "http://localhost:9917/v1/sql/query" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"sql\":\"SELECT name FROM sqlite_master WHERE type='table'\",\"params\":[]}"
+```
+
+`/query` solo acepta `SELECT`, devuelve `{"rows":[{...}]}`.  
+`/exec` devuelve `{"rows_affected": N}` y sirve para DDL/DML.

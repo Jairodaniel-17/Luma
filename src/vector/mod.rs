@@ -5,7 +5,7 @@ use anyhow::Context;
 use hnsw_rs::prelude::*;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +16,8 @@ struct Inner {
     data_dir: Option<PathBuf>,
     collections: RwLock<HashMap<String, Collection>>,
 }
+
+const DEFAULT_SEGMENT_MAX: usize = 8_192;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateCollectionRequest {
@@ -76,16 +78,90 @@ struct Collection {
     manifest: Manifest,
     items: HashMap<String, VectorItem>,
     applied_offset: u64,
-    hnsw: HnswIndex,
-    data_ids: HashMap<String, usize>,
-    id_by_data_id: Vec<String>,
-    deleted_data_id: Vec<bool>,
-    hnsw_capacity: usize,
+    segments: Vec<SegmentIndex>,
+    item_segments: HashMap<String, usize>,
+    segment_max_items: usize,
+    keyword_index: HashMap<String, HashMap<String, HashSet<String>>>,
 }
 
 enum HnswIndex {
     Cosine(Hnsw<'static, f32, anndists::dist::distances::DistCosine>),
     Dot(Hnsw<'static, f32, anndists::dist::distances::DistDot>),
+}
+
+struct SegmentIndex {
+    hnsw: HnswIndex,
+    data_ids: HashMap<String, usize>,
+    id_by_data_id: Vec<String>,
+    deleted: Vec<bool>,
+    live: usize,
+    capacity: usize,
+}
+
+impl SegmentIndex {
+    fn new(metric: Metric, capacity: usize) -> Self {
+        Self {
+            hnsw: make_hnsw(metric, 16, capacity.max(1024), 16, 200),
+            data_ids: HashMap::new(),
+            id_by_data_id: Vec::new(),
+            deleted: Vec::new(),
+            live: 0,
+            capacity: capacity.max(1024),
+        }
+    }
+
+    fn insert(&mut self, id: String, vector: Vec<f32>) {
+        let data_id = self.id_by_data_id.len();
+        self.id_by_data_id.push(id.clone());
+        self.deleted.push(false);
+        self.data_ids.insert(id, data_id);
+        insert_into_hnsw(&mut self.hnsw, vector, data_id);
+        self.live = self.live.saturating_add(1);
+    }
+
+    fn mark_deleted(&mut self, id: &str) {
+        if let Some(idx) = self.data_ids.remove(id) {
+            if idx < self.deleted.len() && !self.deleted[idx] {
+                self.deleted[idx] = true;
+                self.live = self.live.saturating_sub(1);
+            }
+        }
+    }
+
+    fn search_candidates(&self, query: &[f32], candidate_k: usize) -> Vec<(String, f32)> {
+        if self.live == 0 {
+            return Vec::new();
+        }
+        let neighbours = match &self.hnsw {
+            HnswIndex::Cosine(h) => h.search(
+                query,
+                candidate_k,
+                candidate_k.saturating_mul(2).clamp(50, 10_000),
+            ),
+            HnswIndex::Dot(h) => h.search(
+                query,
+                candidate_k,
+                candidate_k.saturating_mul(2).clamp(50, 10_000),
+            ),
+        };
+        let mut hits = Vec::new();
+        for n in neighbours {
+            let data_id = n.d_id;
+            if data_id >= self.id_by_data_id.len() {
+                continue;
+            }
+            if self.deleted.get(data_id).copied().unwrap_or(true) {
+                continue;
+            }
+            let id = self.id_by_data_id[data_id].clone();
+            let score = 1.0 - n.distance;
+            hits.push((id, score));
+            if hits.len() >= candidate_k {
+                break;
+            }
+        }
+        hits
+    }
 }
 
 impl VectorStore {
@@ -367,6 +443,19 @@ impl VectorStore {
         let base = self.0.data_dir.as_ref()?.join("vectors");
         Some(CollectionLayout::new(&base, collection))
     }
+
+    pub fn vacuum_collection(&self, collection: &str) -> Result<(), VectorError> {
+        let mut cols = self.0.collections.write();
+        let c = cols
+            .get_mut(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        let layout = c.layout.clone().ok_or(VectorError::Persistence)?;
+        let updated = persist::rewrite_collection(&layout, &c.manifest, &c.items)
+            .map_err(|_| VectorError::Persistence)?;
+        c.manifest = updated;
+        c.rebuild_index();
+        Ok(())
+    }
 }
 
 impl Default for VectorStore {
@@ -396,32 +485,149 @@ impl Collection {
             manifest,
             items,
             applied_offset,
-            hnsw: make_hnsw(metric, 16, 1024, 16, 200),
-            data_ids: HashMap::new(),
-            id_by_data_id: Vec::new(),
-            deleted_data_id: Vec::new(),
-            hnsw_capacity: 1024,
+            segments: Vec::new(),
+            item_segments: HashMap::new(),
+            segment_max_items: DEFAULT_SEGMENT_MAX,
+            keyword_index: HashMap::new(),
         };
         c.rebuild_index();
         Ok(c)
     }
 
     fn rebuild_index(&mut self) {
-        let baseline = (self.manifest.upsert_count as usize).max(self.items.len());
-        let capacity = (baseline.max(1) * 2).max(1024);
-        self.hnsw_capacity = capacity;
-        self.data_ids.clear();
-        self.id_by_data_id.clear();
-        self.deleted_data_id.clear();
-        self.hnsw = make_hnsw(self.metric, 16, capacity, 16, 200);
-
-        for (data_id, (id, item)) in self.items.iter().enumerate() {
-            let vec = normalize_if_needed(self.metric, item.vector.clone());
-            self.data_ids.insert(id.clone(), data_id);
-            self.id_by_data_id.push(id.clone());
-            self.deleted_data_id.push(false);
-            insert_into_hnsw(&mut self.hnsw, vec, data_id);
+        self.keyword_index.clear();
+        let metas: Vec<(String, serde_json::Value)> = self
+            .items
+            .iter()
+            .map(|(id, item)| (id.clone(), item.meta.clone()))
+            .collect();
+        for (id, meta) in metas {
+            self.add_meta_to_index(&id, &meta);
         }
+        self.rebuild_segments();
+    }
+
+    fn rebuild_segments(&mut self) {
+        self.item_segments.clear();
+        self.segments.clear();
+        if self.items.is_empty() {
+            self.segments
+                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+            return;
+        }
+        let mut current = SegmentIndex::new(self.metric, self.segment_max_items);
+        for (id, item) in self.items.iter() {
+            if current.live >= current.capacity {
+                self.segments.push(current);
+                current = SegmentIndex::new(self.metric, self.segment_max_items);
+            }
+            current.insert(id.clone(), item.vector.clone());
+            let idx = self.segments.len();
+            self.item_segments.insert(id.clone(), idx);
+        }
+        self.segments.push(current);
+        if self.segments.is_empty() {
+            self.segments
+                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+        }
+    }
+
+    fn ensure_active_segment(&mut self) -> usize {
+        if self.segments.is_empty() {
+            self.segments
+                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+        }
+        let last_idx = self.segments.len() - 1;
+        if self.segments[last_idx].live >= self.segments[last_idx].capacity {
+            self.segments
+                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+            return self.segments.len() - 1;
+        }
+        last_idx
+    }
+
+    fn insert_into_segments(&mut self, id: &str, vector: Vec<f32>) {
+        if let Some(seg_idx) = self.item_segments.remove(id) {
+            if let Some(seg) = self.segments.get_mut(seg_idx) {
+                seg.mark_deleted(id);
+            }
+        }
+        let idx = self.ensure_active_segment();
+        if let Some(seg) = self.segments.get_mut(idx) {
+            seg.insert(id.to_string(), vector);
+            self.item_segments.insert(id.to_string(), idx);
+        }
+    }
+
+    fn remove_from_segments(&mut self, id: &str) {
+        if let Some(seg_idx) = self.item_segments.remove(id) {
+            if let Some(seg) = self.segments.get_mut(seg_idx) {
+                seg.mark_deleted(id);
+            }
+        }
+    }
+
+    fn add_meta_to_index(&mut self, id: &str, meta: &serde_json::Value) {
+        let Some(obj) = meta.as_object() else {
+            return;
+        };
+        for (k, v) in obj {
+            let Some(value) = v.as_str() else {
+                continue;
+            };
+            self.keyword_index
+                .entry(k.clone())
+                .or_default()
+                .entry(value.to_string())
+                .or_default()
+                .insert(id.to_string());
+        }
+    }
+
+    fn remove_meta_from_index(&mut self, id: &str, meta: Option<&serde_json::Value>) {
+        let Some(meta) = meta else { return };
+        let Some(obj) = meta.as_object() else { return };
+        for (k, v) in obj {
+            let Some(value) = v.as_str() else {
+                continue;
+            };
+            if let Some(by_value) = self.keyword_index.get_mut(k) {
+                if let Some(set) = by_value.get_mut(value) {
+                    set.remove(id);
+                    if set.is_empty() {
+                        by_value.remove(value);
+                    }
+                }
+                if by_value.is_empty() {
+                    self.keyword_index.remove(k);
+                }
+            }
+        }
+    }
+
+    fn keyword_candidates(&self, filters: &serde_json::Value) -> Option<HashSet<String>> {
+        let obj = filters.as_object()?;
+        let mut current: Option<HashSet<String>> = None;
+        for (k, v) in obj {
+            let Some(value) = v.as_str() else {
+                return None;
+            };
+            let Some(by_value) = self.keyword_index.get(k) else {
+                return Some(HashSet::new());
+            };
+            let Some(ids) = by_value.get(value) else {
+                return Some(HashSet::new());
+            };
+            let ids_cloned: HashSet<String> = ids.iter().cloned().collect();
+            current = match current {
+                None => Some(ids_cloned),
+                Some(mut acc) => {
+                    acc.retain(|id| ids.contains(id));
+                    Some(acc)
+                }
+            };
+        }
+        current
     }
 
     fn apply_record(
@@ -459,13 +665,13 @@ impl Collection {
 
         match record.op {
             RecordOp::Delete => {
-                if self.items.remove(&record.id).is_some() {
-                    self.manifest.live_count = self.manifest.live_count.saturating_sub(1);
+                let removed = self.items.remove(&record.id);
+                if let Some(old) = removed.as_ref() {
+                    self.remove_meta_from_index(&record.id, Some(&old.meta));
                 }
-                if let Some(old) = self.data_ids.remove(&record.id) {
-                    if old < self.deleted_data_id.len() {
-                        self.deleted_data_id[old] = true;
-                    }
+                self.remove_from_segments(&record.id);
+                if removed.is_some() {
+                    self.manifest.live_count = self.manifest.live_count.saturating_sub(1);
                 }
             }
             RecordOp::Upsert => {
@@ -476,24 +682,14 @@ impl Collection {
                     vector: vec.clone(),
                     meta,
                 };
-                if let Some(old) = self.data_ids.get(&record.id).cloned() {
-                    if old < self.deleted_data_id.len() {
-                        self.deleted_data_id[old] = true;
-                    }
+                let previous = self.items.insert(record.id.clone(), new_item.clone());
+                if let Some(prev) = previous.as_ref() {
+                    self.remove_meta_from_index(&record.id, Some(&prev.meta));
                 }
-                let existed = self.items.insert(record.id.clone(), new_item).is_some();
-                if !existed {
+                self.add_meta_to_index(&record.id, &new_item.meta);
+                self.insert_into_segments(&record.id, new_item.vector.clone());
+                if previous.is_none() {
                     self.manifest.live_count += 1;
-                }
-
-                if self.id_by_data_id.len() + 1 > self.hnsw_capacity {
-                    self.rebuild_index();
-                } else {
-                    let data_id = self.id_by_data_id.len();
-                    self.id_by_data_id.push(record.id.clone());
-                    self.deleted_data_id.push(false);
-                    self.data_ids.insert(record.id, data_id);
-                    insert_into_hnsw(&mut self.hnsw, vec, data_id);
                 }
             }
         }
@@ -539,31 +735,49 @@ impl Collection {
             return Ok(Vec::new());
         }
 
-        let candidate_k = (k * 20).min(self.items.len()).max(k);
-        let ef = (candidate_k * 2).clamp(50, 10_000);
+        let filter_candidates = req
+            .filters
+            .as_ref()
+            .and_then(|f| self.keyword_candidates(f));
+        if let Some(ref set) = filter_candidates {
+            if set.is_empty() {
+                return Ok(Vec::new());
+            }
+            if set.len() <= 512 {
+                return Ok(self.search_subset_bruteforce(
+                    query.as_slice(),
+                    include_meta,
+                    set,
+                    req.filters.as_ref(),
+                    k,
+                ));
+            }
+        }
 
-        let neighbours = match &self.hnsw {
-            HnswIndex::Cosine(h) => h.search(query.as_slice(), candidate_k, ef),
-            HnswIndex::Dot(h) => h.search(query.as_slice(), candidate_k, ef),
-        };
+        let candidate_k = (k * 10).min(self.items.len()).max(k);
+        let mut combined = Vec::new();
+        for segment in &self.segments {
+            combined.extend(segment.search_candidates(query.as_slice(), candidate_k));
+        }
+        combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut hits = Vec::new();
-        for n in neighbours {
-            let data_id = n.d_id;
-            if data_id >= self.id_by_data_id.len() {
+        let mut seen = HashSet::new();
+        for (id, score) in combined {
+            if !seen.insert(id.clone()) {
                 continue;
             }
-            if self.deleted_data_id.get(data_id).copied().unwrap_or(true) {
-                continue;
+            if let Some(ref set) = filter_candidates {
+                if !set.contains(&id) {
+                    continue;
+                }
             }
-            let id = &self.id_by_data_id[data_id];
-            let Some(item) = self.items.get(id) else {
+            let Some(item) = self.items.get(&id) else {
                 continue;
             };
             if !matches_filters(&item.meta, req.filters.as_ref()) {
                 continue;
             }
-            let score = 1.0 - n.distance;
             hits.push(SearchHit {
                 id: id.clone(),
                 score,
@@ -575,6 +789,39 @@ impl Collection {
         }
 
         Ok(hits)
+    }
+
+    fn search_subset_bruteforce(
+        &self,
+        query: &[f32],
+        include_meta: bool,
+        candidates: &HashSet<String>,
+        filters: Option<&serde_json::Value>,
+        k: usize,
+    ) -> Vec<SearchHit> {
+        let mut scored = Vec::new();
+        for id in candidates {
+            let Some(item) = self.items.get(id) else {
+                continue;
+            };
+            if !matches_filters(&item.meta, filters) {
+                continue;
+            }
+            let score = exact_score(self.metric, &item.vector, query);
+            scored.push((id.clone(), score));
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut hits = Vec::new();
+        for (id, score) in scored.into_iter().take(k) {
+            if let Some(item) = self.items.get(&id) {
+                hits.push(SearchHit {
+                    id,
+                    score,
+                    meta: include_meta.then(|| item.meta.clone()),
+                });
+            }
+        }
+        hits
     }
 }
 
@@ -594,6 +841,27 @@ fn matches_filters(meta: &serde_json::Value, filters: Option<&serde_json::Value>
         }
     }
     true
+}
+
+fn exact_score(metric: Metric, a: &[f32], b: &[f32]) -> f32 {
+    match metric {
+        Metric::Cosine => {
+            let mut dot = 0.0f32;
+            let mut norm_a = 0.0f32;
+            let mut norm_b = 0.0f32;
+            for (x, y) in a.iter().zip(b.iter()) {
+                dot += x * y;
+                norm_a += x * x;
+                norm_b += y * y;
+            }
+            if norm_a == 0.0 || norm_b == 0.0 {
+                0.0
+            } else {
+                dot / (norm_a.sqrt() * norm_b.sqrt())
+            }
+        }
+        Metric::Dot => a.iter().zip(b.iter()).map(|(x, y)| x * y).sum(),
+    }
 }
 
 fn normalize_if_needed(metric: Metric, mut v: Vec<f32>) -> Vec<f32> {

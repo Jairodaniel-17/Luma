@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from dotenv import find_dotenv, load_dotenv
+from rustkissvdb import Client as RustClient, RustKissVDBError
 
 # =================================================
 # Load .env
@@ -38,6 +39,7 @@ VDB_BASE_URL = os.getenv("VDB_BASE_URL", f"http://localhost:{PORT_RUST_KISS_VDB}
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma:300m")
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b")
+RUSTKISS_API_KEY = os.getenv("RUSTKISS_API_KEY")
 
 RAG_TOPK = int(os.getenv("RAG_TOPK", str(DEFAULT_TOPK)))
 MAX_CTX_CHARS = int(os.getenv("MAX_CTX_CHARS", str(DEFAULT_MAX_CTX_CHARS)))
@@ -69,10 +71,6 @@ def safe_json(obj: Any) -> str:
 # =================================================
 # RustKissVDB Client
 # =================================================
-class RustKissVDBError(RuntimeError):
-    pass
-
-
 @dataclass
 class StateItem:
     key: str
@@ -82,48 +80,29 @@ class StateItem:
 
 
 class RustKissVDBClient:
-    def __init__(self, base_url: str, timeout: float = 60.0):
+    def __init__(self, base_url: str, api_key: Optional[str] = None, timeout: float = 60.0):
         if not base_url:
             raise ValueError("base_url requerido para RustKissVDBClient")
-        self.base_url = base_url.rstrip("/")
-        self.http = httpx.Client(timeout=timeout)
-
-    def _url(self, path: str) -> str:
-        return f"{self.base_url}{path}"
-
-    def _raise(self, r: httpx.Response) -> None:
-        if r.status_code >= 400:
-            try:
-                data = r.json()
-                msg = f"{data.get('error')} - {data.get('message')}"
-            except Exception:
-                msg = r.text
-            raise RustKissVDBError(f"HTTP {r.status_code}: {msg}")
+        self._client = RustClient(base_url=base_url.rstrip("/"), api_key=api_key, timeout=timeout)
 
     def health(self) -> None:
-        r = self.http.get(self._url("/v1/health"))
-        self._raise(r)
+        self._client.request("GET", "/v1/health")
 
     # ---- state ----
     def state_list(self, prefix: str = "", limit: int = 100) -> List[StateItem]:
-        r = self.http.get(self._url("/v1/state"), params={"prefix": prefix, "limit": int(limit)})
-        self._raise(r)
-        out: List[StateItem] = []
-        for it in r.json():
-            out.append(
-                StateItem(
-                    key=it["key"],
-                    value=it.get("value"),
-                    revision=int(it["revision"]),
-                    expires_at_ms=it.get("expires_at_ms"),
-                )
+        data = self._client.state.list(prefix=prefix, limit=int(limit))
+        return [
+            StateItem(
+                key=it["key"],
+                value=it.get("value"),
+                revision=int(it["revision"]),
+                expires_at_ms=it.get("expires_at_ms"),
             )
-        return out
+            for it in data
+        ]
 
     def state_get(self, key: str) -> StateItem:
-        r = self.http.get(self._url(f"/v1/state/{key}"))
-        self._raise(r)
-        it = r.json()
+        it = self._client.state.get(key)
         return StateItem(
             key=it["key"],
             value=it.get("value"),
@@ -132,28 +111,21 @@ class RustKissVDBClient:
         )
 
     def state_put(self, key: str, value: Any, if_revision: Optional[int] = None) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"value": value}
-        if if_revision is not None:
-            payload["if_revision"] = int(if_revision)
-        r = self.http.put(self._url(f"/v1/state/{key}"), json=payload)
-        self._raise(r)
-        return r.json()
+        return self._client.state.put(key, value=value, if_revision=if_revision)
 
     def state_delete(self, key: str) -> bool:
-        r = self.http.delete(self._url(f"/v1/state/{key}"))
-        self._raise(r)
-        return bool(r.json().get("deleted", False))
+        return bool(self._client.state.delete(key))
 
     # ---- vector ----
     def vector_search(
         self, collection: str, vector: List[float], k: int = 5, include_meta: bool = True
     ) -> Dict[str, Any]:
-        r = self.http.post(
-            self._url(f"/v1/vector/{collection}/search"),
-            json={"vector": vector, "k": int(k), "include_meta": bool(include_meta)},
+        return self._client.vector.search(
+            collection,
+            vector,
+            k=int(k),
+            include_meta=bool(include_meta),
         )
-        self._raise(r)
-        return r.json()
 
 
 # =================================================
@@ -320,7 +292,7 @@ def main():
 
     session_id = CHAT_SESSION_ID or uuid.uuid4().hex[:12]
 
-    vdb = RustKissVDBClient(base_url=VDB_BASE_URL)
+    vdb = RustKissVDBClient(base_url=VDB_BASE_URL, api_key=RUSTKISS_API_KEY)
     vdb.health()
 
     emb = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL, base_url=OLLAMA_BASE_URL)
