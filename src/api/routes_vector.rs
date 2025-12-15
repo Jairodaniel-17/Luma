@@ -1,7 +1,7 @@
 use crate::api::errors::{ApiError, ErrorBody};
 use crate::api::AppState;
 use crate::engine::EngineError;
-use crate::vector::{Metric, SearchRequest, VectorError, VectorItem};
+use crate::vector::{Metric, SearchRequest, VectorCollectionInfo, VectorError, VectorItem};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -18,6 +18,103 @@ pub struct CreateCollectionResponse {
     pub collection: String,
     pub dim: usize,
     pub metric: Metric,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListCollectionsResponse {
+    pub collections: Vec<VectorCollectionInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorCollectionDetailResponse {
+    pub collection: String,
+    pub dim: Option<usize>,
+    pub metric: Option<Metric>,
+    pub count: Option<usize>,
+    pub created_at_ms: Option<u64>,
+    pub updated_at_ms: Option<u64>,
+    pub manifest: Option<serde_json::Value>,
+    pub notes: Option<String>,
+    pub segments: Option<usize>,
+    pub deleted: Option<u64>,
+}
+
+pub async fn list_collections(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let collections = state.engine.list_vector_collections();
+    Ok(axum::Json(ListCollectionsResponse { collections }))
+}
+
+pub async fn get_collection_detail(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if collection.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection too long",
+        ));
+    }
+    let stats = state.engine.vector_collection_info(&collection);
+    let manifest = state.engine.vector_manifest_value(&collection);
+    if stats.is_none() && manifest.is_none() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "collection not found",
+        ));
+    }
+    let manifest_dim = manifest
+        .as_ref()
+        .and_then(|v| v.get("dim"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let manifest_metric = manifest
+        .as_ref()
+        .and_then(|v| v.get("metric"))
+        .cloned()
+        .and_then(|val| serde_json::from_value::<Metric>(val).ok());
+    let created_at_ms = manifest
+        .as_ref()
+        .and_then(|v| v.get("created_at_ms"))
+        .and_then(|v| v.as_u64());
+    let updated_at_ms = manifest
+        .as_ref()
+        .and_then(|v| v.get("updated_at_ms"))
+        .and_then(|v| v.as_u64());
+
+    let (dim, metric, count, segments, deleted) = if let Some(info) = stats.as_ref() {
+        (
+            Some(info.dim),
+            Some(info.metric),
+            Some(info.live_count),
+            info.segments,
+            info.deleted_count,
+        )
+    } else {
+        (None, None, None, None, None)
+    };
+
+    let mut notes = None;
+    if stats.is_none() && manifest.is_some() {
+        notes = Some("using manifest fallback".to_string());
+    }
+
+    let response = VectorCollectionDetailResponse {
+        collection,
+        dim: dim.or(manifest_dim),
+        metric: metric.or(manifest_metric),
+        count: count,
+        created_at_ms,
+        updated_at_ms,
+        manifest,
+        notes,
+        segments,
+        deleted,
+    };
+    Ok(axum::Json(response))
 }
 
 pub async fn create_collection(

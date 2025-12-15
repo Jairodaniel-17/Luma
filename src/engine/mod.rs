@@ -5,9 +5,12 @@ mod state;
 mod state_db;
 
 use crate::config::Config;
-use crate::vector::{Metric, SearchHit, SearchRequest, VectorError, VectorItem, VectorStore};
+use crate::vector::{
+    Metric, SearchHit, SearchRequest, VectorCollectionInfo, VectorError, VectorItem, VectorStore,
+};
 use anyhow::Context;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -35,6 +38,10 @@ struct Inner {
     persist: Option<persist::Persist>,
     commit_lock: Mutex<()>,
 }
+
+const VECTOR_MANIFEST_PREFIX: &str = "vector:";
+const VECTOR_MANIFEST_SUFFIX: &str = ":manifest";
+const VECTOR_MANIFEST_SCAN_LIMIT: usize = 4096;
 
 impl Engine {
     pub fn new(config: Config) -> anyhow::Result<Self> {
@@ -341,6 +348,96 @@ impl Engine {
         &self.0.vectors
     }
 
+    pub fn vector_collection_info(&self, collection: &str) -> Option<VectorCollectionInfo> {
+        self.0.vectors.get_collection_info(collection)
+    }
+
+    pub fn vector_manifest_value(&self, collection: &str) -> Option<serde_json::Value> {
+        self.get_state(&vector_manifest_key(collection))
+            .map(|item| item.value)
+    }
+
+    pub fn list_vector_collections(&self) -> Vec<VectorCollectionInfo> {
+        let mut collections: HashMap<String, VectorCollectionInfo> = self
+            .0
+            .vectors
+            .list_collections()
+            .into_iter()
+            .map(|info| (info.collection.clone(), info))
+            .collect();
+
+        let manifest_items = self.list_state(Some(VECTOR_MANIFEST_PREFIX), VECTOR_MANIFEST_SCAN_LIMIT);
+        for item in manifest_items {
+            let Some(collection) = collection_from_manifest_key(&item.key) else {
+                continue;
+            };
+            let Some(meta) = parse_vector_manifest_metadata(&collection, &item.value) else {
+                continue;
+            };
+            if let Some(existing) = collections.get_mut(&collection) {
+                existing.created_at_ms = meta.created_at_ms;
+                existing.updated_at_ms = meta.updated_at_ms;
+                if let Some(dim) = meta.dim {
+                    existing.dim = dim;
+                }
+                if let Some(metric) = meta.metric {
+                    existing.metric = metric;
+                }
+                continue;
+            }
+            let (Some(dim), Some(metric)) = (meta.dim, meta.metric) else {
+                continue;
+            };
+            collections.insert(
+                collection.clone(),
+                VectorCollectionInfo {
+                    collection,
+                    dim,
+                    metric,
+                    live_count: 0,
+                    total_records: 0,
+                    upsert_count: 0,
+                    file_len: 0,
+                    applied_offset: 0,
+                    created_at_ms: meta.created_at_ms,
+                    updated_at_ms: meta.updated_at_ms,
+                    segments: None,
+                    deleted_count: None,
+                },
+            );
+        }
+
+        let mut out: Vec<_> = collections.into_values().collect();
+        out.sort_by(|a, b| a.collection.cmp(&b.collection));
+        out
+    }
+
+    fn persist_vector_manifest_state(
+        &self,
+        collection: &str,
+        dim: usize,
+        metric: Metric,
+    ) -> Result<(), EngineError> {
+        let key = vector_manifest_key(collection);
+        let existing = self.get_state(&key);
+        let created_at_ms = existing
+            .as_ref()
+            .and_then(|item| item.value.get("created_at_ms"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(now_ms);
+        let updated_at_ms = now_ms();
+        let value = serde_json::json!({
+            "collection": collection,
+            "dim": dim,
+            "metric": metric,
+            "created_at_ms": created_at_ms,
+            "updated_at_ms": updated_at_ms,
+        });
+        let revision = existing.as_ref().map(|item| item.revision);
+        let _ = self.put_state(key, value, None, revision)?;
+        Ok(())
+    }
+
     pub fn create_vector_collection(
         &self,
         collection: &str,
@@ -365,6 +462,14 @@ impl Engine {
         self.0.events.publish_record(event);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
+        drop(_g);
+        if let Err(err) = self.persist_vector_manifest_state(collection, dim, metric) {
+            tracing::warn!(
+                error = %err,
+                collection,
+                "failed to persist vector manifest metadata"
+            );
+        }
         Ok(())
     }
 
@@ -563,4 +668,59 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     dur.as_millis() as u64
+}
+
+fn vector_manifest_key(collection: &str) -> String {
+    format!("{VECTOR_MANIFEST_PREFIX}{collection}{VECTOR_MANIFEST_SUFFIX}")
+}
+
+fn collection_from_manifest_key(key: &str) -> Option<String> {
+    if !key.starts_with(VECTOR_MANIFEST_PREFIX) || !key.ends_with(VECTOR_MANIFEST_SUFFIX) {
+        return None;
+    }
+    let inner =
+        &key[VECTOR_MANIFEST_PREFIX.len()..key.len().saturating_sub(VECTOR_MANIFEST_SUFFIX.len())];
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+#[derive(Default)]
+struct VectorManifestMeta {
+    dim: Option<usize>,
+    metric: Option<Metric>,
+    created_at_ms: Option<u64>,
+    updated_at_ms: Option<u64>,
+}
+
+fn parse_vector_manifest_metadata(
+    collection: &str,
+    value: &serde_json::Value,
+) -> Option<VectorManifestMeta> {
+    if let Some(other) = value
+        .get("collection")
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.is_empty())
+    {
+        if other != collection {
+            return None;
+        }
+    }
+    let dim = value.get("dim").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let metric = value
+        .get("metric")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<Metric>(v).ok());
+    let created_at_ms = value.get("created_at_ms").and_then(|v| v.as_u64());
+    let updated_at_ms = value.get("updated_at_ms").and_then(|v| v.as_u64());
+    if dim.is_none() && metric.is_none() && created_at_ms.is_none() && updated_at_ms.is_none() {
+        return None;
+    }
+    Some(VectorManifestMeta {
+        dim,
+        metric,
+        created_at_ms,
+        updated_at_ms,
+    })
 }

@@ -64,9 +64,11 @@ pub fn router(engine: Engine, config: Config, sqlite: Option<SqliteService>) -> 
         .route("/v1/doc/:collection/find", post(routes_doc::find))
         .route("/v1/events", get(routes_events::events))
         .route("/v1/stream", get(routes_events::stream))
+        .route("/v1/vector", get(routes_vector::list_collections))
         .route(
             "/v1/vector/:collection",
-            post(routes_vector::create_collection),
+            get(routes_vector::get_collection_detail)
+                .post(routes_vector::create_collection),
         )
         .route("/v1/vector/:collection/add", post(routes_vector::add))
         .route("/v1/vector/:collection/upsert", post(routes_vector::upsert))
