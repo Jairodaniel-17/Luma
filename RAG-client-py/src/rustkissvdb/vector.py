@@ -10,6 +10,13 @@ class VectorAPI:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    def list(self) -> List[Dict[str, Any]]:
+        data = self._client.request("GET", "/v1/vector")
+        return data.get("collections", [])
+
+    def info(self, collection: str) -> Dict[str, Any]:
+        return self._client.request("GET", f"/v1/vector/{collection}")
+
     def create_collection(self, collection: str, dim: int, metric: str = "cosine") -> Dict[str, Any]:
         return self._client.request(
             "POST",
