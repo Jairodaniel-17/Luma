@@ -71,6 +71,22 @@ pub struct SearchHit {
     pub meta: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VectorCollectionInfo {
+    pub collection: String,
+    pub dim: usize,
+    pub metric: Metric,
+    pub live_count: usize,
+    pub total_records: u64,
+    pub upsert_count: u64,
+    pub file_len: u64,
+    pub applied_offset: u64,
+    pub created_at_ms: Option<u64>,
+    pub updated_at_ms: Option<u64>,
+    pub segments: Option<usize>,
+    pub deleted_count: Option<u64>,
+}
+
 struct Collection {
     dim: usize,
     metric: Metric,
@@ -208,6 +224,28 @@ impl VectorStore {
         cols.get(name).map(|c| (c.dim, c.metric))
     }
 
+    pub fn get_collection_info(&self, name: &str) -> Option<VectorCollectionInfo> {
+        let cols = self.0.collections.read();
+        cols.get(name).map(|c| VectorCollectionInfo {
+            collection: name.to_string(),
+            dim: c.dim,
+            metric: c.metric,
+            live_count: c.manifest.live_count,
+            total_records: c.manifest.total_records,
+            upsert_count: c.manifest.upsert_count,
+            file_len: c.manifest.file_len,
+            applied_offset: c.manifest.applied_offset,
+            created_at_ms: None,
+            updated_at_ms: None,
+            segments: Some(c.segments.len()),
+            deleted_count: Some(
+                c.manifest
+                    .total_records
+                    .saturating_sub(c.manifest.live_count as u64),
+            ),
+        })
+    }
+
     pub fn create_collection(
         &self,
         name: &str,
@@ -229,6 +267,30 @@ impl VectorStore {
         c.rebuild_index();
         cols.insert(name.to_string(), c);
         Ok(())
+    }
+
+    pub fn list_collections(&self) -> Vec<VectorCollectionInfo> {
+        let cols = self.0.collections.read();
+        cols.iter()
+            .map(|(name, c)| VectorCollectionInfo {
+                collection: name.clone(),
+                dim: c.dim,
+                metric: c.metric,
+                live_count: c.manifest.live_count,
+                total_records: c.manifest.total_records,
+                upsert_count: c.manifest.upsert_count,
+                file_len: c.manifest.file_len,
+                applied_offset: c.manifest.applied_offset,
+                created_at_ms: None,
+                updated_at_ms: None,
+                segments: Some(c.segments.len()),
+                deleted_count: Some(
+                    c.manifest
+                        .total_records
+                        .saturating_sub(c.manifest.live_count as u64),
+                ),
+            })
+            .collect()
     }
 
     pub fn get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {

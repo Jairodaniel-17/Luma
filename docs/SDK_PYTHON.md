@@ -28,6 +28,8 @@ Variables soportadas:
 | `RUSTKISS_URL`      | `http://127.0.0.1:9917`         |
 | `RUSTKISS_API_KEY`  | `super-secret`                  |
 | `RUSTKISS_TIMEOUT`  | `60` (segundos)                 |
+| `PORT_RUST_KISS_VDB`| `9917` (fallback para URL)      |
+| `VDB_COLLECTION`    | `docs_demo`                     |
 
 ## APIs expuestas
 
@@ -48,6 +50,8 @@ client.state.batch_put([
 client.vector.create_collection("docs", dim=768, metric="cosine")
 client.vector.upsert("docs", vector_id="doc1", vector=[0.1, 0.2], meta={"title": "demo"})
 hits = client.vector.search("docs", [0.1, 0.2], k=3, include_meta=True)
+collections = client.vector.list()
+info = client.vector.info("docs")
 
 # DocStore
 client.doc.put("tickets", "tk_1", {"title": "Bug #1", "severity": "high"})

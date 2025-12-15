@@ -111,6 +111,81 @@ async fn vector_create_upsert_search() {
 }
 
 #[tokio::test]
+async fn vector_list_collections_endpoint() {
+    let (base, shutdown) = start().await;
+    let client = reqwest::Client::new();
+
+    let initial = client
+        .get(format!("{}/v1/vector", base))
+        .send()
+        .await
+        .unwrap();
+    assert!(initial.status().is_success());
+    let value: serde_json::Value = initial.json().await.unwrap();
+    assert!(value["collections"].as_array().unwrap().is_empty());
+
+    let create = client
+        .post(format!("{}/v1/vector/docs", base))
+        .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(create.status().is_success());
+
+    let listed = client
+        .get(format!("{}/v1/vector", base))
+        .send()
+        .await
+        .unwrap();
+    assert!(listed.status().is_success());
+    let body: serde_json::Value = listed.json().await.unwrap();
+    let collections = body["collections"].as_array().unwrap();
+    assert_eq!(collections.len(), 1);
+    assert_eq!(collections[0]["collection"], "docs");
+    assert_eq!(collections[0]["dim"], 2);
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn vector_collection_detail_endpoint() {
+    let (base, shutdown) = start().await;
+    let client = reqwest::Client::new();
+
+    let missing = client
+        .get(format!("{}/v1/vector/none", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    let body: serde_json::Value = missing.json().await.unwrap();
+    assert_eq!(body["error"], "not_found");
+
+    let create = client
+        .post(format!("{}/v1/vector/docs", base))
+        .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(create.status().is_success());
+
+    let detail = client
+        .get(format!("{}/v1/vector/docs", base))
+        .send()
+        .await
+        .unwrap();
+    assert!(detail.status().is_success());
+    let value: serde_json::Value = detail.json().await.unwrap();
+    assert_eq!(value["collection"], "docs");
+    assert_eq!(value["dim"], 2);
+    assert_eq!(value["metric"], "cosine");
+    assert_eq!(value["count"], 0);
+    assert!(value["manifest"].is_object());
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn docstore_put_get_find() {
     let (base, shutdown) = start().await;
     let client = reqwest::Client::new();

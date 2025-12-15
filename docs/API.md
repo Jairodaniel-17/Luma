@@ -77,6 +77,66 @@ Backpressure:
 
 ## Vector
 
+### Listar colecciones
+`GET /v1/vector`
+
+```bash
+curl "http://localhost:9917/v1/vector"
+```
+
+Respuesta:
+```json
+{
+  "collections": [
+    {
+      "collection": "docs",
+      "dim": 3,
+      "metric": "cosine",
+      "live_count": 0,
+      "total_records": 0,
+      "upsert_count": 0,
+      "file_len": 0,
+      "applied_offset": 0,
+      "created_at_ms": 1713222222222,
+      "updated_at_ms": 1713222222222
+    }
+  ]
+}
+```
+
+
+### Info de colección
+`GET /v1/vector/{collection}`
+
+```bash
+curl "http://localhost:9917/v1/vector/docs"
+```
+
+Respuesta:
+```json
+{
+  "collection": "docs",
+  "dim": 3,
+  "metric": "cosine",
+  "count": 0,
+  "created_at_ms": 1713222222222,
+  "updated_at_ms": 1713222222222,
+  "segments": 1,
+  "deleted": 0,
+  "manifest": {
+    "collection": "docs",
+    "dim": 3,
+    "metric": "cosine",
+    "created_at_ms": 1713222222222,
+    "updated_at_ms": 1713222222222
+  },
+  "notes": null
+}
+```
+
+> Si la colección no está cargada aún, el endpoint usa solo el manifest del State Store y marca `notes: "using manifest fallback"`. Algunos campos pueden aparecer como `null`.
+
+
 ### Crear colección
 `POST /v1/vector/{collection}`
 

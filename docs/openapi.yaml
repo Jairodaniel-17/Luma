@@ -59,6 +59,50 @@ components:
         collection: { type: string }
         dim: { type: integer }
         metric: { $ref: "#/components/schemas/VectorMetric" }
+    VectorCollectionInfo:
+      type: object
+      required:
+        [
+          collection,
+          dim,
+          metric,
+          live_count,
+          total_records,
+          upsert_count,
+          file_len,
+          applied_offset,
+        ]
+      properties:
+        collection: { type: string }
+        dim: { type: integer }
+        metric: { $ref: "#/components/schemas/VectorMetric" }
+        live_count: { type: integer, format: uint64 }
+        total_records: { type: integer, format: uint64 }
+        upsert_count: { type: integer, format: uint64 }
+        file_len: { type: integer, format: uint64 }
+        applied_offset: { type: integer, format: uint64 }
+        created_at_ms: { type: integer, format: uint64, nullable: true }
+        updated_at_ms: { type: integer, format: uint64, nullable: true }
+    VectorCollectionsResponse:
+      type: object
+      properties:
+        collections:
+          type: array
+          items: { $ref: "#/components/schemas/VectorCollectionInfo" }
+    VectorCollectionDetailResponse:
+      type: object
+      required: [collection]
+      properties:
+        collection: { type: string }
+        dim: { type: integer, nullable: true }
+        metric: { $ref: "#/components/schemas/VectorMetric", nullable: true }
+        count: { type: integer, nullable: true }
+        created_at_ms: { type: integer, format: uint64, nullable: true }
+        updated_at_ms: { type: integer, format: uint64, nullable: true }
+        segments: { type: integer, nullable: true }
+        deleted: { type: integer, format: uint64, nullable: true }
+        manifest: { type: object, nullable: true }
+        notes: { type: string, nullable: true }
     VectorAddRequest:
       type: object
       required: [id, vector]
@@ -351,7 +395,34 @@ paths:
       responses:
         "200": { description: text/event-stream }
         "401": { description: Unauthorized }
+  /v1/vector:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: List vector collections
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VectorCollectionsResponse" }
+        "401": { description: Unauthorized }
   /v1/vector/{collection}:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: Get vector collection detail
+      parameters:
+        - in: path
+          name: collection
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VectorCollectionDetailResponse" }
+        "401": { description: Unauthorized }
+        "404": { description: Not found }
     post:
       security: [{ bearerAuth: [] }]
       summary: Create a vector collection
