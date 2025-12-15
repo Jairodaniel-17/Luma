@@ -127,6 +127,12 @@ class RustKissVDBClient:
             include_meta=bool(include_meta),
         )
 
+    def vector_list(self) -> List[Dict[str, Any]]:
+        return self._client.vector.list()
+
+    def vector_info(self, collection: str) -> Dict[str, Any]:
+        return self._client.vector.info(collection)
+
 
 # =================================================
 # Ollama clients
@@ -222,6 +228,30 @@ def format_sources_footer(sources: List[SourceHit], max_items: int = 6) -> str:
     return f"Fuentes usadas: {pages_str}"
 
 
+def print_available_collections(vdb: RustKissVDBClient) -> None:
+    try:
+        collections = vdb.vector_list()
+    except Exception as exc:
+        print(f"?? No pude listar colecciones vectoriales: {exc}")
+        return
+    if not collections:
+        print("?? No hay colecciones vectoriales registradas en RustKissVDB.\n")
+        return
+    print("? Colecciones disponibles:")
+    for col in collections:
+        name = col.get("collection")
+        dim = col.get("dim")
+        metric = col.get("metric")
+        created = col.get("created_at_ms")
+        extra = f"dim={dim}" if dim is not None else "dim=?"
+        if metric:
+            extra += f", metric={metric}"
+        if created:
+            extra += f", created_at={created}"
+        print(f" - {name} ({extra})")
+    print()
+
+
 # =================================================
 # Persistent chat memory in VDB state
 # =================================================
@@ -309,11 +339,29 @@ def main():
                 f"embed_model={manifest.get('embed_model')} pdf={manifest.get('pdf_path')}"
             )
     except Exception:
-        docs = vdb.state_list(prefix="docs:", limit=50)
-        print(f"❌ No encuentro docs:{collection}:manifest. Disponibles:")
-        for d in docs:
-            print(" -", d.key)
+        print(f"❌ No encuentro docs:{collection}:manifest. ¿VDB_COLLECTION correcto?")
+        print_available_collections(vdb)
         return
+
+    try:
+        vector_info = vdb.vector_info(collection)
+        if vector_info.get("count") is not None:
+            print(
+                f"📊 Vector info: count={vector_info.get('count')} "
+                f"dim={vector_info.get('dim')} metric={vector_info.get('metric')}"
+            )
+    except Exception:
+        vector_info = None
+
+    try:
+        available = vdb.vector_list()
+        names = {c.get("collection") for c in available if c.get("collection")}
+        if names and collection not in names:
+            print(f"❌ Colección '{collection}' no existe en vector store.")
+            print_available_collections(vdb)
+            return
+    except Exception:
+        pass
 
     # dim check (fail-fast)
     try:
