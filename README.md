@@ -1,112 +1,224 @@
 # RustKissVDB
 
-Base de datos en Rust con enfoque KISS que combina **State Store + Event Store + SSE + Vector Store** en un solo binario listo para usar.
+**RustKissVDB** es una **base de datos multimodelo, local-first y event-sourced**, expuesta como un **servicio HTTP**.
+Combina **Key-Value con revisiones**, **Event Log con snapshots**, **Vector Store (HNSW)**, **Document Store** y **SQLite embebido**, con **streaming de cambios vía SSE**.
 
-> Filosofia: menos capas, mas visibilidad en vivo y persistencia opcional via WAL+snapshots.
+> Filosofía: **KISS**, almacenamiento explícito, cero magia oculta, recuperación determinística.
 
-## Que incluye
+---
 
-- **HTTP API (axum + tokio)**: endpoints `state`, `vector`, `doc`, `sql`, `stream`, `health`, `metrics`.
-- **SSE Event Stream**: `GET /v1/stream` con replay por offset, filtros por tipo/prefijo/coleccion y manejo de gaps.
-- **State Engine**: KV in-memory con TTL, revision incremental y soporte CAS (`if_revision`).
-- **Event Store**: offset global u64, WAL segmentado y snapshot opcional cuando apuntas `DATA_DIR`.
-- **Vector Store (HNSW)**: colecciones `{dim, metric}`, operaciones completas `add/upsert/update/delete/get/search` y filtros exactos sobre `meta`.
-- **DocStore + SQLite opcional**: documentos JSON con índices keyword y módulo SQL embebido protegido por API key.
-- **SDK Python** (`RAG-client-py/src/rustkissvdb`): cliente sin dependencias raras (`httpx`).
+## Características principales
 
-## Arquitectura en 30s
+- ✅ **Event-sourced storage**
+  - WAL segmentado (`events-*.log`)
+  - Reproducción determinística del estado
+  - Snapshots para fast-boot
 
-1. **Control plane HTTP** recibe comandos REST.
-2. **Engine State+Events** valida, versiona y publica sobre un `EventBus`.
-3. **SSE Layer** expone el log vivo y replay desde WAL/buffer.
-4. **Vector Store** reconstruye el indice desde `vectors/<collection>/{manifest.json,vectors.bin}` en cada arranque.
-5. **Persistencia** se habilita cuando defines `DATA_DIR`, guardando WAL segmentado y snapshots periodicos (`SNAPSHOT_INTERVAL_SECS`).
+- ✅ **Key-Value Store**
+  - Revisiones (`revision: u64`)
+  - CAS (`if_revision`)
+  - TTL / expiración
+  - Persistencia en `redb`
 
-Detalles completos en `docs/ARCHITECTURE.md`.
+- ✅ **Vector Database**
+  - Colecciones por dimensión y métrica
+  - Índices **HNSW** (`hnsw_rs`)
+  - Persistencia binaria por colección
 
-## Requisitos previos
+- ✅ **Document Store**
+  - Documentos JSON schemaless
+  - Revisiones por documento
 
-- Rust estable (cargo 1.77+).
-- (Opcional) `DATA_DIR` apuntando a un directorio escribible para habilitar durabilidad.
+- ✅ **Event Streaming (CDC)**
+  - SSE con replay + tail
+  - Filtros por tipo, key prefix o colección
 
-## Quickstart
+- ✅ **SQL embebido**
+  - SQLite (`rusqlite`, bundled)
+  - SELECT / DDL / DML vía API
 
-```powershell
-set DATA_DIR=.\data            # omite si solo quieres in-memory
-cargo run --bin rust-kiss-vdb -- --logs info
+- ✅ **Single-node, local-first**
+  - Sin clustering
+  - Sin dependencias externas
+
+---
+
+## Arquitectura de alto nivel
+
+```text
+                   ┌─────────────┐
+                   │  HTTP API   │  (Axum)
+                   └─────┬───────┘
+                         │
+              ┌──────────┴──────────┐
+              │     Engine Core     │
+              │─────────────────────│
+              │ Event Log (WAL)     │
+              │ State Materializer  │
+              │ Vector Engine       │
+              │ Doc Store           │
+              │ SQLite Adapter      │
+              └──────────┬──────────┘
+                         │
+     ┌───────────────────┴───────────────────┐
+     │            Storage Layer              │
+     │───────────────────────────────────────│
+     │ events-XXXX.log   → WAL segmentado    │
+     │ snapshot.json     → Snapshot          │
+     │ state.redb        → KV materializado  │
+     │ vectors/*         → Vector segments   │
+     └───────────────────────────────────────┘
 ```
 
-1. **SSE**  
-   `curl -N "http://localhost:9917/v1/stream?since=0"`
-2. **Docs vivas**  
-   - Swagger UI: <http://localhost:9917/docs>  
-   - OpenAPI: <http://localhost:9917/openapi.yaml>
-3. **Demo end-to-end**  
-   `scripts\demo.ps1` (crea coleccion vectorial, publica estado y muestra eventos).
+---
 
-> Tip: usa `--logs warning` para reducir ruido o cambia en caliente via flag sin tocar `RUST_LOG`.
+## Layout de datos en disco
 
-## Config rapida
+```text
+data/
+├─ events-003605.log
+├─ events-003606.log
+├─ events-003607.log
+├─ ...
+├─ snapshot.json
+├─ state.redb
+└─ vectors/
+   ├─ collection_a/
+   │  ├─ manifest.json
+   │  └─ vectors.bin
+   └─ collection_b/
+      ├─ manifest.json
+      └─ vectors.bin
+```
 
-Variables de entorno criticas:
+### Significado
 
-| Variable | Default | Nota |
-| --- | --- | --- |
-| `PORT_RUST_KISS_VDB` | `9917` | Puerto HTTP único (CLI `--port` manda si se define). |
-| `BIND_ADDR` / `--bind` | `127.0.0.1` | Si necesitas exponer usa `--bind 0.0.0.0` o `--unsafe-bind`. |
-| `RUSTKISS_API_KEY` / `API_KEY` | `dev` | Token Bearer opcional (recomendado en prod). |
-| `DATA_DIR` | vacío | Activa WAL + snapshots + storage vectorial en disco. |
-| `SQLITE_ENABLED` | `0` | Habilita `/v1/sql/*` (requiere `DATA_DIR`). |
-| `MAX_*` | ver `docs/CONFIG.md` | Límites anti-DoS (body/json/key/id/dim/k/batch/docfind). |
+| Archivo / carpeta         | Propósito                                 |
+| ------------------------- | ----------------------------------------- |
+| `events-*.log`            | WAL append-only, fuente de verdad         |
+| `snapshot.json`           | Estado materializado para recovery rápido |
+| `state.redb`              | KV store persistente (redb)               |
+| `vectors/*/manifest.json` | Metadata de colección vectorial           |
+| `vectors/*/vectors.bin`   | Datos binarios + HNSW                     |
 
-Flags CLI: `--logs info|warning|error|critical`, `--port <u16>` (prioridad: CLI `--port` -> `PORT_RUST_KISS_VDB` -> `9917`).
+---
 
-Ejemplos avanzados en `docs/CONFIG.md`.
+## Modelos de datos soportados
 
-## API Surface
+### 1. Key-Value Store
 
-- **State**: `PUT/GET/DELETE /v1/state/{key}`, `GET /v1/state?prefix=&limit=`, `POST /v1/state/batch_put`.
-- **Vector**: `POST /v1/vector/{collection}` + `add/upsert/update/delete/get/search`, `*_batch`.
-- **DocStore**: `PUT/GET/DELETE /v1/doc/{collection}/{id}`, `POST /v1/doc/{collection}/find`.
-- **SQLite (opcional)**: `POST /v1/sql/query`, `POST /v1/sql/exec`.
-- **Events**: `GET /v1/stream?since=<offset>&types=...&key_prefix=...&collection=...`.
-- **Ops**: `GET /v1/health`, `GET /v1/metrics`.
+- `key: string`
+- `value: any`
+- `revision: u64`
+- `ttl_ms`
+- CAS con `if_revision`
 
-Protege con API key y/o reverse proxy si lo expones fuera de localhost. Consulta `docs/API.md` para `curl` listos.
+### 2. Event Store
 
-## Docs de apoyo
+- Append-only
+- Offset incremental
+- Replay desde offset arbitrario
 
-| Archivo | Contenido |
-| --- | --- |
-| `docs/ARCHITECTURE.md` | Decisiones de diseno de engine, SSE, WAL y vector store. |
-| `docs/API.md` | Cheatsheet de endpoints y ejemplos `curl`. |
-| `docs/CONFIG.md` | Todas las variables/límites y ejemplo de arranque. |
-| `docs/DEMO.md` | Pasos del demo para ver SSE + vector en vivo. |
-| `docs/BENCH.md` | Como correr el micro bench (`cargo run --release --bin bench`). |
-| `docs/PROD_READINESS.md` | Checklist para llevarlo a produccion (durability, CORS, limites, tuning SSE). |
-| `docs/SECURITY.md` | Modos de despliegue (local/proxy/API key). |
-| `docs/VECTOR_STORAGE.md` | Segmentos, compaction y estructura de archivos. |
-| `docs/SDK_PYTHON.md` | Uso del cliente Python + ejemplos. |
+### 3. Vector Store
 
-## Demo y Bench
+- Métricas: `cosine`, `dot`
+- Índice HNSW
+- Top-K search
+- Batch upsert / delete
 
-- **Demo**: sigue `docs/DEMO.md` para levantar SSE, correr `scripts/demo.ps1` y ver eventos `state_*` y `vector_*`.
-- **Bench**: `cargo run --release --bin bench` imprime p50/p95 microseg para `state.put/get` y `vector.search`.
+### 4. Document Store
 
-## Prod readiness express
+- JSON schemaless
+- Colecciones + ID
+- Revisión por documento
 
-- Define `DATA_DIR` siempre en ambiente real para no perder eventos.
-- Ajusta `LIVE_BROADCAST_CAPACITY` si esperas picos SSE; clientes lentos veran `event: gap` pero pueden reconectar con `since`.
-- Configura `MAX_BODY_BYTES`, `MAX_VECTOR_DIM`, `MAX_K`, etc. para tu carga.
-- CORS abierto en dev; en prod define `CORS_ALLOWED_ORIGINS`.
-- Logs: `--logs warning` recomendado y exporta stdout/stderr a tu stack.
+### 5. SQL
 
-Checklist completo en `docs/PROD_READINESS.md`.
+- SQLite embebido
+- Consultas parametrizadas
+- DDL/DML controlado
+
+---
+
+## API
+
+- OpenAPI 3.0: [`docs/openapi.yaml`](docs/openapi.yaml)
+- Prefijo: `/v1/*`
+- Autenticación: Bearer token
+- SSE: `text/event-stream`
+
+Ejemplos:
+
+- `/v1/state/{key}`
+- `/v1/vector/{collection}/search`
+- `/v1/stream`
+- `/v1/doc/{collection}/{id}`
+- `/v1/sql/query`
+
+---
+
+## Estructura del código
+
+```text
+src/
+├─ api/            → HTTP handlers (Axum)
+├─ engine/
+│  ├─ events.rs    → WAL + offsets
+│  ├─ persist.rs  → snapshots
+│  ├─ state.rs    → KV materializer
+│  └─ state_db.rs → redb adapter
+├─ vector/
+│  ├─ mod.rs
+│  └─ persist.rs  → HNSW + binarios
+├─ docstore/       → Document store
+├─ sqlite/         → SQLite adapter
+├─ bin/
+│  └─ bench.rs
+├─ config.rs
+├─ lib.rs
+└─ main.rs
+```
+
+---
+
+## Dependencias clave
+
+- **Axum** → HTTP API
+- **Tokio** → Async runtime
+- **redb** → KV persistente
+- **hnsw_rs** → Vector indexing
+- **rusqlite (bundled)** → SQL embebido
+- **bincode** → Serialización binaria
+- **SSE (async-stream)** → CDC
+
+---
+
+## Filosofía de diseño
+
+- ✔ Single-node
+- ✔ Determinista
+- ✔ Event-sourced
+- ✔ Observabilidad explícita
+- ✔ Persistencia clara (archivos visibles)
+- ❌ No clustering
+- ❌ No sharding
+- ❌ No consenso distribuido
+
+---
+
+## Casos de uso ideales
+
+- RAG local / privado
+- Memoria de agentes
+- Sistemas offline-first
+- Prototipos de DB engines
+- Investigación en arquitecturas event-sourced
+- Sustituto ligero de Redis + Vector DB + SQLite
+
+---
 
 ## Estado del proyecto
 
-- v1 listo para un solo nodo, sin autenticacion incorporada.
-- Persistencia, vector store y SSE probados via tests + demo.
-- Roadmap inmediato: compaction de vectores y controles de acceso (ver `codex/AGENTS.md` para contexto del agente).
-
-Con esto deberias poder levantar RustKissVDB, explorar la API y operar el stack con el material dentro de `docs/`.
+- Versión: **0.1.1**
+- Estado: **Activo / experimental**
+- Enfoque: Correctitud, claridad, KISS
