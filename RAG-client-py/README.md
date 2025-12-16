@@ -60,7 +60,9 @@ with Client(cfg.base_url, api_key=cfg.api_key, timeout=cfg.timeout) as client:
 
 - `examples/chat_rag_pdf.py`: CLI de chat que almacena memoria en RustKissVDB y usa Ollama para embeddings/chat.
 - `examples/ingest_pdf_to_vdb.py`: chunk + embed de un PDF y lo sube a la colección vectorial.
-- `examples/vector_list_info.py`: script corto para listar colecciones y mostrar `GET /v1/vector/{collection}`.
+- `examples/vector_list_info.py`: lista colecciones + detalla una con `GET /v1/vector/{collection}`.
+- `examples/state_chat_memory.py`: CLI mínima que guarda el historial de conversaciones en `state`.
+- `examples/subapi_quickstart.py`: recorrido express por `state`, `doc`, `vector` y `sql` APIs.
 
 Ambos se apoyan en el SDK (`rustkissvdb.Client`) y usan las variables `.env`.
 
