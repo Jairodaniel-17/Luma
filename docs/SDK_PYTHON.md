@@ -70,5 +70,8 @@ for event in client.stream.events(since=0, types="state_updated"):
 
 - `examples/chat_rag_pdf.py`: chat RAG en consola usando RustKissVDB + Ollama (embeddings + chat).
 - `examples/ingest_pdf_to_vdb.py`: ingesta de PDF (chunks + embeddings).
+- `examples/state_chat_memory.py`: guarda historial de conversaciones en `state`.
+- `examples/subapi_quickstart.py`: muestra cómo usar todas las sub-APIs (`state`, `vector`, `doc`, `sql`).
+- `examples/vector_list_info.py`: autodetección de colecciones via `vector.list()` + `vector.info()`.
 
 Ambos ejemplos consumen el SDK y cargan `VDB_BASE_URL`, `OLLAMA_*` y `RUSTKISS_API_KEY` desde `.env`.
