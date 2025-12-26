@@ -5,31 +5,19 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot;
 
 async fn start() -> (String, oneshot::Sender<()>) {
-    let config = Config {
-        port: 0,
-        bind_addr: "127.0.0.1".parse().unwrap(),
-        api_key: "test".to_string(),
-        data_dir: None,
-        snapshot_interval_secs: 30,
-        event_buffer_size: 1000,
-        live_broadcast_capacity: 1024,
-        wal_segment_max_bytes: 4 * 1024 * 1024,
-        wal_retention_segments: 4,
-        request_timeout_secs: 30,
-        max_body_bytes: 1_048_576,
-        max_key_len: 512,
-        max_collection_len: 64,
-        max_id_len: 128,
-        max_vector_dim: 4096,
-        max_k: 256,
-        max_json_bytes: 64 * 1024,
-        max_state_batch: 256,
-        max_vector_batch: 256,
-        max_doc_find: 100,
-        cors_allowed_origins: None,
-        sqlite_enabled: false,
-        sqlite_path: None,
-    };
+    start_with_config(base_test_config()).await
+}
+
+async fn start_with_diskann() -> (String, oneshot::Sender<()>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_test_config();
+    config.data_dir = Some(dir.path().to_string_lossy().to_string());
+    let (base, shutdown) = start_with_config(config).await;
+    (base, shutdown, dir)
+}
+
+async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
+    let config = config;
     let engine = Engine::new(config.clone()).unwrap();
     let app = api::router(engine, config, None);
 
@@ -108,6 +96,52 @@ async fn vector_create_upsert_search() {
     assert_eq!(v["hits"][0]["id"], "a");
 
     let _ = shutdown.send(());
+}
+
+fn base_test_config() -> Config {
+    Config {
+        port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
+        api_key: "test".to_string(),
+        data_dir: None,
+        snapshot_interval_secs: 30,
+        event_buffer_size: 1000,
+        live_broadcast_capacity: 1024,
+        wal_segment_max_bytes: 4 * 1024 * 1024,
+        wal_retention_segments: 4,
+        request_timeout_secs: 30,
+        max_body_bytes: 1_048_576,
+        max_key_len: 512,
+        max_collection_len: 64,
+        max_id_len: 128,
+        max_vector_dim: 4096,
+        max_k: 256,
+        max_json_bytes: 64 * 1024,
+        max_state_batch: 256,
+        max_vector_batch: 256,
+        max_doc_find: 100,
+        cors_allowed_origins: None,
+        sqlite_enabled: false,
+        sqlite_path: None,
+        search_threads: 0,
+        parallel_probe: true,
+        parallel_probe_min_segments: 4,
+        simd_enabled: true,
+        index_kind: "IVF_FLAT_Q8".to_string(),
+        ivf_clusters: 64,
+        ivf_nprobe: 8,
+        ivf_training_sample: 1024,
+        ivf_min_train_vectors: 64,
+        ivf_retrain_min_deltas: 32,
+        q8_refine_topk: 256,
+        diskann_max_degree: 32,
+        diskann_build_threads: 1,
+        diskann_search_list_size: 64,
+        run_target_bytes: 8 * 1024 * 1024,
+        run_retention: 4,
+        compaction_trigger_tombstone_ratio: 0.2,
+        compaction_max_bytes_per_pass: 64 * 1024 * 1024,
+    }
 }
 
 #[tokio::test]
@@ -217,6 +251,62 @@ async fn docstore_put_get_find() {
     let v: serde_json::Value = find.json().await.unwrap();
     assert!(v["documents"].as_array().unwrap().len() >= 1);
     assert_eq!(v["documents"][0]["doc"]["role"], "admin");
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn vector_diskann_build_status_and_tune() {
+    let (base, shutdown, _dir) = start_with_diskann().await;
+    let client = reqwest::Client::new();
+
+    let create = client
+        .post(format!("{}/v1/vector/docs", base))
+        .json(&serde_json::json!({"dim":3,"metric":"cosine"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(create.status().is_success());
+
+    for (id, vector) in [("a", vec![1.0, 0.0, 0.0]), ("b", vec![0.0, 1.0, 0.0])] {
+        let upsert = client
+            .post(format!("{}/v1/vector/docs/upsert", base))
+            .json(&serde_json::json!({"id":id,"vector":vector}))
+            .send()
+            .await
+            .unwrap();
+        assert!(upsert.status().is_success());
+    }
+
+    let build = client
+        .post(format!("{}/v1/vector/docs/diskann/build", base))
+        .json(&serde_json::json!({"max_degree":16,"search_list_size":48}))
+        .send()
+        .await
+        .unwrap();
+    assert!(build.status().is_success());
+    let body: serde_json::Value = build.json().await.unwrap();
+    assert_eq!(body["status"]["available"], true);
+    assert_eq!(body["params"]["max_degree"], 16);
+
+    let status = client
+        .get(format!("{}/v1/vector/docs/diskann/status", base))
+        .send()
+        .await
+        .unwrap();
+    assert!(status.status().is_success());
+    let status_body: serde_json::Value = status.json().await.unwrap();
+    assert_eq!(status_body["available"], true);
+
+    let tune = client
+        .post(format!("{}/v1/vector/docs/diskann/tune", base))
+        .json(&serde_json::json!({"search_list_size":96}))
+        .send()
+        .await
+        .unwrap();
+    assert!(tune.status().is_success());
+    let tune_body: serde_json::Value = tune.json().await.unwrap();
+    assert_eq!(tune_body["params"]["search_list_size"], 96);
 
     let _ = shutdown.send(());
 }

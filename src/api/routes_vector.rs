@@ -1,6 +1,7 @@
 use crate::api::errors::{ApiError, ErrorBody};
 use crate::api::AppState;
 use crate::engine::EngineError;
+use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};
 use crate::vector::{Metric, SearchRequest, VectorCollectionInfo, VectorError, VectorItem};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -172,6 +173,28 @@ pub struct DeleteBatchBody {
 #[derive(Debug, Serialize)]
 pub struct VectorBatchResponse {
     pub results: Vec<VectorBatchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiskAnnBuildRequest {
+    pub max_degree: Option<usize>,
+    pub build_threads: Option<usize>,
+    pub search_list_size: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskAnnStatusResponse {
+    pub available: bool,
+    pub last_built_ms: u64,
+    pub graph_files: Vec<String>,
+    pub params: DiskAnnBuildParams,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskAnnMutationResponse {
+    pub ok: bool,
+    pub params: DiskAnnBuildParams,
+    pub status: DiskAnnStatusResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -692,6 +715,11 @@ fn map_vector_error(err: VectorError) -> ApiError {
             "persistence_error",
             "vector persistence error",
         ),
+        VectorError::UnsupportedOperation => ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_supported",
+            "vector operation not supported",
+        ),
     }
 }
 
@@ -713,5 +741,100 @@ fn map_engine_error(err: EngineError) -> ApiError {
             "internal",
             "internal error",
         ),
+    }
+}
+pub async fn diskann_build(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<DiskAnnBuildRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_collection_len(&collection, &state)?;
+    let params = diskann_params_from_request(&state, &body);
+    state
+        .engine
+        .vector_build_disk_index(&collection, params.clone())
+        .map_err(map_engine_error)?;
+    let status = state
+        .engine
+        .vector_disk_index_status(&collection)
+        .map_err(map_engine_error)?;
+    Ok(axum::Json(DiskAnnMutationResponse {
+        ok: true,
+        params,
+        status: status.into(),
+    }))
+}
+
+pub async fn diskann_tune(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<DiskAnnBuildRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_collection_len(&collection, &state)?;
+    let params = diskann_params_from_request(&state, &body);
+    let applied = state
+        .engine
+        .vector_update_disk_index_params(&collection, params.clone())
+        .map_err(map_engine_error)?;
+    let status = state
+        .engine
+        .vector_disk_index_status(&collection)
+        .map_err(map_engine_error)?;
+    Ok(axum::Json(DiskAnnMutationResponse {
+        ok: true,
+        params: applied,
+        status: status.into(),
+    }))
+}
+
+pub async fn diskann_status(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_collection_len(&collection, &state)?;
+    let status = state
+        .engine
+        .vector_disk_index_status(&collection)
+        .map_err(map_engine_error)?;
+    Ok(axum::Json(DiskAnnStatusResponse::from(status)))
+}
+
+fn ensure_collection_len(collection: &str, state: &AppState) -> Result<(), ApiError> {
+    if collection.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection too long",
+        ));
+    }
+    Ok(())
+}
+
+fn diskann_params_from_request(state: &AppState, body: &DiskAnnBuildRequest) -> DiskAnnBuildParams {
+    DiskAnnBuildParams {
+        max_degree: body
+            .max_degree
+            .unwrap_or(state.config.diskann_max_degree)
+            .max(4),
+        build_threads: body
+            .build_threads
+            .unwrap_or(state.config.diskann_build_threads)
+            .max(1),
+        search_list_size: body
+            .search_list_size
+            .unwrap_or(state.config.diskann_search_list_size)
+            .max(8),
+    }
+    .sanitized()
+}
+
+impl From<DiskIndexStatus> for DiskAnnStatusResponse {
+    fn from(value: DiskIndexStatus) -> Self {
+        Self {
+            available: value.available,
+            last_built_ms: value.last_built_ms,
+            graph_files: value.graph_files,
+            params: value.params,
+        }
     }
 }

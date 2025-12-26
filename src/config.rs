@@ -26,6 +26,24 @@ pub struct Config {
     pub cors_allowed_origins: Option<String>,
     pub sqlite_enabled: bool,
     pub sqlite_path: Option<String>,
+    pub search_threads: usize,
+    pub parallel_probe: bool,
+    pub parallel_probe_min_segments: usize,
+    pub simd_enabled: bool,
+    pub index_kind: String,
+    pub ivf_clusters: usize,
+    pub ivf_nprobe: usize,
+    pub ivf_training_sample: usize,
+    pub ivf_min_train_vectors: usize,
+    pub ivf_retrain_min_deltas: usize,
+    pub q8_refine_topk: usize,
+    pub diskann_max_degree: usize,
+    pub diskann_build_threads: usize,
+    pub diskann_search_list_size: usize,
+    pub run_target_bytes: u64,
+    pub run_retention: usize,
+    pub compaction_trigger_tombstone_ratio: f32,
+    pub compaction_max_bytes_per_pass: u64,
 }
 
 impl Config {
@@ -118,6 +136,86 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
+        let search_threads = std::env::var("SEARCH_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        let parallel_probe = parse_env_bool("PARALLEL_PROBE", true);
+
+        let parallel_probe_min_segments = std::env::var("PARALLEL_PROBE_MIN_SEGMENTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+
+        let simd_enabled = parse_env_bool("SIMD_ENABLED", true);
+
+        let index_kind = std::env::var("INDEX_KIND").unwrap_or_else(|_| "IVF_FLAT_Q8".to_string());
+
+        let ivf_clusters = std::env::var("IVF_CLUSTERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096);
+
+        let ivf_nprobe = std::env::var("IVF_NPROBE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16);
+
+        let ivf_training_sample = std::env::var("IVF_TRAINING_SAMPLE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200_000);
+        let ivf_min_train_vectors = std::env::var("IVF_MIN_TRAIN_VECTORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_024);
+        let ivf_retrain_min_deltas = std::env::var("IVF_RETRAIN_MIN_DELTAS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50_000);
+        let q8_refine_topk = std::env::var("Q8_REFINE_TOPK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512);
+        let diskann_max_degree = std::env::var("DISKANN_MAX_DEGREE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(48);
+        let diskann_build_threads = std::env::var("DISKANN_BUILD_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(1)
+            });
+        let diskann_search_list_size = std::env::var("DISKANN_SEARCH_LIST_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64);
+
+        let run_target_bytes = std::env::var("RUN_TARGET_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(134_217_728);
+
+        let run_retention = std::env::var("RUN_RETENTION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+
+        let compaction_trigger_tombstone_ratio =
+            std::env::var("COMPACTION_TRIGGER_TOMBSTONE_RATIO")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2);
+
+        let compaction_max_bytes_per_pass = std::env::var("COMPACTION_MAX_BYTES_PER_PASS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_073_741_824);
+
         let cors_allowed_origins = std::env::var("CORS_ALLOWED_ORIGINS").ok();
         let sqlite_enabled = matches!(
             std::env::var("SQLITE_ENABLED")
@@ -152,6 +250,24 @@ impl Config {
             cors_allowed_origins,
             sqlite_enabled,
             sqlite_path,
+            search_threads,
+            parallel_probe,
+            parallel_probe_min_segments,
+            simd_enabled,
+            index_kind,
+            ivf_clusters,
+            ivf_nprobe,
+            ivf_training_sample,
+            ivf_min_train_vectors,
+            ivf_retrain_min_deltas,
+            q8_refine_topk,
+            diskann_max_degree,
+            diskann_build_threads,
+            diskann_search_list_size,
+            run_target_bytes,
+            run_retention,
+            compaction_trigger_tombstone_ratio,
+            compaction_max_bytes_per_pass,
         })
     }
 }
@@ -224,4 +340,15 @@ fn resolve_bind_addr() -> IpAddr {
     }
 
     IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+}
+
+fn parse_env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => true,
+            "0" | "false" | "off" | "no" => false,
+            _ => default,
+        })
+        .unwrap_or(default)
 }

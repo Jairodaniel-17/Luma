@@ -67,8 +67,7 @@ pub fn router(engine: Engine, config: Config, sqlite: Option<SqliteService>) -> 
         .route("/v1/vector", get(routes_vector::list_collections))
         .route(
             "/v1/vector/:collection",
-            get(routes_vector::get_collection_detail)
-                .post(routes_vector::create_collection),
+            get(routes_vector::get_collection_detail).post(routes_vector::create_collection),
         )
         .route("/v1/vector/:collection/add", post(routes_vector::add))
         .route("/v1/vector/:collection/upsert", post(routes_vector::upsert))
@@ -84,6 +83,18 @@ pub fn router(engine: Engine, config: Config, sqlite: Option<SqliteService>) -> 
         )
         .route("/v1/vector/:collection/get", get(routes_vector::get))
         .route("/v1/vector/:collection/search", post(routes_vector::search))
+        .route(
+            "/v1/vector/:collection/diskann/build",
+            post(routes_vector::diskann_build),
+        )
+        .route(
+            "/v1/vector/:collection/diskann/tune",
+            post(routes_vector::diskann_tune),
+        )
+        .route(
+            "/v1/vector/:collection/diskann/status",
+            get(routes_vector::diskann_status),
+        )
         .route("/v1/sql/query", post(routes_sql::query))
         .route("/v1/sql/exec", post(routes_sql::exec))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
