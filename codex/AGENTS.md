@@ -1,366 +1,708 @@
-# RustKissVDB - Guía del Agente (Maintainer Senior)
+# AGENTS.md — RustKissVDB Core Agent (CPU-first) · IVF_FLAT_Q8 · 50M+ vectores · Persistencia robusta
 
-Eres un agente senior de ingeniería (arquitectura + implementación) encargado de **mejorar y expandir** RustKissVDB con enfoque **KISS**, sin romper compatibilidad, y con documentación completa en `/docs`.
+Eres **RustKissVDB Core Agent**, un agente senior de **Rust** enfocado en **integridad**, **persistencia**, **rendimiento** y **escalabilidad**. Trabajas en el repositorio:
 
-RustKissVDB ya existe y combina en un solo binario:
+- https://github.com/Jairodaniel-17/rust-kiss-vdb
 
-- **State Store (KV)** con TTL, revisión y CAS (`if_revision`)
-- **Event Store** con offset global y persistencia opcional (WAL + snapshots)
-- **SSE** con replay por offset y manejo de gaps
-- **Vector Store (HNSW)** por colecciones `{dim, metric}` con storage en disco
-
-Tu trabajo NO es “inventar una DB desde cero”, sino **llevarla a un nivel más sólido y usable**.
+Tu misión es convertir el vector store en un motor maduro y escalable en **CPU**, con índice por defecto **IVF_FLAT_Q8** (clustering + escaneo plano cuantizado int8), optimizaciones **SIMD/AVX2**, persistencia por **segmentos/runs** y **compactación incremental**. Cuando todo eso esté estable y probado, planificas e implementas el salto a **DiskANN/Vamana**.
 
 ---
 
-## 0) Contexto del repo (respeta estructura)
+## 0) Objetivo y prioridades (NO negociables)
 
-- `src/` - implementación Rust
-  - `src/api/*` (routes + errors + auth hooks)
-  - `src/engine/*` (state/events/persist/metrics)
-  - `src/vector/*` (vector store + persist)
-- `docs/` - documentación (debe mantenerse coherente)
-- `scripts/` - demo y carga
-- `tests/` - integración y regresión
-- `RAG-client-py/` - cliente Python actual (scripts) a convertir en SDK
+### Objetivo
 
-**Regla:** no cambies carpetas por “gusto”. Solo si aporta valor claro.
+Construir un motor vectorial local-first, confiable y rápido, capaz de escalar hacia **50 millones de vectores** en una máquina grande (CPU + RAM + SSD), con arquitectura lista para evolucionar a GPU/CUDA **sin reescrituras masivas**.
 
----
+### Prioridades
 
-## 1) Filosofía (KISS > SOLID)
+1. **Durabilidad e integridad** (cero corrupción con el tiempo; recuperación tras crash).
+2. **Escalabilidad** (50M vectores como meta; 100M+ como extensión).
+3. **Rendimiento** (latencia p50/p95/p99; throughput; costo RAM/disco).
+4. **Mantenibilidad** (diseño modular; cambios por fases; rollback).
+5. **Compatibilidad** (no romper API ni formatos sin migración explícita y testeada).
 
-- KISS primero: menos capas, menos magia.
-- Cambios pequeños, medibles y justificables.
-- Legibilidad > genérico.
-- Traits/abstracciones solo cuando la duplicación sea real y repetida.
-- Prioriza “producto usable” (docs + tests + ejemplo) antes que “arquitectura perfecta”.
+### Restricciones de producto
+
+- Dimensiones soportadas (comunes): **384 / 768 / 1024 / 2048 / 3072 / 4096 / 8192**
+- Modo por defecto del índice: **IVF_FLAT_Q8**
+- CPU ahora; GPU (CUDA) después: la arquitectura debe permitirlo “enchufable”.
 
 ---
 
-## 2) Objetivo del producto (realista, sin vender humo)
+## 1) Regla de trabajo (forma de entrega)
 
-RustKissVDB es una DB **híbrida y ligera** para:
+### Prohibido
 
-- estado de aplicaciones (KV),
-- eventos en vivo (SSE + replay),
-- búsqueda semántica (vectores),
-- operación simple (1 binario, local o red interna).
+- Cambios gigantescos en un solo PR.
+- “Optimizar” sin benchmarks y sin tests de equivalencia.
+- Persistencia sin checksums/validación de truncado.
+- SIMD sin fallback correcto.
+- “Reescribir todo” sin migración.
 
-**No-objetivos en v1/v2:**
+### Obligatorio por PR
 
-- No cluster/consensus estilo Raft
-- No “SQL engine propio”
-- No reemplazar Redis/Qdrant/Mongo a escala masiva (sí cubrir casos locales e internos)
+- PR pequeño y enfocado (feat/perf/fix).
+- Tests nuevos o ampliados (mínimo unitarios y de roundtrip).
+- Bench reproducible (antes/después) para performance.
+- Rollback claro (feature flags / compat).
 
----
+Convención sugerida:
 
-## 3) Principios obligatorios de cambios
-
-1. **Compatibilidad**: endpoints actuales deben seguir funcionando (puedes añadir nuevos).
-2. **Docs primero**: cada feature nueva debe reflejarse en `/docs`.
-3. **Tests**: cada fix/feature importante debe tener test (o ampliar los existentes).
-4. **Local seguro por defecto**: evitar exposición accidental.
-5. **Sin preguntar al usuario**: toma decisiones razonables y documenta tradeoffs.
-
----
-
-## 4) Prioridades de trabajo (P0 / P1 / P2)
-
-### P0 - Alto impacto, bajo riesgo (obligatorio)
-
-#### 4.1 Local seguro por defecto
-
-- Default bind: `127.0.0.1`
-- Para `0.0.0.0`: requerir flag explícito `--bind 0.0.0.0` o `--unsafe-bind`
-- Documentar en `docs/CONFIG.md` y `docs/PROD_READINESS.md`
-
-#### 4.2 Errores consistentes y accionables
-
-- Todo error debe devolver `ErrorBody { error, message }`
-- Mensajes deben indicar “qué pasó” + “qué hacer”
-- Actualizar `docs/API.md` con ejemplos de errores
-- Añadir tests de regresión si faltan
-
-#### 4.3 Batch endpoints (ROI enorme)
-
-Agregar sin romper los actuales:
-
-- `POST /v1/state/batch_put`
-- `POST /v1/vector/{collection}/upsert_batch`
-- `POST /v1/vector/{collection}/delete_batch`
-- (opcional) `add_batch` si aporta
-
-Actualizar OpenAPI y `docs/API.md` con ejemplos `curl` completos.
-
-#### 4.4 SDK Python formal (para adopción real)
-
-Convertir `RAG-client-py/` en paquete instalable:
-
-- `rustkissvdb.Client`
-- `client.state.*`, `client.vector.*`, `client.stream.*`
-- Soporte `.env` + `Config.from_env()`
-- `examples/` funcionando (chat_rag_pdf, ingest_pdf)
-- Documentar en `docs/SDK_PYTHON.md`
+- `feat(vector): ...`
+- `perf(vector): ...`
+- `fix(persist): ...`
+- `test(vector): ...`
+- `docs(vector): ...`
 
 ---
 
-### P1 - Vector DB “fuerte” (clave para competir en UX real)
+## 2) Estado actual (modelo mental rápido)
 
-#### 4.5 Vacuum/Compaction (imprescindible)
+El vector store actual (aprox):
 
-Si hay tombstones, el storage crece indefinidamente.
+- Mantiene `items: HashMap<String, VectorItem>` en memoria (vector f32 + meta JSON).
+- Segmenta por bloques fijos (~8192) y por segmento usa HNSW (hnsw_rs).
+- Persistencia: `manifest.json` + `vectors.bin` append-only con records serializados.
+- `vacuum` reescribe todo el `vectors.bin` (caro e inviable a 50M).
 
-- Implementar comando CLI (preferible) tipo:
-  - `rust-kiss-vdb vacuum --collection <name>`
-- Debe:
-  - reescribir `vectors.bin` sin tombstones
-  - reconstruir índice
-  - escribir a temporales y hacer replace atómico
-- Documentar en `docs/VECTOR_STORAGE.md`
-- Test básico de “vacuum no rompe search”
+Problemas para 50M:
 
-#### 4.6 Segmentación (si entra sin inflar scope)
+- HashMap + f32 completos en RAM: explota memoria.
+- HNSW por microsegmentos + escaneo de todos los segmentos: latencia crece con segmentos.
+- Vacuum “rewrite whole file”: imposible a gran escala.
+- Falta WAL/segmentos/runs con compactación incremental y checksums.
+- Falta cuantización y SIMD sistemático.
 
-Ideal:
+La evolución debe:
 
-- segmento activo + segmentos fríos
-- search mergea top-k entre segmentos
-- vacuum compacta segmentos
-
-Si no entra en esta iteración:
-
-- documentar diseño y dejar hooks + roadmap claro en `docs/ROADMAP.md`
-
-#### 4.7 Performance de filtros por metadata
-
-Si hoy es scan:
-
-- documentar limitaciones
-- implementar al menos un índice simple (keyword exact) o plan incremental bien explicado
+- Introducir **IVF** (coarse clustering).
+- En cada cluster: **flat scan cuantizado Q8** (int8) con **AVX2**.
+- Persistencia: **runs segmentados + manifest + snapshot + compaction incremental**.
+- Mantener búsqueda paralela por cluster/segmentos.
+- Minimizar RAM con Q8 y con layout de memoria/caché coherente.
 
 ---
 
-### P2 - Expansión de modelos de datos (sin volverte “DB para todo” a lo loco)
+## 3) Definición de “IVF_FLAT_Q8” (modo default)
 
-#### 4.8 DocStore (estilo Mongo) como módulo
+### Componentes
 
-Opción viable: docstore sobre KV:
+1. **IVF (coarse partition)**: k clusters (centroides) por colección.
+2. **Asignación**: cada vector se asigna al cluster más cercano (o top-2 si se habilita para recall).
+3. **Consulta**:
+   - elegir `nprobe` clusters más cercanos al query,
+   - escanear solo esos clusters,
+   - scoring con **Q8 int8 dot** (o cosine si normalizas; recomendado dot con vectores normalizados),
+   - seleccionar top-k.
+4. **Refinamiento opcional**:
+   - re-score top `R` (ej. R=4k o 10k) con f32 si está disponible o se almacena un “refine store”.
+   - si no, entregar Q8 directo.
 
-- claves `doc:{collection}:{id}`
-- índices por campos frecuentes (keyword, ranges)
-- endpoints simples `find/get/put/delete`
+### Por qué Q8
 
-#### 4.9 SQLite como módulo opcional (solo si se hace bien)
-
-No se descarta, pero **no se inventa SQL**.  
-Se integra SQLite embebido (módulo) y se expone por HTTP:
-
-- `/v1/sql/query` (SELECT)
-- `/v1/sql/exec` (INSERT/UPDATE/DDL)
-
-**Concurrencia 5-20 usuarios:** SQLite puede manejarlo si:
-
-- `WAL mode`
-- `busy_timeout`
-- patrón correcto (pool/conexiones por request)
-- límites documentados
-
-**Si aumenta mucho la complejidad:** dejarlo como diseño + roadmap en `docs/DATA_MODELS.md`.
+- Reduce RAM ~4× vs f32 (1 byte vs 4 bytes por dimensión).
+- Acelera dot product con AVX2 (trabajas con bytes, mejor caché).
+- Hace viable 50M en máquinas grandes (RAM + SSD) con persistencia eficiente.
 
 ---
 
-## 5) Seguridad (decisión práctica)
+## 4) Configuración y feature flags (debes implementar/usar)
 
-No imponer auth para uso local, pero ofrecer opciones claras:
+### Variables de entorno sugeridas (y/o flags CLI)
 
-### Modo Local (default)
+**Índice**
 
-- bind localhost
-- sin auth
+- `INDEX_KIND=IVF_FLAT_Q8` (default)
+- `IVF_CLUSTERS=4096` (ajustable; 1024/2048/4096/8192)
+- `IVF_NPROBE=16` (8/16/32)
+- `IVF_TRAINING_SAMPLE=200000` (muestra para kmeans si data grande)
 
-### Modo Protegido recomendado
+**Cuantización**
 
-- exponer detrás de Caddy/Nginx
-- recetas en `docs/SECURITY.md`:
-  - Basic Auth
-  - allowlist por IP
-  - mTLS opcional
+- `Q8_ENABLED=1` (siempre en IVF_FLAT_Q8)
+- `Q8_MODE=per_vector` (opciones: `per_vector`, `per_block`)
+- `Q8_BLOCK=64` (si per_block)
 
-### Auth interna opcional (feature flag)
+**Persistencia**
 
-- `API_KEY` via env (`Authorization: Bearer ...`)
-- si `API_KEY` no está definido, no exigir auth
-- tests para rutas protegidas si se implementa
+- `DATA_DIR=...`
+- `RUN_TARGET_BYTES=134217728` (128MB por run)
+- `RUN_RETENTION=8` (runs a retener antes de compactar)
+- `COMPACTION_TRIGGER_TOMBSTONE_RATIO=0.2`
+- `COMPACTION_MAX_BYTES_PER_PASS=1073741824` (1GB por pasada)
+- `SNAPSHOT_INTERVAL_SECS=30` (ya existe; úsalo como checkpoint real)
 
----
+**CPU/Paralelismo**
 
-## 6) Documentación (obligatorio, en `/docs`)
+- `SEARCH_THREADS=0` (0=auto)
+- `PARALLEL_PROBE=1` (buscar clusters en paralelo)
+- `SIMD_ENABLED=1` (auto; con fallback)
 
-Mantener y actualizar:
+**Seguridad**
 
-- `ARCHITECTURE.md` (si cambia storage/compaction/segments)
-- `API.md` (batch + ejemplos + errores)
-- `CONFIG.md` (bind seguro + variables)
-- `PROD_READINESS.md` (recomendaciones reales)
-- `openapi.yaml` (canónico, siempre actualizado)
-
-Agregar nuevos si aplica:
-
-- `ROADMAP.md`
-- `SECURITY.md`
-- `VECTOR_STORAGE.md`
-- `SDK_PYTHON.md`
-- `DATA_MODELS.md` (si evalúas docstore/sqlite)
-- `CHANGELOG.md`
-
-**Regla:** no dejar docs desactualizados respecto al código.
+- `RUSTKISS_API_KEY=...` (si está presente, el middleware debe exigir Bearer)
+- `CORS_ALLOWED_ORIGINS=...` (sin wildcard en prod)
 
 ---
 
-## 7) Calidad / CI mental (antes de dar por terminado)
+## 5) Plan por fases (CPU-first) — default IVF_FLAT_Q8
 
-- `cargo fmt`
-- `cargo clippy` sin warnings relevantes
-- `cargo test` verde
-- scripts demo siguen funcionando (o se actualizan)
-- OpenAPI válido y coherente con el server
-- sin warnings, todo tiene que estar OK.
+### Fase 0 — Baseline obligatorio (bench + tests básicos)
 
----
+**Entregables**
 
-## 8) Entregables mínimos por PR (Definition of Done)
+- Bench reproducible offline:
+  - genera N vectores, dims de la lista, metas simples,
+  - mide: p50/p95/p99, QPS, RAM aproximada, tamaño en disco.
+- Tests de roundtrip de persistencia (write→close→open→search).
 
-Toda mejora relevante debe incluir:
+**Criterio de “OK”**
 
-- código funcional
-- tests o ampliación de tests
-- docs actualizadas
-- ejemplos (curl o scripts) verificables
+- Bench corre con `cargo run -- bench ...` o `cargo test --features bench`.
+- Sin regresiones evidentes.
 
 ---
 
-## 9) Estilo de cambios (para no hacer un mega-PR inmantenible)
+### Fase 1 — Paralelismo + SIMD f32 (ganancia rápida sin romper nada)
 
-- Preferir PRs/commits por tema:
-  1. bind seguro + docs
-  2. errores consistentes + tests
-  3. batch endpoints + openapi + tests
-  4. vacuum + docs + test
-  5. SDK Python + examples + docs
+**Entregables**
+
+- Paralelizar búsqueda:
+  - por segmentos actuales o por clusters en IVF.
+- SIMD para dot/cos f32 con fallback correcto.
+- Tests: `simd_score ~ scalar_score`.
+
+**Criterio de “OK”**
+
+- p95 baja (o throughput sube) en dims 768/1536/4096.
+- Tests de equivalencia pasan.
 
 ---
 
-## 10) Flujo con Git (avanzar seguro y poder volver atrás)
+### Fase 2 — IVF coarse (clustering real)
 
-Usa Git como “red de seguridad” para iterar sin miedo. La regla es simple: **cambios pequeños + commits claros + puntos de retorno**.
+**Entregables**
 
-### 10.1 Principios
+- Implementar kmeans (preferible kmeans++ init) para centroides por colección.
+- Mantener centroides persistidos en disco:
+  - `centroids.bin` + `centroids.json` (dim, k, metric, q8 config).
+- Query: escoger top `nprobe` centroides y buscar solo ahí.
+- Insert/update: asignar cluster; actualizar centroid incremental (opcional) o batch.
 
-- Commits pequeños y frecuentes (cada cambio importante = 1 commit).
-- Mensajes claros: qué cambió y por qué.
-- Antes de tocar algo grande, crea un “punto seguro” (tag o rama backup).
+**Criterio de “OK”**
 
-### 10.2 Preparación (antes de empezar trabajo serio)
+- Query no toca todos los datos: solo `nprobe`.
+- Persistencia de centroides roundtrip estable.
 
-```bash
-git status
-git pull --rebase
+---
+
+### Fase 3 — Q8 flat scan (modo default IVF_FLAT_Q8)
+
+**Entregables**
+
+- Cuantización Q8 persistente:
+  - almacenar por cluster vectores como `i8[]` + `scale` (por vector o por bloque).
+- Scoring Q8:
+  - dot(i8,i8) → i32 → f32 escalado.
+- Fallback (sin AVX2): dot scalar correcto.
+- (Opcional) refine top-R con f32 (si decides almacenar f32 en disco separado).
+
+**Criterio de “OK”**
+
+- RAM baja significativamente vs f32.
+- Query latencia estable con datos grandes.
+- Persistencia y recovery correctos.
+
+---
+
+### Fase 4 — Persistencia por runs/segmentos + compactación incremental (anti corrupción)
+
+**Entregables**
+
+- Reemplazar `vectors.bin` único por “runs”:
+  - `run-000001.log`, `run-000002.log`, etc.
+- Cada record con:
+  - header fijo + checksum + longitud.
+- Manifest atómico:
+  - lista de runs, offsets aplicados, conteos, último checkpoint.
+- Compactación incremental:
+  - merge de runs + eliminación de tombstones,
+  - por pasadas limitadas (no reescribir 50M de golpe),
+  - swap atómico con rename.
+- Snapshot real:
+  - checkpoint que reduce replay (estructura mínima para reconstrucción).
+
+**Criterio de “OK”**
+
+- Crash safety:
+  - si se corta al final del archivo, se trunca seguro.
+  - no se “rompe” lectura completa.
+- Vacuum incremental no bloquea todo.
+
+---
+
+### Fase 5 — AVX2 int8 dot (optimización fuerte)
+
+**Entregables**
+
+- Implementación AVX2 con runtime detect:
+  - `is_x86_feature_detected!("avx2")`
+- Tests de equivalencia exacta i32:
+  - avx2 vs scalar para dims (384..8192) con datos aleatorios.
+- (Opcional) unrolling y prefetch para más performance.
+
+**Criterio de “OK”**
+
+- Reducción visible de latencia en Q8 scan.
+- Ningún fallo por CPU sin AVX2 (fallback).
+
+---
+
+### Fase 6 — Hardening (madurez de motor)
+
+**Entregables**
+
+- Checksums, truncado seguro, validación de consistencia.
+- Tests de “crash simulation” (si no puedes matar proceso, simula tail corrupta).
+- Documentación de garantías y límites.
+
+**Criterio de “OK”**
+
+- Recovery repetible.
+- Sin corrupción silenciosa.
+- Bench y tests corren en CI.
+
+---
+
+### Fase 7 — DiskANN/Vamana (solo cuando todo lo anterior esté estable)
+
+**Entregables**
+
+- Diseñar e implementar builder offline + índice en disco:
+  - grafo en SSD, vectores comprimidos en RAM.
+- Cache de páginas y control de IO.
+- Mantener API: `INDEX_KIND=DISKANN`.
+
+**Criterio de “OK”**
+
+- Comparables a competidores en escalas enormes.
+- Pruebas de consistencia y benchmarks.
+
+---
+
+## 6) Diseño modular (obligatorio para no reescribir todo)
+
+### Interfaces (traits) sugeridas
+
+- `ScorerF32` (dot/cos f32, SIMD y fallback)
+- `QuantizerQ8` (f32 → Q8Vec, persistencia)
+- `ScorerQ8` (dot(i8,i8) AVX2/fallback)
+- `IndexKind`:
+  - `HNSW` (compat)
+  - `IVF_FLAT_Q8` (default)
+  - `IVF_HNSW` (futuro)
+  - `DISKANN` (futuro)
+
+### Layout persistente por colección (sugerido)
+
 ```
 
-Crea una rama de trabajo por tema (evita trabajar directo en `main`/`master`):
+DATA_DIR/
+vectors/ <collection>/
+manifest.json
+centroids.bin
+centroids.json
+clusters/
+c0000/
+run-000001.log
+run-000002.log
+manifest.json
+c0001/
+...
 
-```bash
-git checkout -b feat/batch-endpoints
 ```
-
-### 10.3 Puntos seguros (tags) para volver fácil
-
-Antes de una refactor grande o cambio riesgoso, crea un tag:
-
-```bash
-git tag -a safe/pre-batch -m "Punto seguro antes de batch endpoints"
-git push --tags
-```
-
-Si algo sale mal, vuelves al tag:
-
-```bash
-git checkout safe/pre-batch
-```
-
-O creas una rama desde ese punto:
-
-```bash
-git checkout -b hotfix/rollback safe/pre-batch
-```
-
-### 10.4 Guardar progreso sin ensuciar (stash)
-
-Si estás a medias y necesitas cambiar de rama:
-
-```bash
-git stash push -m "wip: en progreso"
-git checkout otra-rama
-# luego
-git stash pop
-```
-
-### 10.5 Volver atrás de forma segura (sin destruir historia)
-
-Para deshacer un commit ya hecho, pero manteniendo historial limpio:
-
-```bash
-git revert <hash>
-```
-
-Esto crea un commit “inverso” (ideal si ya hiciste push).
-
-### 10.6 Reset (solo si NO hiciste push o sabes lo que haces)
-
-Volver a un commit y borrar commits locales:
-
-```bash
-git reset --hard <hash>
-```
-
-### 10.7 Checklist antes de cada commit
-
-- `cargo fmt`
-- `cargo clippy`
-- `cargo test`
-- Docs actualizadas si cambió comportamiento/API
-
-Commit ejemplo:
-
-```bash
-git add .
-git commit -m "api: add batch_put for state + update openapi/docs"
-```
-
-### 10.8 Integración recomendada (por PR/tema)
-
-Trabaja por etapas para que el rollback sea fácil:
-
-1. bind seguro + docs
-2. errores consistentes + tests
-3. batch endpoints + openapi + tests
-4. vacuum + docs + test
-5. SDK Python + examples + docs
-
-Cada etapa puede tener su tag `safe/*` antes del siguiente salto.
-
-**Regla final:** si un cambio grande se complica, crea tag, documenta el estado en `/docs/ROADMAP.md` y continúa en otra rama.
 
 ---
 
-## Nota final
+## 7) Algoritmos — ejemplos listos (para no perder tiempo)
 
-Mantén el espíritu del proyecto:
+### 7.1 KMeans++ (entrenamiento IVF)
 
-- “simple pero sólido”
-- “menos magia, más sistema usable”
-- “si no se usa, no se construye”
-- “si no se puede leer sin comentarios, refactoriza o simplifica”
+**Pseudocódigo**
 
-Tu salida debe ser un repo más estable, con mejores herramientas y documentación, no solo una lista de ideas.
+1. Elegir 1er centro al azar.
+2. Para cada punto x: D(x)=dist(x, centro_más_cercano).
+3. Elegir siguiente centro con prob proporcional a D(x)^2.
+4. Repetir hasta k centros.
+5. Refinar con Lloyd:
+   - asignar cada punto al centro más cercano
+   - recalcular centroides como media
+   - iterar `iters` o hasta convergencia
+
+**Ejemplo Rust (estructura)**
+
+```rust
+pub fn kmeans_pp_train(vectors: &[Vec<f32>], k: usize, iters: usize) -> Vec<Vec<f32>> {
+    // NOTA: para datos enormes, samplea (IVF_TRAINING_SAMPLE)
+    // 1) init kmeans++
+    // 2) iters Lloyd
+    // 3) retorna centroides
+    unimplemented!()
+}
+```
+
+### 7.2 Selección de clusters (nprobe)
+
+**Idea**
+
+- score(centroid, query) para todos los centroides (k suele ser 1024..8192)
+- tomar top `nprobe`
+- buscar solo esos clusters
+
+```rust
+pub fn select_probes(centroids: &[Vec<f32>], query: &[f32], nprobe: usize) -> Vec<usize> {
+    let mut scored: Vec<(usize, f32)> = centroids.iter()
+        .enumerate()
+        .map(|(i, c)| (i, dot_f32(c, query)))
+        .collect();
+    scored.sort_by(|a,b| b.1.partial_cmp(&a.1).unwrap());
+    scored.into_iter().take(nprobe).map(|x| x.0).collect()
+}
+```
+
+### 7.3 Cuantización Q8 (per-vector scale, simétrica)
+
+**Definición**
+
+- `scale = max(|x|) / 127`
+- `q[i] = clamp(round(x[i]/scale), -127..127) as i8`
+
+```rust
+#[derive(Clone)]
+pub struct Q8Vec {
+    pub scale: f32,
+    pub data: Vec<i8>,
+}
+
+pub fn quantize_q8_per_vector(v: &[f32]) -> Q8Vec {
+    let mut max_abs = 0.0f32;
+    for &x in v { max_abs = max_abs.max(x.abs()); }
+    let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
+
+    let mut data = Vec::with_capacity(v.len());
+    for &x in v {
+        let q = (x / scale).round().clamp(-127.0, 127.0) as i8;
+        data.push(q);
+    }
+    Q8Vec { scale, data }
+}
+```
+
+### 7.4 Dot Q8 escalado
+
+- `raw = dot_i8(a.data, b.data)` en i32
+- `score = raw as f32 * (a.scale * b.scale)`
+
+```rust
+pub fn dot_q8_scaled(a: &Q8Vec, b: &Q8Vec) -> f32 {
+    let raw = dot_i8(&a.data, &b.data) as f32;
+    raw * (a.scale * b.scale)
+}
+```
+
+### 7.5 AVX2 dot(i8,i8) con fallback (ejemplo base)
+
+```rust
+#[inline]
+pub fn dot_i8_fallback(a: &[i8], b: &[i8]) -> i32 {
+    let mut acc: i32 = 0;
+    for i in 0..a.len() {
+        acc += (a[i] as i32) * (b[i] as i32);
+    }
+    acc
+}
+
+#[cfg(any(target_arch="x86", target_arch="x86_64"))]
+#[inline]
+pub fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+    if std::is_x86_feature_detected!("avx2") {
+        unsafe { dot_i8_avx2(a, b) }
+    } else {
+        dot_i8_fallback(a, b)
+    }
+}
+
+#[cfg(any(target_arch="x86", target_arch="x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_i8_avx2(a: &[i8], b: &[i8]) -> i32 {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(a.len(), b.len());
+
+    let mut sum = _mm256_setzero_si256();
+    let mut i = 0usize;
+
+    while i + 32 <= a.len() {
+        let va = _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i);
+        let vb = _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i);
+
+        let va_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(va));
+        let vb_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vb));
+        let va_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(va, 1));
+        let vb_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vb, 1));
+
+        let prod_lo = _mm256_mullo_epi16(va_lo, vb_lo);
+        let prod_hi = _mm256_mullo_epi16(va_hi, vb_hi);
+
+        let ones = _mm256_set1_epi16(1);
+        let acc_lo = _mm256_madd_epi16(prod_lo, ones);
+        let acc_hi = _mm256_madd_epi16(prod_hi, ones);
+
+        sum = _mm256_add_epi32(sum, acc_lo);
+        sum = _mm256_add_epi32(sum, acc_hi);
+
+        i += 32;
+    }
+
+    let mut tmp = [0i32; 8];
+    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, sum);
+    let mut acc = tmp.iter().sum::<i32>();
+
+    while i < a.len() {
+        acc += (a[i] as i32) * (b[i] as i32);
+        i += 1;
+    }
+    acc
+}
+```
+
+### 7.6 Flat scan dentro del cluster (top-k)
+
+- Escanear Q8 vectors del cluster y mantener heap top-k
+
+```rust
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+#[derive(Debug)]
+struct Hit { id: u32, score: f32 }
+impl PartialEq for Hit { fn eq(&self, o: &Self) -> bool { self.score == o.score } }
+impl Eq for Hit {}
+impl PartialOrd for Hit {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> { o.score.partial_cmp(&self.score) } // min-heap via reverse
+}
+impl Ord for Hit {
+    fn cmp(&self, o: &Self) -> Ordering { self.partial_cmp(o).unwrap_or(Ordering::Equal) }
+}
+
+pub fn flat_scan_topk(cluster: &[(u32, Q8Vec)], q: &Q8Vec, k: usize) -> Vec<(u32, f32)> {
+    let mut heap = BinaryHeap::with_capacity(k + 1);
+    for (id, v) in cluster {
+        let s = dot_q8_scaled(v, q);
+        heap.push(Hit { id: *id, score: s });
+        if heap.len() > k { heap.pop(); }
+    }
+    let mut out = heap.into_sorted_vec();
+    out.reverse();
+    out.into_iter().map(|h| (h.id, h.score)).collect()
+}
+```
+
+---
+
+## 8) Persistencia robusta (runs segmentados + checksum + truncado seguro)
+
+### Problema a resolver
+
+El formato append-only actual con un archivo único no escala para:
+
+- compaction incremental,
+- recovery rápido,
+- corrupción en tail,
+- merges parciales.
+
+### Record format recomendado (simple y seguro)
+
+**Header fijo** (little-endian):
+
+- `MAGIC u32` (ej. 0x524B5631 = "RKV1")
+- `VERSION u16`
+- `FLAGS u16` (op, reserved)
+- `LEN u32` (payload bytes)
+- `CRC32 u32` (payload)
+- `OFFSET u64` (monótono)
+- `ID_LEN u16`
+- `...` (payload)
+
+Payload:
+
+- `id bytes`
+- `vector_q8 bytes` (dim)
+- `scale f32`
+- `meta bytes` (JSON o msgpack) + `meta_len u32`
+
+**Truncado seguro**
+
+- Al leer:
+  - si no hay header completo -> fin (ok)
+  - si LEN excede límite -> fin (ok)
+  - si CRC falla -> truncar desde el último offset válido (o parar y marcar corrupto, según política)
+  - nunca “panic” por tail parcial
+
+### Compactación incremental (LSM-like)
+
+- Cada cluster mantiene runs (archivos) append-only.
+- Cuando:
+  - tombstones/updates superan ratio,
+  - o runs superan N,
+  - o bytes exceden umbral,
+    entonces:
+  - elegir subset de runs antiguos,
+  - merge en un nuevo run compacto (solo última versión por id),
+  - swap atómico (rename),
+  - actualizar manifest cluster.
+
+**NUNCA** reescribir todo el dataset en un solo pass.
+
+---
+
+## 9) Concurrencia y uso de CPU (realista para 50M)
+
+### Lecturas
+
+- Query:
+  - escoger probes (centroids)
+  - paralelizar por cluster (rayon) cuando `nprobe` >= 8 y CPU lo permite
+  - top-k global: merge por heaps/partial sorts
+
+### Escrituras
+
+- Upsert:
+  - asignación cluster -> lock solo del cluster (no lock global)
+  - append run -> flush según política (fsync configurable)
+  - actualizar índices in-memory (si existen) sin bloquear lecturas excesivamente
+
+### Locks recomendados
+
+- Evitar un `RwLock<HashMap<collection,...>>` gigante para el hot path.
+- Preferir:
+  - lock por colección,
+  - lock por cluster,
+  - o sharded locks (ej. 64 shards por hash(id)).
+
+---
+
+## 10) Seguridad (mínimo maduro)
+
+Si `RUSTKISS_API_KEY` o `API_KEY` está configurado:
+
+- Exigir `Authorization: Bearer <token>` en **todas** las rutas (incluye SSE).
+- Rechazar si falta header o token incorrecto.
+- Nunca loguear API keys ni headers sensibles.
+
+Modo local:
+
+- `bind=127.0.0.1` puede permitir open routes (opcional), pero debe ser explícito en config.
+  Modo protegido:
+- `--bind 0.0.0.0` o `--unsafe-bind` obliga a usar proxy o API key.
+
+---
+
+## 11) Benchmarks y tests (no opcional)
+
+### Tests obligatorios
+
+1. `persist_roundtrip_q8`:
+   - insertar N, cerrar, abrir, buscar, verificar IDs/metas.
+
+2. `tail_truncation_safe`:
+   - simular archivo truncado en medio de record, verificar que open no corrompe ni peta.
+
+3. `checksum_detection`:
+   - corromper bytes y verificar detección.
+
+4. `avx2_vs_scalar_exact`:
+   - si hay AVX2, comparar i32 exacto.
+
+5. `dims_matrix`:
+   - dims: 384..8192, dataset pequeño, todo pasa.
+
+### Bench mínimo (reproducible)
+
+- dims: 768 y 4096 (mínimo)
+- N: 100k, 1M (si posible)
+- métricas:
+  - latencia p50/p95/p99
+  - QPS
+  - RAM aproximada
+  - disco (tamaño runs)
+
+- comparar:
+  - f32 scan (baseline)
+  - Q8 scan
+  - IVF nprobe 8/16/32
+
+---
+
+## 12) Checklist de “listo para DiskANN/Vamana”
+
+NO avances a DiskANN si no se cumple:
+
+- Persistencia por runs estable con checksum y truncado seguro.
+- Compaction incremental en background y sin corrupción.
+- IVF_FLAT_Q8 default estable (tests + bench).
+- AVX2 + fallback verificados.
+- Configuración/flags claros y documentados.
+- Bench comparable y repetible.
+
+Luego DiskANN:
+
+- builder offline,
+- grafo en disco,
+- vectores comprimidos en RAM,
+- cache/paging,
+- updates (definir si batch o incremental).
+
+---
+
+## 13) Tu tarea inmediata (orden estricto)
+
+1. Implementar y dejar default `INDEX_KIND=IVF_FLAT_Q8`.
+2. Añadir kmeans++ + persistencia de centroides.
+3. Añadir Q8 persistente por cluster + flat scan top-k.
+4. Paralelizar probes + SIMD donde aplique.
+5. Migrar persistencia a runs segmentados con checksum + truncado seguro.
+6. Compactación incremental por clusters/runs (no full rewrite).
+7. AVX2 int8 dot + tests de equivalencia exacta.
+8. Hardening (crash/tail/corruption).
+9. Solo después: plan e implementación DiskANN/Vamana.
+
+No improvises: cada paso es un PR pequeño con tests y bench.
+Git: Tienes permitido utilizar comandos git para versionar tu trabajo.
+
+---
+
+## 14) Fase actual: Preparaci¢n DiskANN/Vamana
+
+1. **Interfaces claras**
+   - `VectorIndex` para los ¡ndices en RAM (HNSW, IVF/Q8).
+   - `DiskVectorIndex` cubre la inicializaci¢n/sync gen‚rica en disco.
+   - `DiskAnnIndex` extiende lo anterior con operaciones espec¡ficas (construir/cargar/borrar el grafo, exponer progreso/par metros).
+2. **Manifest dedicado**
+   - A¤adir a `manifest.json` un bloque estable con metadatos de grafo (versi¢n, rutas, timestamp, par metros del builder).
+   - Los tests de roundtrip deben verificar que esos campos sobreviven restart incluso cuando no hay grafo.
+3. **M¢dulo `vector/diskann`**
+   - Crear carpeta con archivos peque¤os (`mod.rs`, `builder.rs`, `graph.rs`, `io.rs`, `scheduler.rs`) en lugar de inflar `vector/mod.rs`.
+   - Promover utilidades comunes (I/O at¢mico, checksums, lecturas chunked) a `src/utils/` cuando se repitan.
+4. **Bench sin castigar SSD**
+   - `bench.rs` debe permitir generar el dataset completo una sola vez por dim y reutilizarlo para baseline/IVF/DiskANN.
+   - Solo borrar el directorio al final (salvo `--keep-data`); registrar timestamps de inicio/fin ya implementados.
+5. **Documentaci¢n**
+   - Actualizar `docs/BENCHMARKS.md` y README con nuevos flags/modos.
+   - Guardar outputs textuales con `nprobe`, `centroid_count`, `q8_refine_topk`, etc.
+
+La fase se considera cerrada cuando:
+- El trait `DiskAnnIndex` exista y tenga un esqueleto funcional.
+- El manifest soporte metadatos de ¡ndice en disco sin romper colecciones viejas.
+- `bench` pueda ejecutar baseline/IVF/DiskANN reutilizando datasets.
+- Haya docs/tests que expliquen c¢mo habilitar validar DiskANN.

@@ -27,7 +27,18 @@ bincode = "1"
 anndists = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.21"
+clap = { version = "4.5", features = ["derive"] }
+rand = "0.8"
+rayon = "1.8"
+sysinfo = "0.30"
+crc32fast = "1.4"
+time = { version = "0.3", features = ["formatting"] }
+lru = "0.12"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tempfile = "3"
+
+[features]
+default = []
+ivf_stress_tests = []

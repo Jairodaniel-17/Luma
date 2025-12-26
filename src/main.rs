@@ -1,6 +1,7 @@
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
 use rust_kiss_vdb::sqlite::SqliteService;
+use rust_kiss_vdb::vector::index::DiskAnnBuildParams;
 use rust_kiss_vdb::vector::VectorStore;
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
@@ -10,6 +11,18 @@ async fn main() -> anyhow::Result<()> {
     match parse_command()? {
         Command::Vacuum { collection } => {
             run_vacuum(collection)?;
+            return Ok(());
+        }
+        Command::DiskAnnBuild(opts) => {
+            run_diskann_build(opts)?;
+            return Ok(());
+        }
+        Command::DiskAnnTune(opts) => {
+            run_diskann_tune(opts)?;
+            return Ok(());
+        }
+        Command::DiskAnnStatus { collection } => {
+            run_diskann_status(collection)?;
             return Ok(());
         }
         Command::Serve => {}
@@ -51,6 +64,70 @@ fn run_vacuum(collection: String) -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("vacuum failed: {err}"))?;
     println!("Colección `{collection}` compactada correctamente.");
     Ok(())
+}
+
+fn run_diskann_build(opts: DiskAnnCliCommand) -> anyhow::Result<()> {
+    let config = Config::from_env()?;
+    let params = diskann_params_from_cli(&opts, &config);
+    let engine = Engine::new(config.clone())?;
+    engine
+        .vector_build_disk_index(&opts.collection, params.clone())
+        .map_err(|err| anyhow::anyhow!("diskann build falló: {err}"))?;
+    let status = engine
+        .vector_disk_index_status(&opts.collection)
+        .map_err(|err| anyhow::anyhow!("diskann status error: {err}"))?;
+    println!(
+        "DiskANN listo para `{}`: available={} last_built_ms={} degree={} search_list={} files={:?}",
+        opts.collection, status.available, status.last_built_ms, status.params.max_degree, status.params.search_list_size, status.graph_files
+    );
+    Ok(())
+}
+
+fn run_diskann_tune(opts: DiskAnnCliCommand) -> anyhow::Result<()> {
+    let config = Config::from_env()?;
+    let params = diskann_params_from_cli(&opts, &config);
+    let engine = Engine::new(config.clone())?;
+    let applied = engine
+        .vector_update_disk_index_params(&opts.collection, params.clone())
+        .map_err(|err| anyhow::anyhow!("diskann tune falló: {err}"))?;
+    println!(
+        "DiskANN tuning aplicado a `{}`: degree={} search_list={} build_threads={}",
+        opts.collection, applied.max_degree, applied.search_list_size, applied.build_threads
+    );
+    Ok(())
+}
+
+fn run_diskann_status(collection: String) -> anyhow::Result<()> {
+    let config = Config::from_env()?;
+    let engine = Engine::new(config)?;
+    let status = engine
+        .vector_disk_index_status(&collection)
+        .map_err(|err| anyhow::anyhow!("diskann status falló: {err}"))?;
+    println!(
+        "DiskANN status `{}` => available={} last_built_ms={} degree={} search_list={} files={:?}",
+        collection,
+        status.available,
+        status.last_built_ms,
+        status.params.max_degree,
+        status.params.search_list_size,
+        status.graph_files
+    );
+    Ok(())
+}
+
+fn diskann_params_from_cli(opts: &DiskAnnCliCommand, config: &Config) -> DiskAnnBuildParams {
+    DiskAnnBuildParams {
+        max_degree: opts.max_degree.unwrap_or(config.diskann_max_degree).max(4),
+        build_threads: opts
+            .build_threads
+            .unwrap_or(config.diskann_build_threads)
+            .max(1),
+        search_list_size: opts
+            .search_list_size
+            .unwrap_or(config.diskann_search_list_size)
+            .max(8),
+    }
+    .sanitized()
 }
 
 fn init_sqlite(config: &Config) -> anyhow::Result<SqliteService> {
@@ -123,6 +200,17 @@ fn parse_log_arg() -> Option<String> {
 enum Command {
     Serve,
     Vacuum { collection: String },
+    DiskAnnBuild(DiskAnnCliCommand),
+    DiskAnnTune(DiskAnnCliCommand),
+    DiskAnnStatus { collection: String },
+}
+
+#[derive(Clone, Debug)]
+struct DiskAnnCliCommand {
+    collection: String,
+    max_degree: Option<usize>,
+    build_threads: Option<usize>,
+    search_list_size: Option<usize>,
 }
 
 fn parse_command() -> anyhow::Result<Command> {
@@ -146,6 +234,9 @@ fn parse_command() -> anyhow::Result<Command> {
                     collection.ok_or_else(|| anyhow::anyhow!("vacuum requiere --collection"))?;
                 return Ok(Command::Vacuum { collection });
             }
+            "diskann" => {
+                return parse_diskann_command(&args[2..]);
+            }
             _ => {}
         }
     }
@@ -160,4 +251,81 @@ fn map_log_level(raw: &str) -> Option<&'static str> {
         "critical" => Some("error"),
         _ => None,
     }
+}
+
+fn parse_diskann_command(args: &[String]) -> anyhow::Result<Command> {
+    if args.is_empty() {
+        anyhow::bail!("diskann requiere subcomando (build|status|tune)");
+    }
+    match args[0].as_str() {
+        "build" => Ok(Command::DiskAnnBuild(parse_diskann_cli(&args[1..])?)),
+        "tune" => Ok(Command::DiskAnnTune(parse_diskann_cli(&args[1..])?)),
+        "status" => {
+            let collection = parse_diskann_collection(&args[1..])?;
+            Ok(Command::DiskAnnStatus { collection })
+        }
+        other => anyhow::bail!("subcomando diskann desconocido `{other}` (usa build|status|tune)"),
+    }
+}
+
+fn parse_diskann_cli(args: &[String]) -> anyhow::Result<DiskAnnCliCommand> {
+    let mut collection = None;
+    let mut max_degree = None;
+    let mut build_threads = None;
+    let mut search_list_size = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--collection" if collection.is_none() => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--collection requiere un valor"))?;
+                collection = Some(value.to_string());
+            }
+            "--max-degree" => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--max-degree requiere un valor"))?;
+                max_degree = Some(raw.parse()?);
+            }
+            "--build-threads" => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--build-threads requiere un valor"))?;
+                build_threads = Some(raw.parse()?);
+            }
+            "--search-list" => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--search-list requiere un valor"))?;
+                search_list_size = Some(raw.parse()?);
+            }
+            other => {
+                anyhow::bail!("bandera diskann desconocida `{other}`");
+            }
+        }
+    }
+    let collection =
+        collection.ok_or_else(|| anyhow::anyhow!("diskann requiere --collection <nombre>"))?;
+    Ok(DiskAnnCliCommand {
+        collection,
+        max_degree,
+        build_threads,
+        search_list_size,
+    })
+}
+
+fn parse_diskann_collection(args: &[String]) -> anyhow::Result<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--collection" {
+            let value = iter
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--collection requiere un valor"))?;
+            return Ok(value.to_string());
+        } else {
+            anyhow::bail!("bandera desconocida `{arg}`; usa --collection <nombre>");
+        }
+    }
+    anyhow::bail!("diskann status requiere --collection <nombre>");
 }

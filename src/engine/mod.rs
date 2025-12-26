@@ -5,8 +5,10 @@ mod state;
 mod state_db;
 
 use crate::config::Config;
+use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};
 use crate::vector::{
-    Metric, SearchHit, SearchRequest, VectorCollectionInfo, VectorError, VectorItem, VectorStore,
+    Metric, SearchHit, SearchRequest, VectorCollectionInfo, VectorError, VectorItem,
+    VectorSettings, VectorStore,
 };
 use anyhow::Context;
 use parking_lot::Mutex;
@@ -66,9 +68,11 @@ impl Engine {
             None => None,
         };
         let state = state::StateStore::new();
+        let vector_settings = VectorSettings::from_config(&config);
         let vectors = match &config.data_dir {
-            Some(dir) => VectorStore::open(dir).context("open vector store")?,
-            None => VectorStore::new(),
+            Some(dir) => VectorStore::open_with_settings(dir, vector_settings.clone())
+                .context("open vector store")?,
+            None => VectorStore::with_settings(vector_settings.clone()),
         };
 
         let engine = Self(Arc::new(Inner {
@@ -366,7 +370,8 @@ impl Engine {
             .map(|info| (info.collection.clone(), info))
             .collect();
 
-        let manifest_items = self.list_state(Some(VECTOR_MANIFEST_PREFIX), VECTOR_MANIFEST_SCAN_LIMIT);
+        let manifest_items =
+            self.list_state(Some(VECTOR_MANIFEST_PREFIX), VECTOR_MANIFEST_SCAN_LIMIT);
         for item in manifest_items {
             let Some(collection) = collection_from_manifest_key(&item.key) else {
                 continue;
@@ -596,6 +601,84 @@ impl Engine {
         Ok(())
     }
 
+    pub fn vector_compact_collection(&self, collection: &str) -> Result<bool, EngineError> {
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        Ok(self
+            .0
+            .vectors
+            .compact_collection_with_options(collection, false)?)
+    }
+
+    pub fn vector_force_compact_collection(&self, collection: &str) -> Result<bool, EngineError> {
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        Ok(self
+            .0
+            .vectors
+            .compact_collection_with_options(collection, true)?)
+    }
+
+    pub fn vector_retrain_ivf(&self, collection: &str, force: bool) -> Result<bool, EngineError> {
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        Ok(self.0.vectors.retrain_ivf(collection, force)?)
+    }
+
+    pub fn vector_build_disk_index(
+        &self,
+        collection: &str,
+        params: DiskAnnBuildParams,
+    ) -> Result<(), EngineError> {
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        Ok(self.0.vectors.build_disk_index(collection, params)?)
+    }
+
+    pub fn vector_drop_disk_index(&self, collection: &str) -> Result<(), EngineError> {
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        Ok(self.0.vectors.drop_disk_index(collection)?)
+    }
+
+    pub fn vector_disk_index_status(
+        &self,
+        collection: &str,
+    ) -> Result<DiskIndexStatus, EngineError> {
+        Ok(self.0.vectors.disk_index_status(collection)?)
+    }
+
+    pub fn vector_update_disk_index_params(
+        &self,
+        collection: &str,
+        params: DiskAnnBuildParams,
+    ) -> Result<DiskAnnBuildParams, EngineError> {
+        let _ = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        Ok(self
+            .0
+            .vectors
+            .update_disk_index_params(collection, params)?)
+    }
+
     pub fn vector_get(
         &self,
         collection: &str,
@@ -707,7 +790,10 @@ fn parse_vector_manifest_metadata(
             return None;
         }
     }
-    let dim = value.get("dim").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let dim = value
+        .get("dim")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     let metric = value
         .get("metric")
         .cloned()
