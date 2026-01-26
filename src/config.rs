@@ -54,7 +54,7 @@ impl Config {
         let api_key = std::env::var("RUSTKISS_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
             .unwrap_or_else(|_| "dev".to_string());
-        let data_dir = std::env::var("DATA_DIR").ok();
+        let data_dir = resolve_data_dir();
 
         let snapshot_interval_secs = std::env::var("SNAPSHOT_INTERVAL_SECS")
             .ok()
@@ -302,6 +302,22 @@ fn resolve_port() -> u16 {
     9917
 }
 
+fn resolve_data_dir() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--data" || arg == "--data-dir" {
+            if let Some(path) = args.next() {
+                return Some(path);
+            } else {
+                eprintln!("`--data` requiere un valor. Ignorando flag.");
+                return None;
+            }
+        }
+    }
+    std::env::var("DATA_DIR").ok()
+}
+
+
 fn resolve_bind_addr() -> IpAddr {
     use std::net::{IpAddr, Ipv4Addr};
     let mut args = std::env::args().skip(1);
@@ -312,7 +328,7 @@ fn resolve_bind_addr() -> IpAddr {
             );
             return IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         }
-        if arg == "--bind" {
+        if arg == "--bind" || arg == "--host" {
             let Some(value) = args.next() else {
                 eprintln!("`--bind` requiere un valor. Usando 127.0.0.1.");
                 return IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));

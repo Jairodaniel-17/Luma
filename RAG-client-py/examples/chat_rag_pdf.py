@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from dotenv import find_dotenv, load_dotenv
-from rustkissvdb import Client as RustClient, RustKissVDBError
+
+from rustkissvdb import Client as RustClient
+from rustkissvdb import RustKissVDBError
 
 # =================================================
 # Load .env
@@ -38,7 +40,7 @@ VDB_BASE_URL = os.getenv("VDB_BASE_URL", f"http://localhost:{PORT_RUST_KISS_VDB}
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma:300m")
-OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b")
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "nemotron-3-nano:30b-cloud")
 RUSTKISS_API_KEY = os.getenv("RUSTKISS_API_KEY")
 
 RAG_TOPK = int(os.getenv("RAG_TOPK", str(DEFAULT_TOPK)))
@@ -408,7 +410,9 @@ def main():
 
         if q.lower() == "/stats":
             h = mem.load()
-            print(f"session={session_id} messages={len(h)} topk={rag_topk} ctx_chars={max_ctx_chars} window={history_window}")
+            print(
+                f"session={session_id} messages={len(h)} topk={rag_topk} ctx_chars={max_ctx_chars} window={history_window}"
+            )
             if manifest_cached:
                 print("manifest:", short(safe_json(manifest_cached), 250))
             print()
