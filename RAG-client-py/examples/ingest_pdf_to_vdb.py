@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import uuid
@@ -6,11 +5,14 @@ from typing import Any, Dict, List, Optional
 
 import fitz  # PyMuPDF
 import httpx
-from rustkissvdb import Client as RustClient, RustKissVDBError
+
+from rustkissvdb import Client as RustClient
+from rustkissvdb import RustKissVDBError
 
 # ---------------------------
 #  RustKissVDB minimal client
 # ---------------------------
+
 
 class RustKissVDBClient:
     def __init__(self, base_url: Optional[str] = None, timeout: float = 60.0):
@@ -46,6 +48,7 @@ class RustKissVDBClient:
 #  Ollama embeddings
 # ---------------------------
 
+
 class OllamaEmbeddings:
     def __init__(self, model: str = "embeddinggemma:300m", base_url: str = "http://localhost:11434"):
         self.model = model
@@ -66,11 +69,13 @@ class OllamaEmbeddings:
 #  PDF -> chunks
 # ---------------------------
 
+
 def normalize_ws(s: str) -> str:
     s = s.replace("\u00a0", " ")
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
+
 
 def chunk_text(text: str, chunk_chars: int = 1200, overlap: int = 150) -> List[str]:
     """
@@ -92,6 +97,7 @@ def chunk_text(text: str, chunk_chars: int = 1200, overlap: int = 150) -> List[s
         i = max(0, j - overlap)
     return chunks
 
+
 def read_pdf_pages(pdf_path: str) -> List[Dict[str, Any]]:
     doc = fitz.open(pdf_path)
     pages = []
@@ -104,7 +110,9 @@ def read_pdf_pages(pdf_path: str) -> List[Dict[str, Any]]:
 
 
 def main():
-    PDF_PATH = os.getenv("PDF_PATH", r"C:\Users\jairo\Downloads\JDMT_EXAME FINAL DE PORTUGUÊS.pdf")
+    PDF_PATH = os.getenv(
+        "PDF_PATH", r"/home/jairo/rust-kiss-vdb/RAG-client-py/2026-01-23-174258-PROYECTOS-INBOUND_docs_bundle.pdf"
+    )
 
     COLLECTION = os.getenv("VDB_COLLECTION", "docs_portugues_exam").replace("-", "_")
     METRIC = os.getenv("VDB_METRIC", "cosine")
@@ -133,12 +141,15 @@ def main():
 
     # Guardar “manifest” en state (opcional, útil para inspección)
     manifest_key = f"docs:{COLLECTION}:manifest"
-    vdb.state_put(manifest_key, {
-        "pdf_path": PDF_PATH,
-        "collection": COLLECTION,
-        "embed_model": EMBED_MODEL,
-        "chunks": len(all_chunks),
-    })
+    vdb.state_put(
+        manifest_key,
+        {
+            "pdf_path": PDF_PATH,
+            "collection": COLLECTION,
+            "embed_model": EMBED_MODEL,
+            "chunks": len(all_chunks),
+        },
+    )
 
     # Upsert chunks
     for i, ch in enumerate(all_chunks, start=1):

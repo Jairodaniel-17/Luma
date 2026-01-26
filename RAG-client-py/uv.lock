@@ -1,6 +1,6 @@
 version = 1
 revision = 3
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 
 [[package]]
 name = "anyio"
@@ -95,21 +95,26 @@ wheels = [
 ]
 
 [[package]]
-name = "rag"
+name = "rustkissvdb"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "httpx" },
-    { name = "pymupdf" },
     { name = "python-dotenv" },
+]
+
+[package.optional-dependencies]
+rag = [
+    { name = "pymupdf" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pymupdf", specifier = ">=1.26.7" },
-    { name = "python-dotenv", specifier = ">=1.2.1" },
+    { name = "pymupdf", marker = "extra == 'rag'", specifier = ">=1.26.7" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
 ]
+provides-extras = ["rag"]
 
 [[package]]
 name = "typing-extensions"
