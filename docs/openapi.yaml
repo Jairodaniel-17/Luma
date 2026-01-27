@@ -2,35 +2,86 @@ openapi: 3.0.3
 info:
   title: RustKissVDB API
   version: "0.1.0"
+  description: |
+    API documentation for **RustKissVDB**, a lightweight, high-performance vector database optimized for RAG (Retrieval-Augmented Generation).
+
+    ## Features
+    - **Vector Operations**: Exact and ANN search.
+    - **State Management**: Key-Value store with optimistic locking (CAS).
+    - **Document Store**: Raw document storage linked to vectors.
+    - **RAG Search**: High-level semantic search with grouping.
+    - **Real-time**: SSE streaming of database events.
+
 servers:
   - url: http://localhost:9917
+    description: Default Local Server
+
+tags:
+  - name: RAG Search
+    description: High-level semantic search API (Text-to-Vector abstraction)
+  - name: Vector Operations
+    description: Core vector database operations (Collections, Upsert, Search)
+  - name: State Management
+    description: Distributed Key-Value store with CAS (Compare-And-Swap) support
+  - name: Streaming
+    description: Real-time event subscription (SSE)
+  - name: Document Store
+    description: Storage for raw documents and metadata
+  - name: SQL
+    description: SQLite bridge for relational data
+  - name: System
+    description: Health checks and metrics
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+      description: Enter your API Key (default is `dev`)
+
   schemas:
+    # --- Common ---
     ErrorBody:
       type: object
       required: [error, message]
       properties:
-        error: { type: string }
-        message: { type: string }
+        error: 
+          type: string
+          example: "invalid_argument"
+        message: 
+          type: string
+          example: "The provided vector dimension does not match the collection."
+
+    # --- State ---
     StateItem:
       type: object
       required: [key, value, revision]
       properties:
-        key: { type: string }
-        value: {}
-        revision: { type: integer, format: uint64 }
+        key: { type: string, example: "config/retention" }
+        value: { type: object, example: { "days": 30 } }
+        revision: 
+          type: integer
+          format: uint64
+          description: "Monotonically increasing revision ID. Used for CAS."
+          example: 105
         expires_at_ms: { type: integer, format: uint64, nullable: true }
+
     PutStateRequest:
       type: object
       required: [value]
       properties:
-        value: {}
-        ttl_ms: { type: integer, format: uint64, nullable: true }
-        if_revision: { type: integer, format: uint64, nullable: true }
+        value: { type: object, example: { "days": 30 } }
+        ttl_ms: 
+          type: integer
+          format: uint64
+          nullable: true
+          description: "Time-to-live in milliseconds"
+        if_revision: 
+          type: integer
+          format: uint64
+          nullable: true
+          description: "Optimistic locking: only update if current revision matches this."
+
     PutStateResponse:
       type: object
       required: [key, revision]
@@ -38,20 +89,55 @@ components:
         key: { type: string }
         revision: { type: integer, format: uint64 }
         expires_at_ms: { type: integer, format: uint64, nullable: true }
+
     DeleteStateResponse:
       type: object
       required: [deleted]
       properties:
         deleted: { type: boolean }
+
+    StateBatchOperation:
+      type: object
+      required: [key, value]
+      properties:
+        key: { type: string }
+        value: { type: object }
+        ttl_ms: { type: integer, format: uint64, nullable: true }
+        if_revision: { type: integer, format: uint64, nullable: true }
+
+    StateBatchResult:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, error] }
+        key: { type: string }
+        revision: { type: integer, format: uint64, nullable: true }
+        expires_at_ms: { type: integer, format: uint64, nullable: true }
+        error: { $ref: "#/components/schemas/ErrorBody", nullable: true }
+
+    StateBatchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/StateBatchResult" }
+
+    # --- Vector ---
     VectorMetric:
       type: string
       enum: [cosine, dot]
+      example: "cosine"
+
     CreateVectorCollectionRequest:
       type: object
       required: [dim, metric]
       properties:
-        dim: { type: integer, minimum: 1 }
+        dim: 
+          type: integer
+          minimum: 1
+          description: "Dimension of the vectors in this collection"
+          example: 384
         metric: { $ref: "#/components/schemas/VectorMetric" }
+
     CreateVectorCollectionResponse:
       type: object
       required: [collection, dim, metric]
@@ -59,19 +145,10 @@ components:
         collection: { type: string }
         dim: { type: integer }
         metric: { $ref: "#/components/schemas/VectorMetric" }
+
     VectorCollectionInfo:
       type: object
-      required:
-        [
-          collection,
-          dim,
-          metric,
-          live_count,
-          total_records,
-          upsert_count,
-          file_len,
-          applied_offset,
-        ]
+      required: [collection, dim, metric, live_count, total_records, upsert_count, file_len, applied_offset]
       properties:
         collection: { type: string }
         dim: { type: integer }
@@ -83,12 +160,14 @@ components:
         applied_offset: { type: integer, format: uint64 }
         created_at_ms: { type: integer, format: uint64, nullable: true }
         updated_at_ms: { type: integer, format: uint64, nullable: true }
+
     VectorCollectionsResponse:
       type: object
       properties:
         collections:
           type: array
           items: { $ref: "#/components/schemas/VectorCollectionInfo" }
+
     VectorCollectionDetailResponse:
       type: object
       required: [collection]
@@ -103,15 +182,22 @@ components:
         deleted: { type: integer, format: uint64, nullable: true }
         manifest: { type: object, nullable: true }
         notes: { type: string, nullable: true }
+
     VectorAddRequest:
       type: object
       required: [id, vector]
       properties:
-        id: { type: string }
+        id: { type: string, example: "doc_v1_101" }
         vector:
           type: array
           items: { type: number, format: float }
-        meta: {}
+          description: "Floating point vector data"
+          example: [0.1, 0.23, -0.5, 0.8]
+        meta: 
+          type: object
+          description: "Arbitrary JSON metadata"
+          example: { "category": "finance", "year": 2024 }
+
     VectorUpdateRequest:
       type: object
       required: [id]
@@ -122,16 +208,19 @@ components:
           items: { type: number, format: float }
           nullable: true
         meta: { nullable: true }
+
     VectorDeleteRequest:
       type: object
       required: [id]
       properties:
         id: { type: string }
+
     VectorDeleteResponse:
       type: object
       required: [deleted]
       properties:
         deleted: { type: boolean }
+
     VectorGetResponse:
       type: object
       required: [id, vector, meta]
@@ -141,6 +230,7 @@ components:
           type: array
           items: { type: number, format: float }
         meta: {}
+
     VectorSearchRequest:
       type: object
       required: [vector, k]
@@ -148,9 +238,14 @@ components:
         vector:
           type: array
           items: { type: number, format: float }
-        k: { type: integer, minimum: 1 }
-        filters: { nullable: true }
-        include_meta: { type: boolean, nullable: true }
+          example: [0.1, 0.23, -0.5, 0.8]
+        k: { type: integer, minimum: 1, example: 5 }
+        filters: 
+          nullable: true
+          description: "Exact match metadata filters"
+          example: { "category": "finance" }
+        include_meta: { type: boolean, nullable: true, default: false }
+
     VectorSearchHit:
       type: object
       required: [id, score]
@@ -158,6 +253,7 @@ components:
         id: { type: string }
         score: { type: number, format: float }
         meta: { nullable: true }
+
     VectorSearchResponse:
       type: object
       required: [hits]
@@ -165,28 +261,7 @@ components:
         hits:
           type: array
           items: { $ref: "#/components/schemas/VectorSearchHit" }
-    StateBatchOperation:
-      type: object
-      required: [key, value]
-      properties:
-        key: { type: string }
-        value: {}
-        ttl_ms: { type: integer, format: uint64, nullable: true }
-        if_revision: { type: integer, format: uint64, nullable: true }
-    StateBatchResult:
-      type: object
-      properties:
-        status: { type: string, enum: [ok, error] }
-        key: { type: string }
-        revision: { type: integer, format: uint64, nullable: true }
-        expires_at_ms: { type: integer, format: uint64, nullable: true }
-        error: { $ref: "#/components/schemas/ErrorBody", nullable: true }
-    StateBatchResponse:
-      type: object
-      properties:
-        results:
-          type: array
-          items: { $ref: "#/components/schemas/StateBatchResult" }
+
     VectorBatchItem:
       type: object
       required: [id, vector]
@@ -196,175 +271,177 @@ components:
           type: array
           items: { type: number, format: float }
         meta: {}
+
     VectorBatchResult:
       type: object
       properties:
         status: { type: string, enum: [upserted, deleted, error] }
         id: { type: string }
         error: { $ref: "#/components/schemas/ErrorBody", nullable: true }
+
     VectorBatchResponse:
       type: object
       properties:
         results:
           type: array
           items: { $ref: "#/components/schemas/VectorBatchResult" }
+
+    # --- Docs & SQL ---
     DocRecord:
       type: object
       required: [id, doc, revision]
       properties:
         id: { type: string }
-        doc: {}
+        doc: { type: object }
         revision: { type: integer, format: uint64 }
+
     DocFindResponse:
       type: object
       properties:
         documents:
           type: array
           items: { $ref: "#/components/schemas/DocRecord" }
+
     SqlQueryRequest:
       type: object
       required: [sql]
       properties:
-        sql: { type: string }
+        sql: { type: string, example: "SELECT * FROM users WHERE id = ?" }
         params:
           type: array
           items: {}
+          example: [123]
+
     SqlQueryResponse:
       type: object
       properties:
         rows:
           type: array
           items: {}
+
     SqlExecResponse:
       type: object
       properties:
         rows_affected: { type: integer, format: uint64 }
+
+    # --- High Level Search (RAG) ---
+    HighLevelSearchFilters:
+      type: object
+      properties:
+        category: 
+          type: string
+          example: "netsuite"
+        language:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
+          example: ["en", "es"]
+        status: 
+          type: string
+          example: "active"
+        version_policy: 
+          type: string
+          enum: ["latest", "all"]
+          description: "Strategy for handling document versions"
+          default: "latest"
+
+    HighLevelSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: 
+          type: string
+          description: "Natural language query text"
+          example: "oracle approval workflow"
+        top_k: 
+          type: integer
+          default: 10
+          example: 10
+        filters: { $ref: "#/components/schemas/HighLevelSearchFilters" }
+        group_by: 
+          type: string
+          description: "Field to group results by (e.g. 'document_id')"
+          example: "document_id"
+        group_limit: 
+          type: integer
+          default: 1
+          description: "Max results per group"
+
+    HighLevelDocumentMetadata:
+      type: object
+      properties:
+        filename: { type: string }
+        processed_at: { type: integer, format: uint64 }
+        category: { type: string }
+        language: { type: string }
+        status: { type: string }
+        version: { type: string }
+        group_id: { type: integer }
+        document_id: { type: string }
+
+    HighLevelDocumentResponse:
+      type: object
+      properties:
+        id: { type: integer }
+        content: { type: string }
+        metadata: { $ref: "#/components/schemas/HighLevelDocumentMetadata" }
+
+    HighLevelSearchResult:
+      type: object
+      properties:
+        score: { type: number, format: float }
+        document: { $ref: "#/components/schemas/HighLevelDocumentResponse" }
+
+    HighLevelSearchResponse:
+      type: object
+      properties:
+        query: { type: string }
+        top_k: { type: integer }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/HighLevelSearchResult" }
+
 paths:
+  # --- System ---
   /v1/health:
     get:
+      tags: [System]
       summary: Health check
       responses:
-        "200": { description: OK }
+        "200": { description: Server is healthy }
   /v1/metrics:
     get:
-      summary: Metrics (text)
+      tags: [System]
+      summary: Prometheus-compatible metrics
       responses:
-        "200": { description: OK }
-  /v1/state:
-    get:
-      security: [{ bearerAuth: [] }]
-      summary: List state keys by prefix
-      parameters:
-        - in: query
-          name: prefix
-          schema: { type: string }
-        - in: query
-          name: limit
-          schema: { type: integer, default: 100 }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/StateItem" }
-        "401": { description: Unauthorized }
-  /v1/state/batch_put:
-    post:
-      security: [{ bearerAuth: [] }]
-      summary: Batch put state keys
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                operations:
-                  type: array
-                  items: { $ref: "#/components/schemas/StateBatchOperation" }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/StateBatchResponse" }
-        "401": { description: Unauthorized }
-  /v1/state/{key}:
-    get:
-      security: [{ bearerAuth: [] }]
-      summary: Get a state key
-      parameters:
-        - in: path
-          name: key
-          required: true
-          schema: { type: string }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/StateItem" }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
-    put:
-      security: [{ bearerAuth: [] }]
-      summary: Put a state key (CAS via if_revision)
-      parameters:
-        - in: path
-          name: key
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/PutStateRequest" }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/PutStateResponse" }
-        "401": { description: Unauthorized }
-        "409": { description: Revision mismatch }
-        "413": { description: Payload too large }
-    delete:
-      security: [{ bearerAuth: [] }]
-      summary: Delete a state key
-      parameters:
-        - in: path
-          name: key
-          required: true
-          schema: { type: string }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/DeleteStateResponse" }
-        "401": { description: Unauthorized }
+        "200": { description: Metrics in text format }
+
+  # --- Streaming ---
   /v1/stream:
     get:
+      tags: [Streaming]
       security: [{ bearerAuth: [] }]
-      summary: SSE stream (replay + tail) by offset
+      summary: Real-time Event Stream (SSE)
+      description: |
+        Subscribe to database events (upserts, state changes) via Server-Sent Events.
+        Supports filtering by type, key prefix, and collection.
       parameters:
         - in: query
           name: since
-          description: Offset/event_id (u64). Server replays events with offset > since.
+          description: Offset/event_id to replay from. Default 0.
           schema: { type: integer, format: uint64, default: 0 }
         - in: query
           name: types
-          description: Comma-separated event types.
+          description: Comma-separated event types (e.g., `vector_upserted,state_changed`).
           schema: { type: string }
         - in: query
           name: key_prefix
-          description: Filters only events with data.key starting with prefix.
+          description: Filter events by key prefix.
           schema: { type: string }
         - in: query
           name: collection
-          description: Filters only events with data.collection == collection.
+          description: Filter events by collection name.
           schema: { type: string }
         - in: header
           name: Last-Event-ID
@@ -372,16 +449,22 @@ paths:
           schema: { type: string }
       responses:
         "200":
-          description: text/event-stream
+          description: Stream of events
           content:
             text/event-stream:
               schema: { type: string }
         "401": { description: Unauthorized }
+
   /v1/events:
     get:
+      tags: [Streaming]
       security: [{ bearerAuth: [] }]
       deprecated: true
-      summary: Legacy SSE alias for /v1/stream (prefix -> key_prefix)
+      summary: Legacy SSE alias (Deprecated)
+      description: |
+        **DEPRECATED**: Use `/v1/stream` instead.
+        
+        Legacy alias where `prefix` maps to `key_prefix`. Does not support `collection` filter.
       parameters:
         - in: query
           name: since
@@ -395,21 +478,147 @@ paths:
       responses:
         "200": { description: text/event-stream }
         "401": { description: Unauthorized }
-  /v1/vector:
-    get:
-      security: [{ bearerAuth: [] }]
-      summary: List vector collections
+
+  # --- High Level Search ---
+  /search:
+    post:
+      tags: [RAG Search]
+      summary: High-level Semantic Search
+      description: |
+        Performs a semantic search using a text query.
+        Currently uses **mock embeddings** (random deterministic) for testing flows.
+        Supports advanced filtering and grouping for RAG.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HighLevelSearchRequest" }
       responses:
         "200":
-          description: OK
+          description: Search results
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HighLevelSearchResponse" }
+        "500": { description: Internal Error }
+
+  # --- State ---
+  /v1/state:
+    get:
+      tags: [State Management]
+      security: [{ bearerAuth: [] }]
+      summary: List keys
+      parameters:
+        - in: query
+          name: prefix
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: List of state items
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/StateItem" }
+        "401": { description: Unauthorized }
+
+  /v1/state/batch_put:
+    post:
+      tags: [State Management]
+      security: [{ bearerAuth: [] }]
+      summary: Batch put keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                operations:
+                  type: array
+                  items: { $ref: "#/components/schemas/StateBatchOperation" }
+      responses:
+        "200":
+          description: Batch result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StateBatchResponse" }
+
+  /v1/state/{key}:
+    get:
+      tags: [State Management]
+      security: [{ bearerAuth: [] }]
+      summary: Get key value
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StateItem" }
+        "404": { description: Key not found }
+    put:
+      tags: [State Management]
+      security: [{ bearerAuth: [] }]
+      summary: Set key value
+      description: Supports Optimistic Locking via `if_revision`.
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PutStateRequest" }
+      responses:
+        "200":
+          description: Updated successfully
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PutStateResponse" }
+        "409": { description: Revision mismatch (CAS failed) }
+    delete:
+      tags: [State Management]
+      security: [{ bearerAuth: [] }]
+      summary: Delete key
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteStateResponse" }
+
+  # --- Vector Operations ---
+  /v1/vector:
+    get:
+      tags: [Vector Operations]
+      security: [{ bearerAuth: [] }]
+      summary: List all collections
+      responses:
+        "200":
+          description: List of collections
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorCollectionsResponse" }
-        "401": { description: Unauthorized }
+
   /v1/vector/{collection}:
     get:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Get vector collection detail
+      summary: Get collection details
       parameters:
         - in: path
           name: collection
@@ -417,15 +626,15 @@ paths:
           schema: { type: string }
       responses:
         "200":
-          description: OK
+          description: Details
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorCollectionDetailResponse" }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
+        "404": { description: Collection not found }
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Create a vector collection
+      summary: Create new collection
       parameters:
         - in: path
           name: collection
@@ -438,16 +647,17 @@ paths:
             schema: { $ref: "#/components/schemas/CreateVectorCollectionRequest" }
       responses:
         "200":
-          description: OK
+          description: Created
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CreateVectorCollectionResponse" }
-        "401": { description: Unauthorized }
-        "409": { description: Already exists }
+        "409": { description: Collection already exists }
+
   /v1/vector/{collection}/add:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Add a vector id (fails if exists)
+      summary: Add vector (fail if exists)
       parameters:
         - in: path
           name: collection
@@ -459,14 +669,14 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/VectorAddRequest" }
       responses:
-        "200": { description: OK }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
-        "409": { description: Already exists }
+        "200": { description: Added }
+        "409": { description: ID already exists }
+
   /v1/vector/{collection}/upsert:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Upsert a vector id
+      summary: Upsert vector (Insert or Update)
       parameters:
         - in: path
           name: collection
@@ -478,13 +688,13 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/VectorAddRequest" }
       responses:
-        "200": { description: OK }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
+        "200": { description: Upserted }
+
   /v1/vector/{collection}/upsert_batch:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Batch upsert vectors
+      summary: Batch Upsert
       parameters:
         - in: path
           name: collection
@@ -502,16 +712,17 @@ paths:
                   items: { $ref: "#/components/schemas/VectorBatchItem" }
       responses:
         "200":
-          description: OK
+          description: Batch results
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorBatchResponse" }
-        "401": { description: Unauthorized }
-        "404": { description: Collection not found }
+
   /v1/vector/{collection}/update:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Update a vector id (404 if id missing)
+      summary: Partial Update
+      description: Update vector or metadata for an existing ID. Fails if ID not found.
       parameters:
         - in: path
           name: collection
@@ -523,13 +734,14 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/VectorUpdateRequest" }
       responses:
-        "200": { description: OK }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
+        "200": { description: Updated }
+        "404": { description: ID not found }
+
   /v1/vector/{collection}/delete:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Delete a vector id (404 if id missing)
+      summary: Delete vector
       parameters:
         - in: path
           name: collection
@@ -542,16 +754,17 @@ paths:
             schema: { $ref: "#/components/schemas/VectorDeleteRequest" }
       responses:
         "200":
-          description: OK
+          description: Deleted
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorDeleteResponse" }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
+        "404": { description: ID not found }
+
   /v1/vector/{collection}/delete_batch:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Batch delete vector ids
+      summary: Batch Delete
       parameters:
         - in: path
           name: collection
@@ -569,16 +782,16 @@ paths:
                   items: { type: string }
       responses:
         "200":
-          description: OK
+          description: Batch results
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorBatchResponse" }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
+
   /v1/vector/{collection}/get:
     get:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Get a vector id
+      summary: Get vector by ID
       parameters:
         - in: path
           name: collection
@@ -590,16 +803,17 @@ paths:
           schema: { type: string }
       responses:
         "200":
-          description: OK
+          description: Found
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorGetResponse" }
-        "401": { description: Unauthorized }
         "404": { description: Not found }
+
   /v1/vector/{collection}/search:
     post:
+      tags: [Vector Operations]
       security: [{ bearerAuth: [] }]
-      summary: Search vectors (top-k)
+      summary: Low-level Vector Search (KNN)
       parameters:
         - in: path
           name: collection
@@ -612,17 +826,17 @@ paths:
             schema: { $ref: "#/components/schemas/VectorSearchRequest" }
       responses:
         "200":
-          description: OK
+          description: Search results
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VectorSearchResponse" }
-        "401": { description: Unauthorized }
-        "404": { description: Not found }
 
+  # --- Document Store ---
   /v1/doc/{collection}/{id}:
     put:
+      tags: [Document Store]
       security: [{ bearerAuth: [] }]
-      summary: Put a document
+      summary: Store document
       parameters:
         - in: path
           name: collection
@@ -636,17 +850,17 @@ paths:
         required: true
         content:
           application/json:
-            schema: {}
+            schema: { type: object, description: "Arbitrary JSON document" }
       responses:
         "200":
-          description: OK
+          description: Stored
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DocRecord" }
-        "401": { description: Unauthorized }
     get:
+      tags: [Document Store]
       security: [{ bearerAuth: [] }]
-      summary: Get a document
+      summary: Retrieve document
       parameters:
         - in: path
           name: collection
@@ -658,15 +872,15 @@ paths:
           schema: { type: string }
       responses:
         "200":
-          description: OK
+          description: Found
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DocRecord" }
-        "401": { description: Unauthorized }
         "404": { description: Not found }
     delete:
+      tags: [Document Store]
       security: [{ bearerAuth: [] }]
-      summary: Delete a document
+      summary: Delete document
       parameters:
         - in: path
           name: collection
@@ -677,14 +891,14 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "200": { description: OK }
-        "401": { description: Unauthorized }
+        "200": { description: Deleted }
         "404": { description: Not found }
 
   /v1/doc/{collection}/find:
     post:
+      tags: [Document Store]
       security: [{ bearerAuth: [] }]
-      summary: Find documents by metadata
+      summary: Find docs by metadata
       parameters:
         - in: path
           name: collection
@@ -701,16 +915,17 @@ paths:
                 limit: { type: integer, default: 20 }
       responses:
         "200":
-          description: OK
+          description: Found docs
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DocFindResponse" }
-        "401": { description: Unauthorized }
 
+  # --- SQL ---
   /v1/sql/query:
     post:
+      tags: [SQL]
       security: [{ bearerAuth: [] }]
-      summary: Execute a SELECT over SQLite
+      summary: Execute SELECT query
       requestBody:
         required: true
         content:
@@ -718,15 +933,16 @@ paths:
             schema: { $ref: "#/components/schemas/SqlQueryRequest" }
       responses:
         "200":
-          description: OK
+          description: Result set
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SqlQueryResponse" }
-        "401": { description: Unauthorized }
+
   /v1/sql/exec:
     post:
+      tags: [SQL]
       security: [{ bearerAuth: [] }]
-      summary: Execute DDL/DML over SQLite
+      summary: Execute DDL/DML
       requestBody:
         required: true
         content:
@@ -734,9 +950,7 @@ paths:
             schema: { $ref: "#/components/schemas/SqlQueryRequest" }
       responses:
         "200":
-          description: OK
+          description: Execution result
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SqlExecResponse" }
-        "401": { description: Unauthorized }
-

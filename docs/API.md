@@ -1,219 +1,240 @@
-# API (v1)
+# Guía de la API de la Base de Datos Vectorial
 
-> Si defines `RUSTKISS_API_KEY` (o `API_KEY`) debes enviar `Authorization: Bearer <token>`. Ejemplos omitidos para mantenerlos legibles.
+Esta guía proporciona una descripción detallada de la API de `rust-kiss-vdb`, con ejemplos de `curl` para las operaciones más comunes.
 
-Formato de error uniforme:
-```json
-{ "error": "not_found", "message": "document not found" }
-```
+## Autenticación
 
-## Health / Metrics
-
-- `GET /v1/health`
-- `GET /v1/metrics`
-
-## State
-
-### PUT
-`PUT /v1/state/{key}`
-
-Body:
-```json
-{ "value": { "progress": 42 }, "ttl_ms": 60000, "if_revision": 3 }
-```
-
-Ejemplo:
-```bash
-curl -X PUT "http://localhost:9917/v1/state/job:123" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"value\":{\"progress\":42},\"ttl_ms\":60000}"
-```
-
-### GET
-`GET /v1/state/{key}`
+Todas las solicitudes a la API deben incluir una clave de API a través del encabezado `Authorization` como un token "Bearer".
 
 ```bash
-curl "http://localhost:9917/v1/state/job:123"
+-H "Authorization: Bearer TU_API_KEY"
 ```
 
-### DELETE
-`DELETE /v1/state/{key}`
+Si no se proporciona una clave, el servidor usará `dev` por defecto.
 
-### LIST
-`GET /v1/state?prefix=job:&limit=100`
+## Endpoints de la API Vectorial
 
-### BATCH PUT
-`POST /v1/state/batch_put`
+La API principal para la gestión de vectores se encuentra bajo el prefijo `/v1/vector`.
+
+### 1. Crear una Colección
+
+Antes de poder añadir vectores, necesitas crear una "colección" que los contenga. Cada colección tiene una dimensión de vector y una métrica de distancia fijas.
+
+-   **Endpoint:** `POST /v1/vector/{nombre_coleccion}`
+-   **Métricas Soportadas:** `cosine` (coseno), `dot` (producto punto).
+
+**Ejemplo:** Crear una colección llamada `mis_embeddings` para vectores de 384 dimensiones con métrica de coseno.
 
 ```bash
-curl -X POST "http://localhost:9917/v1/state/batch_put" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"operations\":[{\"key\":\"bulk:1\",\"value\":{\"x\":1}},{\"key\":\"bulk:2\",\"value\":{\"x\":2}}]}"
+curl -X POST http://localhost:9917/v1/vector/mis_embeddings \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev" \
+  -d 
+  {
+    "dim": 384,
+    "metric": "cosine"
+  }
 ```
 
-Respuesta:
+**Respuesta Exitosa (200 OK):**
+
 ```json
 {
-  "results": [
-    { "status": "ok", "key": "bulk:1", "revision": 1 },
-    { "status": "error", "key": "bulk:2", "error": { "error": "invalid_argument", "message": "value too large" } }
-  ]
+  "collection": "mis_embeddings",
+  "dim": 384,
+  "metric": "cosine"
 }
 ```
 
-## Events (SSE)
+### 2. Listar Colecciones
 
-`GET /v1/stream?since=<offset>&types=...&key_prefix=...&collection=...`
+Puedes obtener una lista de todas las colecciones existentes y sus propiedades.
 
-```bash
-curl -N "http://localhost:9917/v1/stream?since=0&types=state_updated&key_prefix=job:" ^
-```
+-   **Endpoint:** `GET /v1/vector`
 
-Reconexión:
-- `since` y `Last-Event-ID` usan **offset/event_id (u64)**.
-
-Backpressure:
-- Si el servidor detecta que el cliente se quedó atrás, emite `event: gap` con `{from_offset,to_offset,dropped}`.
-
-## Vector
-
-### Listar colecciones
-`GET /v1/vector`
+**Ejemplo:**
 
 ```bash
-curl "http://localhost:9917/v1/vector"
+curl http://localhost:9917/v1/vector \
+  -H "Authorization: Bearer dev"
 ```
 
-Respuesta:
+**Respuesta Exitosa (200 OK):**
+
 ```json
 {
   "collections": [
     {
-      "collection": "docs",
-      "dim": 3,
+      "collection": "mis_embeddings",
+      "dim": 384,
       "metric": "cosine",
       "live_count": 0,
       "total_records": 0,
       "upsert_count": 0,
-      "file_len": 0,
-      "applied_offset": 0,
-      "created_at_ms": 1713222222222,
-      "updated_at_ms": 1713222222222
+      "file_len": 1024,
+      "applied_offset": 1,
+      "created_at_ms": 1678886400000,
+      "updated_at_ms": 1678886400000
     }
   ]
 }
 ```
 
+### 3. Añadir o Actualizar Vectores (Upsert)
 
-### Info de colección
-`GET /v1/vector/{collection}`
+La operación "upsert" añade un vector si su `id` no existe, o lo actualiza si ya existe. Los vectores deben tener un `id` único (string), el propio `vector` (array de floats), y opcionalmente un campo `meta` para almacenar metadatos en formato JSON.
+
+-   **Endpoint:** `POST /v1/vector/{nombre_coleccion}/upsert`
+
+**Ejemplo:** Añadir un vector a la colección `mis_embeddings`.
 
 ```bash
-curl "http://localhost:9917/v1/vector/docs"
+curl -X POST http://localhost:9917/v1/vector/mis_embeddings/upsert \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev" \
+  -d 
+  {
+    "id": "doc_123",
+    "vector": [0.1, 0.2, ..., 0.9],
+    "meta": {
+      "autor": "Jairo",
+      "año": 2024,
+      "publicado": true
+    }
+  }
 ```
 
-Respuesta:
+También puedes usar el endpoint `/upsert_batch` para añadir múltiples vectores en una sola solicitud, lo cual es mucho más eficiente.
+
+### 4. Búsqueda de Vectores
+
+La búsqueda de similitud es la operación central de una base de datos vectorial. Proporcionas un vector de consulta y la API devuelve los `k` vectores más similares de la colección.
+
+-   **Endpoint:** `POST /v1/vector/{nombre_coleccion}/search`
+
+**Parámetros del Cuerpo:**
+
+-   `vector`: El vector de consulta.
+-   `k`: El número de vecinos más cercanos a devolver.
+-   `filters` (opcional): Un objeto JSON para filtrar vectores basado en sus metadatos antes de la búsqueda.
+-   `include_meta` (opcional): Si es `true`, la respuesta incluirá los metadatos de los vectores encontrados.
+
+**Ejemplo:** Buscar los 5 vectores más similares en `mis_embeddings`.
+
+```bash
+curl -X POST http://localhost:9917/v1/vector/mis_embeddings/search \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev" \
+  -d 
+  {
+    "vector": [0.11, 0.22, ..., 0.99],
+    "k": 5,
+    "include_meta": true
+  }
+```
+
+**Respuesta Exitosa (200 OK):**
+
 ```json
 {
-  "collection": "docs",
-  "dim": 3,
-  "metric": "cosine",
-  "count": 0,
-  "created_at_ms": 1713222222222,
-  "updated_at_ms": 1713222222222,
-  "segments": 1,
-  "deleted": 0,
-  "manifest": {
-    "collection": "docs",
-    "dim": 3,
-    "metric": "cosine",
-    "created_at_ms": 1713222222222,
-    "updated_at_ms": 1713222222222
-  },
-  "notes": null
-}
-```
-
-> Si la colección no está cargada aún, el endpoint usa solo el manifest del State Store y marca `notes: "using manifest fallback"`. Algunos campos pueden aparecer como `null`.
-
-
-### Crear colección
-`POST /v1/vector/{collection}`
-
-```bash
-curl -X POST "http://localhost:9917/v1/vector/docs" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"dim\":3,\"metric\":\"cosine\"}"
-```
-
-### Add / Upsert
-`POST /v1/vector/{collection}/add`
-`POST /v1/vector/{collection}/upsert`
-
-```bash
-curl -X POST "http://localhost:9917/v1/vector/docs/upsert" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"id\":\"a\",\"vector\":[1,0,0],\"meta\":{\"tag\":\"x\"}}"
-```
-
-### Search
-`POST /v1/vector/{collection}/search`
-
-```bash
-curl -X POST "http://localhost:9917/v1/vector/docs/search" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"vector\":[0.9,0.1,0],\"k\":3,\"filters\":{\"tag\":\"x\"},\"include_meta\":true}"
-```
-
-### Batch
-
-- `POST /v1/vector/{collection}/upsert_batch`
-- `POST /v1/vector/{collection}/delete_batch`
-
-```bash
-curl -X POST "http://localhost:9917/v1/vector/docs/upsert_batch" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"items\":[{\"id\":\"v1\",\"vector\":[0.1,0.2],\"meta\":{\"tag\":\"a\"}}]}"
-```
-
-Respuesta: `{"results":[{"status":"upserted","id":"v1"}]}`
-
-## DocStore
-
-- `PUT /v1/doc/{collection}/{id}`
-- `GET /v1/doc/{collection}/{id}`
-- `DELETE /v1/doc/{collection}/{id}`
-- `POST /v1/doc/{collection}/find`
-
-```bash
-curl -X PUT "http://localhost:9917/v1/doc/tickets/tk_1" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"title\":\"Bug 1\",\"severity\":\"high\"}"
-
-curl -X POST "http://localhost:9917/v1/doc/tickets/find" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"filter\":{\"severity\":\"high\"},\"limit\":20}"
-```
-
-Respuesta:
-```json
-{
-  "documents": [
-    { "id": "tk_1", "revision": 2, "doc": { "title": "Bug 1", "severity": "high" } }
+  "hits": [
+    {
+      "id": "doc_123",
+      "score": 0.987,
+      "meta": {
+        "autor": "Jairo",
+        "año": 2024,
+        "publicado": true
+      }
+    },
+    {
+      "id": "doc_456",
+      "score": 0.954,
+      "meta": { ... }
+    }
   ]
 }
 ```
 
-## SQL (opcional)
+#### Filtrado en la Búsqueda
 
-- `POST /v1/sql/query`
-- `POST /v1/sql/exec`
+Puedes restringir la búsqueda a solo los vectores que cumplan ciertas condiciones en sus metadatos. El filtro es un objeto JSON donde las claves coinciden con las claves del campo `meta`.
+
+**Ejemplo:** Buscar los 5 vectores más similares que además tengan `publicado: true` y `autor: "Jairo"` en sus metadatos.
 
 ```bash
-curl -X POST "http://localhost:9917/v1/sql/query" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"sql\":\"SELECT name FROM sqlite_master WHERE type='table'\",\"params\":[]}"
+curl -X POST http://localhost:9917/v1/vector/mis_embeddings/search \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev" \
+  -d 
+  {
+    "vector": [0.11, 0.22, ..., 0.99],
+    "k": 5,
+    "filters": {
+      "publicado": true,
+      "autor": "Jairo"
+    },
+    "include_meta": true
+  }
+```
+> **Nota:** El motor de búsqueda actual solo soporta filtros de coincidencia exacta (clave-valor). Operadores más complejos como rangos (`$gt`, `$lt`) no están implementados en la capa de la API genérica.
+
+### 5. Obtener un Vector por ID
+
+-   **Endpoint:** `GET /v1/vector/{nombre_coleccion}/get?id={id_vector}`
+
+**Ejemplo:**
+
+```bash
+curl "http://localhost:9917/v1/vector/mis_embeddings/get?id=doc_123" \
+  -H "Authorization: Bearer dev"
 ```
 
-`/query` solo acepta `SELECT`, devuelve `{"rows":[{...}]}`.  
-`/exec` devuelve `{"rows_affected": N}` y sirve para DDL/DML.
+### 6. Eliminar un Vector por ID
+
+-   **Endpoint:** `POST /v1/vector/{nombre_coleccion}/delete`
+
+**Ejemplo:**
+
+```bash
+curl -X POST http://localhost:9917/v1/vector/mis_embeddings/delete \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev" \
+  -d '{
+    "id": "doc_123"
+  }'
+```
+
+## Suscripción a Eventos en Tiempo Real (SSE)
+
+`rust-kiss-vdb` permite suscribirse a cambios en la base de datos en tiempo real mediante Server-Sent Events (SSE). Esto es útil para mantener cachés sincronizadas o reaccionar a inserciones de vectores.
+
+### Endpoint Principal: `/v1/stream`
+
+Este es el endpoint recomendado para consumir el flujo de eventos.
+
+-   **Método:** `GET`
+-   **Parámetros de Consulta:**
+    -   `since` (opcional, u64): ID del evento (offset) desde el cual empezar a recibir. Por defecto es 0 (inicio).
+    -   `types` (opcional, string): Lista separada por comas de los tipos de eventos a filtrar (ej. `vector_upserted,state_changed`).
+    -   `key_prefix` (opcional, string): Filtra eventos cuya clave comience con este prefijo.
+    -   `collection` (opcional, string): Filtra eventos que pertenezcan a una colección específica.
+
+**Ejemplo:** Suscribirse a inserciones en la colección `mis_embeddings`.
+
+```bash
+curl "http://localhost:9917/v1/stream?collection=mis_embeddings&types=vector_upserted" \
+  -H "Authorization: Bearer dev"
+```
+
+### Endpoint Deprecado: `/v1/events`
+
+El endpoint `/v1/events` se mantiene por compatibilidad con versiones anteriores pero **está deprecado**. Funciona como un alias de `/v1/stream` con la siguiente diferencia en los parámetros:
+
+-   El parámetro `prefix` en `/v1/events` se mapea internamente a `key_prefix`.
+-   No soporta el filtrado explícito por `collection` (aunque puedes usar filtros de clave si tus claves tienen prefijos de colección).
+
+**Se recomienda encarecidamente migrar a `/v1/stream` para nuevas implementaciones.**
+
+---
+*Para una descripción completa de todos los endpoints, incluidos los de gestión de estado (`/state`), documentos (`/doc`) y SQL (`/sql`), consulta la especificación OpenAPI en `docs/openapi.yaml`.*

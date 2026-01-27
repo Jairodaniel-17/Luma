@@ -60,93 +60,16 @@ By default, it will run on `127.0.0.1:8000` and store data in a temporary direct
 
 ### Configuration
 
-Configuration is managed via environment variables. Key options include:
+Configuration is managed via command-line arguments and environment variables. For a complete list of all available options and their corresponding environment variables, please see the detailed configuration guide:
 
-| Variable                  | Description                                 | Default                               |
-| ------------------------- | ------------------------------------------- | ------------------------------------- |
-| `RUST_LOG`                | Log level (e.g., `info`, `debug`)           | `info`                                |
-| `KISS_VDB_DATA_DIR`       | Path to store database files                | Temporary directory                   |
-| `KISS_VDB_BIND_ADDR`      | Bind address for the HTTP server            | `127.0.0.1`                           |
-| `KISS_VDB_PORT`           | Port for the HTTP server                    | `8000`                                |
-| `KISS_VDB_API_KEY`        | A secret key to protect your API endpoints  | `dev`                                 |
-| `KISS_VDB_INDEX_KIND`     | Search index type (`HNSW`, `IVF_FLAT_Q8`)   | `HNSW`                                |
+➡️ **[Full Configuration Guide](./docs/CLI.md)**
 
----
+### API Guide
 
-## 🐍 Python Client (`RAG-client-py`)
+The server exposes a simple RESTful API for creating collections, managing vectors, and performing searches. For a complete guide with `curl` examples and details on request/response formats, please see the API documentation:
 
-A dedicated Python client is available in the `RAG-client-py/` directory, allowing you to interact with the database effortlessly.
+➡️ **[Complete API Guide](./docs/API.md)**
 
-### Installation
-
-The client uses `uv` for dependency management.
-
-```bash
-cd RAG-client-py
-uv venv
-source .venv/bin/activate
-uv pip install -r requirements.txt
-```
-
-### Example Usage
-
-```python
-from rustkissvdb.client import Client
-
-# Initialize the client
-client = Client(base_url="http://127.0.0.1:8000", api_key="dev")
-
-# Create a collection
-client.vector.create_collection(
-    collection="my-docs",
-    dim=768,
-    metric="Cosine"
-)
-
-# Upsert a vector
-client.vector.upsert(
-    collection="my-docs",
-    id="doc1-chunk1",
-    vector=[0.1, 0.2, ...], # Your 768-dim vector
-    meta={"document_id": "doc1"}
-)
-
-# Perform a grouped search
-search_results = client.vector.search(
-    collection="my-docs",
-    vector=[0.11, 0.19, ...], # Your query vector
-    k=5,
-    group_by="document_id",
-    group_limit=1
-)
-
-print(search_results)
-
-client.close()
-```
-
----
-
-## 📖 API Overview
-
-The server exposes a simple RESTful API.
-
-### Vector Operations
-
-*   `PUT /v1/collections/{name}`: Create a new vector collection.
-*   `GET /v1/collections`: List all collections.
-*   `GET /v1/collections/{name}`: Get information about a collection.
-*   `POST /v1/collections/{name}/vectors`: Upsert a batch of vectors.
-*   `PUT /v1/collections/{name}/vectors/{id}`: Upsert a single vector.
-*   `POST /v1/collections/{name}/search`: Perform a vector search.
-*   `DELETE /v1/collections/{name}/vectors/{id}`: Delete a vector.
-
-### State & Document Management
-
-The API also includes endpoints for managing raw documents and key-value state, providing a flexible platform for building complex RAG systems.
-
-*   **Documents**: `POST /v1/docs/{collection}`, `GET /v1/docs/{collection}/{id}`
-*   **Key-Value State**: `POST /v1/state`, `GET /v1/state/{key}`
 
 ---
 
