@@ -16,7 +16,10 @@ impl AppendLog {
     }
 
     pub fn append(&self, doc: &Document) -> io::Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
 
         let meta_data = (doc.id, &doc.metadata);
         let meta_bytes = serde_json::to_vec(&meta_data)?;
@@ -122,7 +125,7 @@ impl AppendLog {
         let meta_len = u32::from_le_bytes(len_buf);
         let mut meta_buf = vec![0u8; meta_len as usize];
         file.read_exact(&mut meta_buf)?;
-        
+
         file.read_exact(&mut len_buf)?;
         let vector_len = u32::from_le_bytes(len_buf);
         let mut vector_buf = vec![0u8; vector_len as usize];

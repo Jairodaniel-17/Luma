@@ -1,6 +1,6 @@
 # 🧠 rust-kiss-vdb
 
-**Low-memory Exact Vector Database with Intelligent Grouped Search for RAG**
+**Low-memory Exact & Approximate Vector Database with Intelligent Grouped Search for RAG**
 
 > *Because RAG without collapsing is just noise.*
 
@@ -8,172 +8,180 @@
 
 ## 🚀 What is `rust-kiss-vdb`?
 
-`rust-kiss-vdb` is a **minimalist, high-performance vector database** written in **Rust**, designed for:
+`rust-kiss-vdb` is a **minimalist, high-performance vector database** written in **Rust**. It provides both exact and approximate (ANN) search, with a core focus on **RAG-grade result grouping** to deliver clean, contextually relevant results.
 
-* **Exact vector search**
-* **Ultra-low RAM usage**
-* **Deterministic results**
-* **First-class support for RAG-grade grouping / collapsing**
+It's designed for scenarios where:
 
-It targets scenarios where:
-
-* FAISS is too primitive
-* Qdrant is too heavy
-* Milvus is overkill
-* Oracle DB is not designed for embeddings
-* **You actually care about result quality, not just speed**
+*   FAISS is too primitive
+*   Qdrant is too heavy
+*   Milvus is overkill
+*   You need deterministic, high-quality results for your RAG pipeline
+*   **You actually care about result quality, not just speed**
 
 ---
 
-## 🎯 Core Design Goals
+## 🔥 Core Features
 
-| Goal                    | Description                                     |
-| ----------------------- | ----------------------------------------------- |
-| 🧠 RAG-first            | Designed around how RAG *should* work           |
-| 🧮 Exact search         | No approximations, no HNSW surprises            |
-| 🪶 Low memory           | Works in **~1.5 MB RAM**                        |
-| 🧩 Intelligent grouping | Collapse noisy chunks into meaningful documents |
-| 🔒 Deterministic        | Same query → same results                       |
-| 🧰 Simple API           | No magic, no hidden heuristics                  |
-
----
-
-## 🔥 Killer Feature: Grouped / Collapsed Search (Priority #1)
-
-### Why this matters
-
-> **RAG without collapsing = garbage output**
-
-Most vector DBs return:
-
-* 10 chunks
-* From the same document
-* With almost identical embeddings
-
-That destroys:
-
-* Context diversity
-* Answer quality
-* Trust in the system
+*   **Vector Search**: High-performance exact and approximate (HNSW) vector search.
+*   **Intelligent Grouping**: First-class support for collapsing search results by a specific metadata field (e.g., `document_id`), ensuring contextually diverse and meaningful results for RAG.
+*   **Low Memory Footprint**: Optimized for low-resource environments, running comfortably with just a few MB of RAM.
+*   **HTTP API**: A simple, powerful API for easy integration into any stack.
+*   **Python Client**: An ergonomic Python client (`RAG-client-py`) for seamless interaction from your Python applications.
+*   **CLI**: A command-line interface for database administration and maintenance tasks.
+*   **Persistent & Embeddable**: Built on `redb` for persistent storage, with a straightforward on-disk format.
 
 ---
 
-### ✅ How `rust-kiss-vdb` solves this
+## 📦 Getting Started
 
-We introduce **first-class grouping** at query time.
+### Building from Source
 
-```json
-{
-  "query": "how to configure OAuth",
-  "top_k": 20,
-  "group_by": "document_id",
-  "group_limit": 1,
-  "filters": {
-    "language": "en",
-    "status": "published"
-  }
-}
+1.  **Install Rust**: If you don't have it, get it from [rust-lang.org](https://www.rust-lang.org/).
+2.  **Clone the Repository**:
+    ```bash
+    git clone https://github.com/your-username/rust-kiss-vdb.git
+    cd rust-kiss-vdb
+    ```
+3.  **Build the Project**:
+    ```bash
+    cargo build --release
+    ```
+    The binary will be located at `target/release/rust-kiss-vdb`.
+
+### Running the Server
+
+You can run the server directly:
+
+```bash
+./target/release/rust-kiss-vdb
+```
+
+By default, it will run on `127.0.0.1:8000` and store data in a temporary directory.
+
+### Configuration
+
+Configuration is managed via environment variables. Key options include:
+
+| Variable                  | Description                                 | Default                               |
+| ------------------------- | ------------------------------------------- | ------------------------------------- |
+| `RUST_LOG`                | Log level (e.g., `info`, `debug`)           | `info`                                |
+| `KISS_VDB_DATA_DIR`       | Path to store database files                | Temporary directory                   |
+| `KISS_VDB_BIND_ADDR`      | Bind address for the HTTP server            | `127.0.0.1`                           |
+| `KISS_VDB_PORT`           | Port for the HTTP server                    | `8000`                                |
+| `KISS_VDB_API_KEY`        | A secret key to protect your API endpoints  | `dev`                                 |
+| `KISS_VDB_INDEX_KIND`     | Search index type (`HNSW`, `IVF_FLAT_Q8`)   | `HNSW`                                |
+
+---
+
+## 🐍 Python Client (`RAG-client-py`)
+
+A dedicated Python client is available in the `RAG-client-py/` directory, allowing you to interact with the database effortlessly.
+
+### Installation
+
+The client uses `uv` for dependency management.
+
+```bash
+cd RAG-client-py
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+```
+
+### Example Usage
+
+```python
+from rustkissvdb.client import Client
+
+# Initialize the client
+client = Client(base_url="http://127.0.0.1:8000", api_key="dev")
+
+# Create a collection
+client.vector.create_collection(
+    collection="my-docs",
+    dim=768,
+    metric="Cosine"
+)
+
+# Upsert a vector
+client.vector.upsert(
+    collection="my-docs",
+    id="doc1-chunk1",
+    vector=[0.1, 0.2, ...], # Your 768-dim vector
+    meta={"document_id": "doc1"}
+)
+
+# Perform a grouped search
+search_results = client.vector.search(
+    collection="my-docs",
+    vector=[0.11, 0.19, ...], # Your query vector
+    k=5,
+    group_by="document_id",
+    group_limit=1
+)
+
+print(search_results)
+
+client.close()
 ```
 
 ---
 
-### 🧠 Grouping semantics
+## 📖 API Overview
 
-| Concept           | Behavior                                 |
-| ----------------- | ---------------------------------------- |
-| `group_by`        | `document_id` or `group_id`              |
-| Group score       | **max score of all chunks in the group** |
-| Returned metadata | Metadata of the **best chunk**           |
-| Content           | Full chunk content (not just metadata)   |
-| Result count      | Controlled by `top_k` *after grouping*   |
+The server exposes a simple RESTful API.
 
----
+### Vector Operations
 
-### 🧩 What you get
+*   `PUT /v1/collections/{name}`: Create a new vector collection.
+*   `GET /v1/collections`: List all collections.
+*   `GET /v1/collections/{name}`: Get information about a collection.
+*   `POST /v1/collections/{name}/vectors`: Upsert a batch of vectors.
+*   `PUT /v1/collections/{name}/vectors/{id}`: Upsert a single vector.
+*   `POST /v1/collections/{name}/search`: Perform a vector search.
+*   `DELETE /v1/collections/{name}/vectors/{id}`: Delete a vector.
 
-Instead of this ❌
+### State & Document Management
 
-| Rank | Chunk    | Document |
-| ---- | -------- | -------- |
-| 1    | chunk_42 | doc_A    |
-| 2    | chunk_43 | doc_A    |
-| 3    | chunk_44 | doc_A    |
+The API also includes endpoints for managing raw documents and key-value state, providing a flexible platform for building complex RAG systems.
 
-You get this ✅
-
-| Rank | Document | Best Chunk |
-| ---- | -------- | ---------- |
-| 1    | doc_A    | chunk_42   |
-| 2    | doc_B    | chunk_7    |
-| 3    | doc_C    | chunk_19   |
-
-**That is RAG-ready output.**
+*   **Documents**: `POST /v1/docs/{collection}`, `GET /v1/docs/{collection}/{id}`
+*   **Key-Value State**: `POST /v1/state`, `GET /v1/state/{key}`
 
 ---
 
-## 📦 Data Model
+## 🧬 Philosophy
 
-### Stored chunk
+> **This is not a “database for everything”.**
+> This is a **precision instrument** for high-quality RAG.
 
-```rust
-struct StoredChunk {
-    embedding: Vec<f32>,
-    content: String,
-    metadata: {
-        document_id: String,
-        group_id: Option<String>,
-        file_name: String,
-        processed_at: DateTime,
-        tags: HashMap<String, String>
-    }
-}
-```
+If you want:
 
----
+*   Speed at any cost → Use a pure ANN library
+*   Big, distributed clusters → Use Milvus
+*   Enterprise lock-in → Use a proprietary vendor
 
-## 🔍 Search Capabilities
+If you want:
 
-### Supported features
+*   **Clean, grouped RAG results**
+*   **Explainable and deterministic output**
+*   **Low resource usage and simple deployment**
+*   **Real control over your search logic**
 
-* ✅ Exact cosine similarity
-* ✅ Optional metadata filters
-* ✅ Optional grouping / collapsing
-* ✅ Top-K control
-* ✅ Content + metadata retrieval
-* ✅ Streaming index (AppendLog)
-* ❌ No ANN (by design)
+👉 `rust-kiss-vdb` is for you.
 
 ---
 
-## 🧪 Example Search Response
+## 🛣️ Roadmap
 
-```json
-{
-  "results": [
-    {
-      "score": 0.9123,
-      "document_id": "auth_guide_v2",
-      "content": "OAuth tokens must be refreshed using...",
-      "metadata": {
-        "file_name": "auth.md",
-        "processed_at": "2026-01-25T14:33:00Z"
-      }
-    }
-  ]
-}
-```
-
----
-
-## 🧠 Why Exact Search?
-
-Because:
-
-* You can’t debug ANN
-* You can’t explain ANN
-* You can’t trust ANN for small / medium corpora
-
-If your dataset fits in memory → **exact search wins**.
+*   [x] Exact & HNSW vector search
+*   [x] Metadata filters
+*   [x] Grouped / collapsed search
+*   [x] Streaming append storage
+*   [x] Python Client
+*   [ ] On-disk ANN index (experimental `DiskAnn` support)
+*   [ ] Hybrid lexical + vector scoring
+*   [ ] gRPC interface
 
 ---
 
@@ -181,15 +189,13 @@ If your dataset fits in memory → **exact search wins**.
 
 ### 🟦 Qdrant
 
-| Aspect                 | Qdrant             | rust-kiss-vdb            |
-| ---------------------- | ------------------ | ------------------------ |
-| Grouping               | ⚠️ Basic / shallow | ✅ Native & deterministic |
-| Memory                 | ❌ Heavy            | ✅ ~1.5 MB                |
-| ANN bias               | Yes                | No                       |
-| RAG quality            | ⚠️ Medium          | ✅ High                   |
-| Operational complexity | High               | Low                      |
-
----
+| Aspect                 | Qdrant             | rust-kiss-vdb                      |
+| ---------------------- | ------------------ | ---------------------------------- |
+| Grouping               | Basic / shallow    | ✅ Native, deterministic & RAG-focused |
+| Memory                 | Heavy              | ✅ Extremely Low (~1.5 MB idle)      |
+| Search                 | ANN-first          | Both Exact & ANN (HNSW)            |
+| RAG Quality            | Medium             | ✅ High                            |
+| Operational Complexity | High               | Low (single binary)                |
 
 ### 🟩 Milvus
 
@@ -197,62 +203,6 @@ If your dataset fits in memory → **exact search wins**.
 | ------------ | ---------- | ----------------- |
 | Deployment   | Kubernetes | Single binary     |
 | Memory       | Very high  | Extremely low     |
-| Exact search | Limited    | First-class       |
-| RAG focus    | No         | Yes               |
-| Use case     | Big data   | Precision systems |
-
----
-
-### 🟥 Oracle DB (Vector Search)
-
-| Aspect       | Oracle         | rust-kiss-vdb |
-| ------------ | -------------- | ------------- |
-| License      | 💰 Paid        | 🆓 Open       |
-| Purpose      | General DB     | Vector-native |
-| Grouping     | SQL workaround | Native        |
-| Cost         | Very high      | Zero          |
-| Dev velocity | Slow           | Fast          |
-
----
-
-## 🧬 Philosophy
-
-> **This is not a “database for everything”.**
-> This is a **precision instrument**.
-
-If you want:
-
-* Speed at any cost → ANN
-* Big clusters → Milvus
-* Enterprise lock-in → Oracle
-
-If you want:
-
-* Clean RAG
-* Explainable results
-* Low resources
-* Real control
-
-👉 `rust-kiss-vdb`
-
----
-
-## 🛣️ Roadmap
-
-* [x] Exact vector search
-* [x] Metadata filters
-* [x] Grouped / collapsed search
-* [x] Streaming append storage
-* [ ] Hybrid lexical + vector scoring
-* [ ] Pluggable embedding backends
-* [ ] On-disk mmap index
-* [ ] gRPC interface
-
----
-
-## 🧠 Final Thought
-
-> **Vector search is easy.
-> Good RAG is not.**
-
-`rust-kiss-vdb` is built for the second one.
+| Search       | ANN-focused| Both Exact & ANN  |
+| RAG Focus    | No         | Yes               |
+| Use Case     | Big Data   | Precision RAG     |

@@ -3,11 +3,11 @@ use crate::search::storage::AppendLog;
 use crate::search::types::{
     Document, DocumentResponse, LanguageFilter, SearchRequest, SearchResponse, SearchResult,
 };
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 use std::path::PathBuf;
-use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
 
 pub struct SearchEngine {
     storage: AppendLog,
@@ -117,20 +117,19 @@ impl SearchEngine {
 
         if group_field.is_some() {
             let mut grouped = GroupedResults::new(req.group_limit);
-            
+
             for (offset, key) in final_candidates {
                 let vec = self.storage.read_vector(offset)?;
                 if vec.len() != query_vector.len() {
                     continue;
                 }
                 let score = cosine_similarity(&query_vector, &vec);
-                
+
                 // If key is None (field missing), treat as unique group
                 let k = key.unwrap_or(GroupKey::Unique(offset));
                 grouped.push(k, score, offset);
             }
             results_vec = grouped.into_sorted_vec();
-
         } else {
             // Min-heap of top-k results (stores Reverse(ScoredDoc) so smallest score is popped)
             let mut heap = BinaryHeap::with_capacity(req.top_k + 1);
@@ -178,7 +177,7 @@ impl SearchEngine {
         // "no saturen el top-k".
         // Usually top-k implies K items.
         // I will assume `top_k` is the number of results to return.
-        
+
         let final_results_iter = results_vec.into_iter().take(req.top_k);
 
         let mut results = Vec::new();

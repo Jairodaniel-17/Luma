@@ -1,10 +1,10 @@
+use crate::api::AppState;
+use crate::search::types::{IngestRequest, SearchRequest};
 use axum::{
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Json},
 };
-use crate::api::AppState;
-use crate::search::types::{SearchRequest, IngestRequest};
 
 pub async fn search(
     State(state): State<AppState>,
