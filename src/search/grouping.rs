@@ -1,6 +1,6 @@
-use std::collections::{BinaryHeap, HashMap};
+use crate::search::types::DocumentMetadata;
 use std::cmp::{Ordering, Reverse};
-use crate::search::types::{DocumentMetadata};
+use std::collections::{BinaryHeap, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GroupKey {
@@ -63,7 +63,7 @@ impl GroupedResults {
 
     pub fn push(&mut self, key: GroupKey, score: f32, offset: u64) {
         let entry = self.groups.entry(key).or_insert_with(BinaryHeap::new);
-        
+
         entry.push(Reverse(ScoredOffset { score, offset }));
         if entry.len() > self.limit {
             entry.pop();
@@ -77,16 +77,18 @@ impl GroupedResults {
         for (_, heap) in self.groups {
             // heap contains top `limit` items.
             let items: Vec<_> = heap.into_iter().map(|Reverse(x)| x).collect();
-            
-            if items.is_empty() { continue; }
-            
+
+            if items.is_empty() {
+                continue;
+            }
+
             // Get max score of the group (first item in sorted list)
             // Sort items desc
             let mut sorted_items = items;
             sorted_items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-            
+
             let max_score = sorted_items[0].score;
-            
+
             group_leaders.push((max_score, sorted_items));
         }
 
@@ -100,7 +102,7 @@ impl GroupedResults {
                 final_results.push((item.score, item.offset));
             }
         }
-        
+
         final_results
     }
 }

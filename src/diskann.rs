@@ -89,8 +89,14 @@ pub fn run_status(config: &Config, collection: String) -> anyhow::Result<()> {
 fn params_from_cli(opts: &DiskAnnCli, config: &Config) -> DiskAnnBuildParams {
     DiskAnnBuildParams {
         max_degree: opts.max_degree.unwrap_or(config.diskann_max_degree).max(4),
-        build_threads: opts.build_threads.unwrap_or(config.diskann_build_threads).max(1),
-        search_list_size: opts.search_list_size.unwrap_or(config.diskann_search_list_size).max(8),
+        build_threads: opts
+            .build_threads
+            .unwrap_or(config.diskann_build_threads)
+            .max(1),
+        search_list_size: opts
+            .search_list_size
+            .unwrap_or(config.diskann_search_list_size)
+            .max(8),
     }
     .sanitized()
 }

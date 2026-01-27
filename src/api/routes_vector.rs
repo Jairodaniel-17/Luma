@@ -2,7 +2,7 @@ use crate::api::errors::{ApiError, ErrorBody};
 use crate::api::AppState;
 use crate::engine::EngineError;
 use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};
-use crate::vector::{Metric, SearchRequest, VectorCollectionInfo, VectorError, VectorItem};
+use crate::vector::{Metric, SearchRequest, VectorCollectionInfo, VectorError, VectorItem, SearchHit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -641,7 +641,7 @@ pub async fn get(
 
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
-    pub hits: Vec<crate::vector::SearchHit>,
+    pub hits: Vec<SearchHit>,
 }
 
 pub async fn search(

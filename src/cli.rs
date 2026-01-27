@@ -29,7 +29,9 @@ fn parse_vacuum(args: &[String]) -> anyhow::Result<Command> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "--collection" {
-            let value = iter.next().ok_or_else(|| anyhow::anyhow!("--collection requerido"))?;
+            let value = iter
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--collection requerido"))?;
             return Ok(Command::Vacuum {
                 collection: value.to_string(),
             });
@@ -39,7 +41,8 @@ fn parse_vacuum(args: &[String]) -> anyhow::Result<Command> {
 }
 
 pub fn run_vacuum(config: &Config, collection: String) -> anyhow::Result<()> {
-    let dir = config.data_dir
+    let dir = config
+        .data_dir
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("DATA_DIR requerido para vacuum"))?;
 

@@ -1,12 +1,12 @@
-mod auth;
-mod errors;
-mod routes_doc;
-mod routes_docs;
-mod routes_events;
-mod routes_sql;
-mod routes_state;
-mod routes_vector;
-mod routes_search;
+pub mod auth;
+pub mod errors;
+pub mod routes_doc;
+pub mod routes_docs;
+pub mod routes_events;
+pub mod routes_search;
+pub mod routes_sql;
+pub mod routes_state;
+pub mod routes_vector;
 
 use crate::config::Config;
 use crate::engine::Engine;
