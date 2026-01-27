@@ -6,6 +6,7 @@ pub mod routes_events;
 pub mod routes_search;
 pub mod routes_sql;
 pub mod routes_state;
+pub mod routes_ui;
 pub mod routes_vector;
 
 use crate::config::Config;
@@ -60,6 +61,8 @@ pub fn router(
         }
     };
     Router::<AppState>::new()
+        .route("/", get(routes_ui::handler))
+        .route("/index.html", get(routes_ui::handler))
         .merge(routes_docs::routes_docs())
         .route("/v1/health", get(routes_state::health))
         .route("/v1/metrics", get(routes_state::metrics))

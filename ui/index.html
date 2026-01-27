@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustKissVDB Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: {
+                            900: '#111827',
+                            800: '#1f2937',
+                            700: '#374151',
+                            600: '#4b5563',
+                        },
+                        accent: '#8b5cf6', // Violet
+                    },
+                    fontFamily: {
+                        mono: ['Consolas', 'Monaco', 'Courier New', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        [x-cloak] { display: none !important; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+        body { background-color: #0f1115; color: #e5e7eb; }
+        .tab-active { border-bottom-color: #8b5cf6; color: white; }
+        .tab-inactive { border-bottom-color: transparent; color: #9ca3af; }
+        .tab-inactive:hover { color: #d1d5db; border-bottom-color: #374151; }
+    </style>
+</head>
+<body class="antialiased min-h-screen flex flex-col font-sans" x-data="app()">
+
+    <!-- Header -->
+    <header class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center font-bold text-white shadow-lg shadow-purple-500/20">
+                    RK
+                </div>
+                <h1 class="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
+                    RustKissVDB
+                </h1>
+                <span class="px-2 py-0.5 rounded-full bg-gray-800 border border-gray-700 text-xs text-gray-400 font-mono">v0.2.0</span>
+            </div>
+            <div class="flex items-center gap-4">
+                 <div class="flex items-center gap-2 text-sm text-gray-400 font-mono bg-gray-800/50 px-3 py-1.5 rounded border border-gray-700/50">
+                    <div class="w-2 h-2 rounded-full" :class="status === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></div>
+                    <span x-text="status === 'online' ? 'ONLINE' : 'OFFLINE'"></span>
+                    <span x-show="latency" x-text="`(${latency}ms)`" class="text-xs text-gray-500 ml-1"></span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        
+        <!-- Tabs -->
+        <div class="border-b border-gray-800">
+            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                <button @click="currentTab = 'vectors'" :class="currentTab === 'vectors' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                    Vectors
+                </button>
+                <button @click="currentTab = 'state'" :class="currentTab === 'state' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
+                    Key-Value Store
+                </button>
+                <button @click="currentTab = 'sql'" :class="currentTab === 'sql' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
+                    SQL (SQLite)
+                </button>
+                <button @click="currentTab = 'realtime'" :class="currentTab === 'realtime' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    Realtime Events
+                </button>
+            </nav>
+        </div>
+
+        <!-- TAB: VECTORS -->
+        <div x-show="currentTab === 'vectors'" x-transition.opacity>
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-white">Collections</h2>
+                <button @click="fetchVectors()" class="text-xs text-accent hover:text-white transition-colors">Refresh</button>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <template x-for="col in collections" :key="col.name">
+                    <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-gray-700 transition-all cursor-pointer group flex flex-col justify-between h-full" @click="inspectCollection(col.name)">
+                        <div>
+                            <div class="flex justify-between items-start mb-2">
+                                <h3 class="text-white font-medium truncate" x-text="col.name"></h3>
+                                <span class="bg-gray-800 text-gray-400 text-[10px] px-1.5 py-0.5 rounded border border-gray-700 font-mono" x-text="col.metric"></span>
+                            </div>
+                            <div class="flex items-end justify-between mb-4">
+                                <div>
+                                    <div class="text-2xl font-bold text-white" x-text="col.live_count || 0"></div>
+                                    <div class="text-xs text-gray-500">Vectors</div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-sm font-mono text-gray-400" x-text="`${col.dim}d`"></div>
+                                    <div class="text-xs text-gray-500">Dimension</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="border-t border-gray-800 pt-3 flex flex-col gap-1">
+                            <div class="flex justify-between text-[10px] text-gray-500">
+                                <span>Created</span>
+                                <span x-text="col.created_at_ms ? formatDate(col.created_at_ms) : '-'"></span>
+                            </div>
+                             <div class="flex justify-between text-[10px] text-gray-500">
+                                <span>Updated</span>
+                                <span x-text="col.updated_at_ms ? formatDate(col.updated_at_ms) : '-'"></span>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+                
+                <!-- Empty State -->
+                <div x-show="collections.length === 0" class="col-span-full py-12 text-center text-gray-500 border border-dashed border-gray-800 rounded-lg">
+                    No collections found. Create one via API or SDK.
+                </div>
+            </div>
+
+            <!-- Inspector Modal -->
+            <div x-show="selectedCollection" x-cloak class="fixed inset-0 z-50 overflow-y-auto">
+                <div class="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
+                    <div class="fixed inset-0 transition-opacity bg-gray-900 bg-opacity-75" @click="selectedCollection = null"></div>
+                    <div class="inline-block w-full max-w-5xl p-6 my-8 overflow-hidden text-left align-middle transition-all transform bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-medium text-white">Collection: <span class="text-accent font-mono" x-text="selectedCollection"></span></h3>
+                            <button @click="selectedCollection = null" class="text-gray-400 hover:text-white">✕</button>
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                            <!-- Tools -->
+                            <div class="bg-gray-800/50 p-4 rounded border border-gray-700">
+                                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Search / Peek</h4>
+                                <div class="flex gap-2">
+                                     <input type="text" x-model="searchId" placeholder="Lookup by ID..." class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-accent font-mono">
+                                     <button @click="lookupId()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm transition-colors">Get</button>
+                                </div>
+                                <div class="mt-2">
+                                     <button @click="runInspectorSearch()" class="w-full bg-accent/20 hover:bg-accent/30 text-accent border border-accent/50 px-4 py-2 rounded text-sm font-medium transition-colors">
+                                        🎲 Peek Random Vectors
+                                    </button>
+                                </div>
+                            </div>
+                            <!-- Metadata Info -->
+                             <div class="bg-gray-800/50 p-4 rounded border border-gray-700 text-xs text-gray-400 space-y-1">
+                                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Details</h4>
+                                <div class="flex justify-between"><span>Created:</span> <span class="text-white" x-text="collections.find(c=>c.name===selectedCollection)?.created_at_ms ? formatDate(collections.find(c=>c.name===selectedCollection).created_at_ms) : '-'"></span></div>
+                                <div class="flex justify-between"><span>Updated:</span> <span class="text-white" x-text="collections.find(c=>c.name===selectedCollection)?.updated_at_ms ? formatDate(collections.find(c=>c.name===selectedCollection).updated_at_ms) : '-'"></span></div>
+                            </div>
+                        </div>
+
+                        <div class="bg-gray-800 rounded border border-gray-700 overflow-hidden max-h-[500px] overflow-y-auto">
+                            <table class="w-full text-left text-sm">
+                                <thead class="bg-gray-800 text-gray-400 uppercase font-mono text-xs sticky top-0">
+                                    <tr>
+                                        <th class="px-4 py-2">ID</th>
+                                        <th class="px-4 py-2">Score</th>
+                                        <th class="px-4 py-2">Payload/Meta</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-700">
+                                    <template x-for="hit in inspectionHits" :key="hit.id">
+                                        <tr class="hover:bg-gray-700/50">
+                                            <td class="px-4 py-2 font-mono text-accent" x-text="hit.id"></td>
+                                            <td class="px-4 py-2 font-mono text-gray-400" x-text="hit.score ? hit.score.toFixed(4) : '-'"></td>
+                                            <td class="px-4 py-2">
+                                                <pre class="text-[10px] text-green-400 overflow-x-auto whitespace-pre-wrap max-w-lg" x-text="JSON.stringify(hit.meta, null, 2)"></pre>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                    <tr x-show="inspectionHits.length === 0">
+                                        <td colspan="3" class="px-4 py-8 text-center text-gray-500">No results to show.</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <div class="mt-4 flex justify-end">
+                             <button @click="deleteCollection(selectedCollection)" type="button" class="text-red-400 hover:text-red-300 text-sm underline">
+                                Delete Collection
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: STATE -->
+        <div x-show="currentTab === 'state'" x-transition.opacity>
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-white">Key-Value Store</h2>
+                <button @click="fetchState()" class="text-xs text-accent hover:text-white transition-colors">Refresh</button>
+            </div>
+             <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-gray-800/50 text-gray-400 uppercase font-mono text-xs">
+                        <tr>
+                            <th class="px-6 py-3 font-medium">Key</th>
+                            <th class="px-6 py-3 font-medium">Revision</th>
+                            <th class="px-6 py-3 font-medium">Value</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-800">
+                        <template x-for="item in stateItems" :key="item.key">
+                            <tr class="hover:bg-gray-800/30">
+                                <td class="px-6 py-4 font-mono text-accent" x-text="item.key"></td>
+                                <td class="px-6 py-4 font-mono text-gray-500" x-text="item.revision"></td>
+                                <td class="px-6 py-4">
+                                    <div class="max-w-3xl truncate font-mono text-xs text-gray-300 overflow-hidden" x-text="JSON.stringify(item.value)"></div>
+                                </td>
+                            </tr>
+                        </template>
+                        <tr x-show="stateItems.length === 0">
+                            <td colspan="3" class="px-6 py-12 text-center text-gray-500">No keys found.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TAB: SQL -->
+        <div x-show="currentTab === 'sql'" x-transition.opacity>
+             <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-white">SQL Console (SQLite)</h2>
+                 <span class="text-xs text-yellow-500" x-show="!sqlEnabled">⚠ SQLite module might be disabled</span>
+            </div>
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <textarea x-model="sqlQuery" class="w-full bg-gray-950 text-gray-200 font-mono text-sm p-3 rounded border border-gray-700 focus:border-accent focus:outline-none mb-3" rows="4" placeholder="SELECT * FROM ..."></textarea>
+                <div class="flex justify-end gap-2">
+                     <button @click="sqlQuery = 'SELECT name FROM sqlite_master WHERE type=\'table\';'" class="text-xs text-gray-400 hover:text-white px-3 py-2">List Tables</button>
+                    <button @click="runSql()" class="bg-accent hover:bg-accent/80 text-white px-4 py-2 rounded text-sm font-medium transition-colors flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Execute
+                    </button>
+                </div>
+            </div>
+
+            <div x-show="sqlResult" class="mt-6">
+                <div class="text-xs text-gray-500 mb-2 uppercase font-semibold">Result</div>
+                <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-x-auto">
+                    <!-- If result is array of objects -->
+                    <template x-if="Array.isArray(sqlResult) && sqlResult.length > 0">
+                        <table class="w-full text-left text-sm whitespace-nowrap">
+                            <thead class="bg-gray-800 text-gray-400 font-mono text-xs">
+                                <tr>
+                                    <template x-for="key in Object.keys(sqlResult[0])" :key="key">
+                                        <th class="px-4 py-2" x-text="key"></th>
+                                    </template>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-800">
+                                <template x-for="(row, idx) in sqlResult" :key="idx">
+                                    <tr class="hover:bg-gray-800/30">
+                                        <template x-for="key in Object.keys(row)" :key="key">
+                                            <td class="px-4 py-2 font-mono text-gray-300" x-text="row[key]"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                    <!-- If empty array -->
+                    <div x-show="Array.isArray(sqlResult) && sqlResult.length === 0" class="p-4 text-gray-500 text-sm">Query returned no rows.</div>
+                    <!-- If error or other object -->
+                    <template x-if="!Array.isArray(sqlResult)">
+                         <pre class="p-4 text-xs text-red-400 font-mono whitespace-pre-wrap" x-text="typeof sqlResult === 'string' ? sqlResult : JSON.stringify(sqlResult, null, 2)"></pre>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: REALTIME -->
+        <div x-show="currentTab === 'realtime'" x-transition.opacity>
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-white">Live Events</h2>
+                <div class="flex items-center gap-2">
+                     <span class="w-2 h-2 rounded-full" :class="sseConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></span>
+                     <span class="text-xs text-gray-400" x-text="sseConnected ? 'Connected' : 'Disconnected'"></span>
+                </div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg p-4 h-[600px] overflow-y-auto font-mono text-xs shadow-inner" id="logs-container">
+                <template x-for="(log, idx) in realtimeLogs" :key="idx">
+                    <div class="mb-2 border-l-2 border-gray-800 pl-3 py-1 hover:border-accent transition-colors bg-gray-900/30 rounded-r">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-gray-500" x-text="log.time"></span>
+                            <span class="text-accent font-bold" x-text="log.type"></span>
+                            <span class="text-gray-600">ID: <span x-text="log.id"></span></span>
+                        </div>
+                        <pre class="text-gray-300 whitespace-pre-wrap overflow-x-auto" x-text="log.dataFormatted"></pre>
+                    </div>
+                </template>
+                <div x-show="realtimeLogs.length === 0" class="text-gray-600 italic">Waiting for events...</div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        function app() {
+            return {
+                currentTab: 'vectors',
+                status: 'offline',
+                latency: 0,
+                
+                // Vectors
+                collections: [],
+                selectedCollection: null,
+                searchId: '',
+                inspectionHits: [],
+                
+                // State
+                stateItems: [],
+                
+                // SQL
+                sqlQuery: 'SELECT name FROM sqlite_master WHERE type=\'table\';',
+                sqlResult: null,
+                sqlEnabled: true,
+                
+                // Realtime
+                realtimeLogs: [],
+                sseConnected: false,
+                sseSource: null,
+
+                init() {
+                    this.checkHealth();
+                    this.fetchVectors();
+                    this.fetchState();
+                    
+                    // Polling
+                    setInterval(() => this.checkHealth(), 5000);
+                    setInterval(() => {
+                        if(this.currentTab === 'vectors') this.fetchVectors();
+                        if(this.currentTab === 'state') this.fetchState();
+                    }, 10000);
+
+                    this.connectSSE();
+                },
+
+                async checkHealth() {
+                    const start = Date.now();
+                    try {
+                        const res = await fetch('/v1/health');
+                        if (res.ok) {
+                            this.status = 'online';
+                            this.latency = Date.now() - start;
+                        } else {
+                            this.status = 'error';
+                        }
+                    } catch (e) {
+                        this.status = 'offline';
+                    }
+                },
+
+                // --- VECTORS ---
+                async fetchVectors() {
+                    try {
+                        const res = await fetch('/v1/vector');
+                        const json = await res.json();
+                        this.collections = json.collections || [];
+                    } catch (e) {
+                        console.error("Vectors fetch error", e);
+                    }
+                },
+                
+                async inspectCollection(name) {
+                    this.selectedCollection = name;
+                    this.searchId = '';
+                    this.inspectionHits = [];
+                    this.runInspectorSearch(); // Auto-run random peek
+                },
+
+                async lookupId() {
+                    if (!this.selectedCollection || !this.searchId) return;
+                    try {
+                        const res = await fetch(`/v1/vector/${this.selectedCollection}/get?id=${this.searchId}`);
+                        if(!res.ok) {
+                             this.inspectionHits = []; // clear or show error
+                             alert("ID not found or error.");
+                             return;
+                        }
+                        const item = await res.json();
+                        this.inspectionHits = [{
+                            id: item.id,
+                            score: 1.0,
+                            meta: item.meta
+                        }];
+                    } catch(e) {
+                        console.error("Lookup error", e);
+                    }
+                },
+
+                async runInspectorSearch() {
+                    if (!this.selectedCollection) return;
+                    
+                    try {
+                        const col = this.collections.find(c => c.name === this.selectedCollection);
+                        if (!col) return;
+
+                        let body = {
+                            k: 10,
+                            include_meta: true,
+                            include_vector: false
+                        };
+                        
+                        // Create random vector
+                        const randomVec = Array(col.dim).fill(0).map(() => Math.random() - 0.5);
+                        body.vector = randomVec;
+
+                        const res = await fetch(`/v1/vector/${this.selectedCollection}/search`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(body)
+                        });
+                        
+                        const data = await res.json();
+                        this.inspectionHits = data.hits || [];
+                    } catch(e) {
+                        console.error("Search error", e);
+                    }
+                },
+
+                // --- STATE ---
+                async fetchState() {
+                    try {
+                        const res = await fetch('/v1/state?limit=100');
+                        this.stateItems = await res.json();
+                    } catch (e) {
+                        console.error("State fetch error", e);
+                    }
+                },
+
+                // --- SQL ---
+                async runSql() {
+                    this.sqlResult = null;
+                    try {
+                        const res = await fetch('/v1/sql/query', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ sql: this.sqlQuery })
+                        });
+                        
+                        const contentType = res.headers.get("content-type");
+                        if (contentType && contentType.includes("application/json")) {
+                             const data = await res.json();
+                             if (!res.ok) {
+                                 this.sqlResult = data;
+                             } else {
+                                 this.sqlResult = data.rows || [];
+                             }
+                        } else {
+                            // Handle plain text response (common for 500/400 errors in some middlewares)
+                            const text = await res.text();
+                            this.sqlResult = text;
+                        }
+                        
+                    } catch(e) {
+                        this.sqlResult = { error: e.message };
+                    }
+                },
+
+                // --- REALTIME ---
+                connectSSE() {
+                    if (this.sseSource) return;
+                    
+                    this.sseSource = new EventSource('/v1/stream');
+                    
+                    this.sseSource.onopen = () => {
+                        this.sseConnected = true;
+                        this.logEvent("SYSTEM", "Connected", {});
+                    };
+                    
+                    this.sseSource.onerror = () => {
+                        this.sseConnected = false;
+                        this.sseSource.close();
+                        this.sseSource = null;
+                        setTimeout(() => this.connectSSE(), 5000); // Reconnect
+                    };
+
+                    this.sseSource.addEventListener('message', (e) => {
+                         try {
+                             // The backend sends full JSON object in data
+                             const ev = JSON.parse(e.data);
+                             // ev has: offset, event_type, data (object)
+                             this.logEvent(ev.event_type, ev.offset, ev.data);
+                         } catch(err) {
+                             this.logEvent("RAW", "-", e.data);
+                         }
+                    });
+                },
+
+                logEvent(type, id, dataObj) {
+                    const time = new Date().toLocaleTimeString();
+                    const dataFormatted = JSON.stringify(dataObj, null, 2);
+                    
+                    this.realtimeLogs.unshift({ 
+                        time, 
+                        type, 
+                        id, 
+                        data: dataObj,
+                        dataFormatted 
+                    });
+                    if (this.realtimeLogs.length > 50) this.realtimeLogs.pop();
+                }
+            }
+        }
+        
+        function formatDate(ms) {
+            if (!ms) return '-';
+            return new Date(ms).toLocaleString('en-US', { 
+                month: 'short', day: 'numeric', year: 'numeric', 
+                hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true 
+            });
+        }
+    </script>
+</body>
+</html>

@@ -43,7 +43,17 @@ pub struct VectorCollectionDetailResponse {
 pub async fn list_collections(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let collections = state.engine.list_vector_collections();
+    let mut collections = state.engine.list_vector_collections();
+    for col in &mut collections {
+        if let Some(val) = state.engine.vector_manifest_value(&col.collection) {
+            if let Some(ts) = val.get("created_at_ms").and_then(|v| v.as_u64()) {
+                col.created_at_ms = Some(ts);
+            }
+            if let Some(ts) = val.get("updated_at_ms").and_then(|v| v.as_u64()) {
+                col.updated_at_ms = Some(ts);
+            }
+        }
+    }
     Ok(axum::Json(ListCollectionsResponse { collections }))
 }
 

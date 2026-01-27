@@ -34,6 +34,8 @@ sysinfo = "0.30"
 crc32fast = "1.4"
 time = { version = "0.3", features = ["formatting"] }
 lru = "0.12"
+rust-embed = "8.11.0"
+mime_guess = "2.0.5"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }

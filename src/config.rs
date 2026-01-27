@@ -305,16 +305,16 @@ fn resolve_port() -> u16 {
 fn resolve_data_dir() -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--data" || arg == "--data-dir" {
+        if arg == "--data" || arg == "--data-dir" || arg == "--DATA_DIR" {
             if let Some(path) = args.next() {
                 return Some(path);
             } else {
                 eprintln!("`--data` requiere un valor. Ignorando flag.");
-                return None;
+                // Fallback to default
             }
         }
     }
-    std::env::var("DATA_DIR").ok()
+    std::env::var("DATA_DIR").ok().or_else(|| Some("./data".to_string()))
 }
 
 

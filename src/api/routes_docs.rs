@@ -1,7 +1,7 @@
 use axum::{
     extract::Host,
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -79,8 +79,6 @@ pub async fn docs_html(Host(host): Host) -> impl IntoResponse {
 /// - Serves the raw openapi.yaml file for tooling or manual inspection.
 pub fn routes_docs() -> Router<AppState> {
     Router::<AppState>::new()
-        // Redirect the root to the documentation.
-        .route("/", get(|| async { Redirect::to("/docs") }))
         // The beautiful, dynamic Scalar UI
         .route("/docs", get(docs_html))
         // The original, static openapi.yaml file
