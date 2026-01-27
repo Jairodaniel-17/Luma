@@ -1,3 +1,4 @@
+use crate::search::grouping::{extract_key, GroupKey, GroupedResults};
 use crate::search::storage::AppendLog;
 use crate::search::types::{
     Document, DocumentResponse, LanguageFilter, SearchRequest, SearchResponse, SearchResult,
@@ -31,9 +32,9 @@ impl SearchEngine {
         let query_vector = self.embed(&req.query, 384);
 
         // 2. Filter & Version Resolution
-        // Map group_id -> (offset, processed_at)
+        // Map group_id -> (offset, processed_at, grouping_key)
         let mut candidates = HashMap::new();
-        let mut ungroupped_offsets = Vec::new();
+        let mut ungroupped_candidates = Vec::new(); // (offset, grouping_key)
 
         // Default to "all" if not specified.
         let version_policy = req
@@ -43,6 +44,7 @@ impl SearchEngine {
             .unwrap_or("all");
 
         let is_latest = version_policy == "latest";
+        let group_field = req.group_by.as_deref();
 
         let mut iter = self.storage.scan_metadata()?;
         while let Some(res) = iter.next() {
@@ -80,68 +82,110 @@ impl SearchEngine {
                 }
             }
 
+            let group_key = group_field.and_then(|f| extract_key(&meta, f));
+
             if is_latest {
                 if let Some(gid) = meta.group_id {
                     let pat = meta.processed_at.unwrap_or(0);
                     candidates
                         .entry(gid)
-                        .and_modify(|(off, old_pat)| {
+                        .and_modify(|(off, old_pat, old_key)| {
                             if pat > *old_pat {
                                 *off = offset;
                                 *old_pat = pat;
+                                *old_key = group_key.clone();
                             }
                         })
-                        .or_insert((offset, pat));
+                        .or_insert((offset, pat, group_key));
                 } else {
-                    ungroupped_offsets.push(offset);
+                    ungroupped_candidates.push((offset, group_key));
                 }
             } else {
-                ungroupped_offsets.push(offset);
+                ungroupped_candidates.push((offset, group_key));
             }
         }
 
-        let mut final_offsets = ungroupped_offsets;
+        let mut final_candidates = ungroupped_candidates;
         if is_latest {
-            for (_, (off, _)) in candidates {
-                final_offsets.push(off);
+            for (_, (off, _, key)) in candidates {
+                final_candidates.push((off, key));
             }
         }
 
         // 3. Score
-        // Min-heap of top-k results (stores Reverse(ScoredDoc) so smallest score is popped)
-        let mut heap = BinaryHeap::with_capacity(req.top_k + 1);
+        let mut results_vec: Vec<(f32, u64)> = Vec::new();
 
-        for offset in final_offsets {
-            let vec = self.storage.read_vector(offset)?;
-            if vec.len() != query_vector.len() {
-                continue;
+        if group_field.is_some() {
+            let mut grouped = GroupedResults::new(req.group_limit);
+            
+            for (offset, key) in final_candidates {
+                let vec = self.storage.read_vector(offset)?;
+                if vec.len() != query_vector.len() {
+                    continue;
+                }
+                let score = cosine_similarity(&query_vector, &vec);
+                
+                // If key is None (field missing), treat as unique group
+                let k = key.unwrap_or(GroupKey::Unique(offset));
+                grouped.push(k, score, offset);
             }
+            results_vec = grouped.into_sorted_vec();
 
-            let score = cosine_similarity(&query_vector, &vec);
+        } else {
+            // Min-heap of top-k results (stores Reverse(ScoredDoc) so smallest score is popped)
+            let mut heap = BinaryHeap::with_capacity(req.top_k + 1);
 
-            heap.push(Reverse(ScoredDoc { score, offset }));
-            if heap.len() > req.top_k {
-                heap.pop();
+            for (offset, _) in final_candidates {
+                let vec = self.storage.read_vector(offset)?;
+                if vec.len() != query_vector.len() {
+                    continue;
+                }
+                let score = cosine_similarity(&query_vector, &vec);
+
+                heap.push(Reverse(ScoredDoc { score, offset }));
+                if heap.len() > req.top_k {
+                    heap.pop();
+                }
+            }
+            let sorted_docs = heap.into_sorted_vec();
+            for Reverse(doc) in sorted_docs {
+                results_vec.push((doc.score, doc.offset));
             }
         }
 
         // 4. Retrieve
-        let mut results = Vec::new();
-        // Heap has smallest score at top (due to Reverse). Pop gives smallest.
-        // We want desc order.
-        let sorted_docs = heap.into_sorted_vec();
-        // into_sorted_vec returns ascending order of T.
-        // T is Reverse(ScoredDoc).
-        // ScoredDoc cmp is score.
-        // Reverse(0.1) > Reverse(0.9).
-        // Ascending Reverse: Reverse(0.9), Reverse(0.1).
-        // We iterate this. Unwrap. 0.9, 0.1.
-        // Correct.
+        // Truncate to top_k if needed (GroupedResults already sorted by group score, but we might have more than top_k items if group_limit > 1)
+        // Wait, the requirement says "múltiples chunks del mismo documento no saturen el top-k, retornando un solo resultado por grupo".
+        // This means we want `top_k` GROUPS.
+        // But `GroupedResults::into_sorted_vec` returns a flat list.
+        // Does it return `top_k` groups?
+        // `GroupedResults` stores ALL groups that were pushed. It doesn't know about `top_k`.
+        // So `results_vec` contains ALL groups (limited by `group_limit` per group).
+        // So we need to take `top_k` from `results_vec`.
+        // However, if `group_limit` > 1, taking `top_k` items might slice a group?
+        // "group_limit: 1". "top_k: 10". Result: 10 groups, 1 item each.
+        // "group_limit: 2". "top_k: 10". Result: 10 groups, 2 items each? Or 10 items total?
+        // Usually top_k refers to the number of *results* returned.
+        // The spec says:
+        // "Test 2 ... 3 docs, 3 chunks each ... top_k=10 ... resultado: 3 hits"
+        // This implies top_k is a limit on the response list size.
+        // If I have 100 groups, and top_k=10, I return 10 groups.
+        // If I have 5 groups, and top_k=10, I return 5 groups.
+        // If group_limit=2, and 5 groups, I return 10 items.
+        // So I should truncate `results_vec` to `req.top_k`?
+        // Or should I truncate to `req.top_k` *groups*?
+        // "diversidad del top-k aumenta".
+        // "no saturen el top-k".
+        // Usually top-k implies K items.
+        // I will assume `top_k` is the number of results to return.
+        
+        let final_results_iter = results_vec.into_iter().take(req.top_k);
 
-        for Reverse(doc) in sorted_docs {
-            let full_doc = self.storage.read_document(doc.offset)?;
+        let mut results = Vec::new();
+        for (score, offset) in final_results_iter {
+            let full_doc = self.storage.read_document(offset)?;
             results.push(SearchResult {
-                score: doc.score,
+                score,
                 document: DocumentResponse {
                     id: full_doc.id,
                     content: full_doc.content,
