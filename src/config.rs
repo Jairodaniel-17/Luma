@@ -217,13 +217,7 @@ impl Config {
             .unwrap_or(1_073_741_824);
 
         let cors_allowed_origins = std::env::var("CORS_ALLOWED_ORIGINS").ok();
-        let sqlite_enabled = matches!(
-            std::env::var("SQLITE_ENABLED")
-                .ok()
-                .as_deref()
-                .map(|s| s.to_ascii_lowercase()),
-            Some(ref v) if v == "1" || v == "true" || v == "on"
-        );
+        let sqlite_enabled = resolve_sqlite_enabled();
         let sqlite_path = std::env::var("SQLITE_DB_PATH").ok();
 
         Ok(Self {
@@ -356,6 +350,25 @@ fn resolve_bind_addr() -> IpAddr {
     }
 
     IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+}
+
+fn resolve_sqlite_enabled() -> bool {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--no-sqlite" {
+            return false;
+        }
+        if arg == "--sqlite" || arg == "--sqlite-enabled" {
+            return true;
+        }
+    }
+    match std::env::var("SQLITE_ENABLED").ok().as_deref() {
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "off" | "no" => false,
+            _ => true,
+        },
+        None => true,
+    }
 }
 
 fn parse_env_bool(key: &str, default: bool) -> bool {

@@ -5,6 +5,8 @@ pub mod routes_docs;
 pub mod routes_events;
 pub mod routes_search;
 pub mod routes_sql;
+pub mod auth_store;
+pub mod routes_auth;
 pub mod routes_state;
 pub mod routes_ui;
 pub mod routes_vector;
@@ -13,6 +15,7 @@ use crate::config::Config;
 use crate::engine::Engine;
 use crate::search::engine::SearchEngine;
 use crate::sqlite::SqliteService;
+use auth_store::AuthStore;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
@@ -28,6 +31,7 @@ pub struct AppState {
     pub config: Config,
     pub sqlite: Option<SqliteService>,
     pub search_engine: Arc<SearchEngine>,
+    pub auth_store: Option<Arc<AuthStore>>,
 }
 
 pub fn router(
@@ -35,12 +39,14 @@ pub fn router(
     config: Config,
     sqlite: Option<SqliteService>,
     search_engine: Arc<SearchEngine>,
+    auth_store: Option<Arc<AuthStore>>,
 ) -> Router {
     let state = AppState {
         engine,
         config,
         sqlite,
         search_engine,
+        auth_store,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -66,6 +72,8 @@ pub fn router(
         .merge(routes_docs::routes_docs())
         .route("/v1/health", get(routes_state::health))
         .route("/v1/metrics", get(routes_state::metrics))
+        .route("/v1/auth/keys", get(routes_auth::list_keys).post(routes_auth::create_key))
+        .route("/v1/auth/keys/:id", delete(routes_auth::revoke_key))
         .route("/v1/state", get(routes_state::list))
         .route("/v1/state/batch_put", post(routes_state::batch_put))
         .route("/v1/state/:key", get(routes_state::get))
