@@ -15,6 +15,8 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
 
@@ -39,6 +41,7 @@ struct Inner {
     metrics: Arc<metrics::Metrics>,
     persist: Option<persist::Persist>,
     commit_lock: Mutex<()>,
+    shutdown: CancellationToken,
 }
 
 const VECTOR_MANIFEST_PREFIX: &str = "vector:";
@@ -46,7 +49,7 @@ const VECTOR_MANIFEST_SUFFIX: &str = ":manifest";
 const VECTOR_MANIFEST_SCAN_LIMIT: usize = 4096;
 
 impl Engine {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
+    pub fn new(config: Config, shutdown: CancellationToken) -> anyhow::Result<Self> {
         let events =
             events::EventBus::new(config.event_buffer_size, config.live_broadcast_capacity);
         let metrics = Arc::new(metrics::Metrics::default());
@@ -84,6 +87,7 @@ impl Engine {
             metrics,
             persist,
             commit_lock: Mutex::new(()),
+            shutdown,
         }));
 
         if engine.0.persist.is_some() {
@@ -98,7 +102,9 @@ impl Engine {
         Ok(engine)
     }
 
-    pub fn shutdown(&self) {}
+    pub fn shutdown(&self) {
+        self.0.shutdown.cancel();
+    }
 
     pub fn metrics_text(&self) -> String {
         self.0.metrics.render()
@@ -177,19 +183,27 @@ impl Engine {
         }
         let interval_secs = self.0.config.snapshot_interval_secs;
         let weak = Arc::downgrade(&self.0);
+        let shutdown = self.0.shutdown.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
-                interval.tick().await;
-                let Some(inner) = weak.upgrade() else { break };
-                let engine = Engine(inner);
-                let res = tokio::task::spawn_blocking(move || engine.snapshot_once()).await;
-                match res {
-                    Ok(Ok(())) => tracing::info!("snapshot ok"),
-                    Ok(Err(err)) => tracing::warn!(error = %err, "snapshot failed"),
-                    Err(err) => tracing::warn!(error = %err, "snapshot task join failed"),
-                };
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        let engine = Engine(inner);
+                        let res = tokio::task::spawn_blocking(move || engine.snapshot_once()).await;
+                        match res {
+                            Ok(Ok(())) => tracing::info!("snapshot ok"),
+                            Ok(Err(err)) => tracing::warn!(error = %err, "snapshot failed"),
+                            Err(err) => tracing::warn!(error = %err, "snapshot task join failed"),
+                        };
+                    }
+                    _ = shutdown.cancelled() => {
+                        tracing::info!("snapshot task stopping");
+                        break;
+                    }
+                }
             }
         });
     }
@@ -225,18 +239,26 @@ impl Engine {
             return;
         }
         let weak = Arc::downgrade(&self.0);
+        let shutdown = self.0.shutdown.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
-                interval.tick().await;
-                let Some(inner) = weak.upgrade() else { break };
-                let engine = Engine(inner);
-                let res = tokio::task::spawn_blocking(move || engine.expire_due_keys(1000)).await;
-                match res {
-                    Ok(Ok(expired)) if expired > 0 => tracing::info!(expired, "ttl expired"),
-                    Ok(Ok(_)) => {}
-                    Ok(Err(err)) => tracing::warn!(error = %err, "ttl task failed"),
-                    Err(err) => tracing::warn!(error = %err, "ttl task join failed"),
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        let engine = Engine(inner);
+                        let res = tokio::task::spawn_blocking(move || engine.expire_due_keys(1000)).await;
+                        match res {
+                            Ok(Ok(expired)) if expired > 0 => tracing::info!(expired, "ttl expired"),
+                            Ok(Ok(_)) => {}
+                            Ok(Err(err)) => tracing::warn!(error = %err, "ttl task failed"),
+                            Err(err) => tracing::warn!(error = %err, "ttl task join failed"),
+                        }
+                    }
+                    _ = shutdown.cancelled() => {
+                        tracing::info!("ttl task stopping");
+                        break;
+                    }
                 }
             }
         });

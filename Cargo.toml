@@ -36,6 +36,11 @@ time = { version = "0.3", features = ["formatting"] }
 lru = "0.12"
 rust-embed = "8.11.0"
 mime_guess = "2.0.5"
+tokio-util = { version = "0.7.18", features = ["rt"] }
+uuid = { version = "1.20.0", features = ["v4", "fast-rng"] }
+hex = "0.4.3"
+serde_urlencoded = "0.7.1"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }

@@ -1,6 +1,7 @@
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
 use rust_kiss_vdb::vector::index::DiskAnnBuildParams;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub struct DiskAnnCli {
@@ -63,7 +64,7 @@ fn parse_collection(args: &[String]) -> anyhow::Result<String> {
 }
 
 pub fn run_build(config: &Config, opts: DiskAnnCli) -> anyhow::Result<()> {
-    let engine = Engine::new(config.clone())?;
+    let engine = Engine::new(config.clone(), CancellationToken::new())?;
     let params = params_from_cli(&opts, config);
 
     engine.vector_build_disk_index(&opts.collection, params)?;
@@ -71,7 +72,7 @@ pub fn run_build(config: &Config, opts: DiskAnnCli) -> anyhow::Result<()> {
 }
 
 pub fn run_tune(config: &Config, opts: DiskAnnCli) -> anyhow::Result<()> {
-    let engine = Engine::new(config.clone())?;
+    let engine = Engine::new(config.clone(), CancellationToken::new())?;
     let params = params_from_cli(&opts, config);
 
     engine.vector_update_disk_index_params(&opts.collection, params)?;
@@ -79,7 +80,7 @@ pub fn run_tune(config: &Config, opts: DiskAnnCli) -> anyhow::Result<()> {
 }
 
 pub fn run_status(config: &Config, collection: String) -> anyhow::Result<()> {
-    let engine = Engine::new(config.clone())?;
+    let engine = Engine::new(config.clone(), CancellationToken::new())?;
     let status = engine.vector_disk_index_status(&collection)?;
 
     println!("{status:#?}");
