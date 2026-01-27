@@ -1,16 +1,21 @@
 [project]
 name = "rustkissvdb"
-version = "0.1.0"
-description = "SDK Python para RustKissVDB (state, vector, docstore, sql y stream)."
+version = "0.2.0"
+description = "High-performance RAG SDK for RustKissVDB. Compatible with OpenAI, DeepSeek, and LocalAI."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28.1",
     "python-dotenv>=1.0.0",
+    "openai>=1.0.0",
+    "pydantic>=2.0.0",
+    "tenacity>=8.0.0",
+    "pymupdf>=1.26.7",
+    "rich>=14.3.1",
 ]
 
 [project.optional-dependencies]
-rag = [
+pdf = [
     "pymupdf>=1.26.7",
 ]
 

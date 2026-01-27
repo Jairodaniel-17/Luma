@@ -1,32 +1,52 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 import httpx
 
 from .doc import DocAPI
 from .errors import RustKissVDBError
+from .rag import RAGClient
 from .sql import SqlAPI
 from .state import StateAPI
 from .stream import StreamAPI
 from .vector import VectorAPI
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 
 class Client:
+    """
+    Cliente principal para RustKissVDB.
+
+    Integra operaciones de base de datos (Vector, State, SQL) y capacidades de RAG.
+
+    Args:
+        base_url: URL del servidor RustKissVDB (ej. http://localhost:9917).
+        api_key: Clave de API para RustKissVDB.
+        openai_key: (Opcional) Clave de API de OpenAI para RAG. Si no se da, busca en env vars.
+    """
+
     def __init__(
         self,
-        base_url: str,
+        base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        timeout: float = 30.0,
+        openai_key: Optional[str] = None,
+        timeout: float = 60.0,
     ) -> None:
-        if not base_url:
-            raise ValueError("base_url requerido")
-
-        self._base_url = base_url.rstrip("/")
+        # Load defaults from environment if not provided
+        self._base_url = (base_url or os.getenv("KISS_VDB_URL", "http://localhost:9917")).rstrip("/")
+        self._api_key = api_key or os.getenv("KISS_VDB_KEY", "dev")
 
         headers: Dict[str, str] = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
 
         self._http = httpx.Client(
             base_url=self._base_url,
@@ -34,12 +54,19 @@ class Client:
             headers=headers,
         )
 
-        # Sub-APIs (no import circular si ellos NO importan Client en runtime)
+        # APIs de Base de Datos (Low Level)
         self.state = StateAPI(self)
         self.vector = VectorAPI(self)
         self.doc = DocAPI(self)
         self.sql = SqlAPI(self)
         self.stream = StreamAPI(self)
+
+        # API RAG (High Level)
+        # Se inicializa de forma perezosa o directa.
+        # Pasamos el vector_api para que el RAG client pueda hacer upserts/search.
+        self.rag = RAGClient(vector_api=self.vector)
+        if openai_key:
+            self.rag.openai.api_key = openai_key
 
     def close(self) -> None:
         self._http.close()
@@ -58,7 +85,10 @@ class Client:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        resp = self._http.request(method, path, params=params, json=json)
+        try:
+            resp = self._http.request(method, path, params=params, json=json)
+        except httpx.RequestError as e:
+            raise RustKissVDBError(f"Connection error: {e}")
 
         if resp.status_code >= 400:
             raise RustKissVDBError(self._error_message(resp))
