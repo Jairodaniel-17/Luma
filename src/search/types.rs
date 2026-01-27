@@ -16,6 +16,8 @@ pub struct DocumentMetadata {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,10 +49,17 @@ pub struct SearchRequest {
     #[serde(default = "default_top_k")]
     pub top_k: usize,
     pub filters: Option<SearchFilters>,
+    pub group_by: Option<String>,
+    #[serde(default = "default_group_limit")]
+    pub group_limit: usize,
 }
 
 fn default_top_k() -> usize {
     10
+}
+
+fn default_group_limit() -> usize {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
