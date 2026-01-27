@@ -1,9 +1,11 @@
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
+use rust_kiss_vdb::search::engine::SearchEngine;
 use rust_kiss_vdb::sqlite::SqliteService;
 use std::net::SocketAddr;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     if let Some(ref dir) = config.data_dir {
@@ -18,7 +20,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let engine = Engine::new(config.clone())?;
 
-    let app = rust_kiss_vdb::api::router(engine.clone(), config.clone(), sqlite);
+    let data_dir = config.data_dir.clone().map(PathBuf::from).unwrap_or(PathBuf::from("data"));
+    let search_engine = Arc::new(SearchEngine::new(data_dir)?);
+
+    let app = rust_kiss_vdb::api::router(engine.clone(), config.clone(), sqlite, search_engine);
     let addr = SocketAddr::new(config.bind_addr, config.port);
 
     tracing::info!(%addr, "listening");

@@ -1,7 +1,10 @@
 use rust_kiss_vdb::api;
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
+use rust_kiss_vdb::search::engine::SearchEngine;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
@@ -9,7 +12,7 @@ async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
         port: 0,
         bind_addr: "127.0.0.1".parse().unwrap(),
         api_key: "test".to_string(),
-        data_dir: Some(data_dir),
+        data_dir: Some(data_dir.clone()),
         snapshot_interval_secs: 30,
         event_buffer_size: 1000,
         live_broadcast_capacity: 1024,
@@ -55,7 +58,9 @@ async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
         )
         .unwrap(),
     );
-    let app = api::router(engine, config, sqlite);
+    let search_dir = PathBuf::from(&data_dir);
+    let search_engine = Arc::new(SearchEngine::new(search_dir).unwrap());
+    let app = api::router(engine, config, sqlite, search_engine);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

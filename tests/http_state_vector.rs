@@ -1,7 +1,10 @@
 use rust_kiss_vdb::api;
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
+use rust_kiss_vdb::search::engine::SearchEngine;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 async fn start() -> (String, oneshot::Sender<()>) {
@@ -19,7 +22,12 @@ async fn start_with_diskann() -> (String, oneshot::Sender<()>, tempfile::TempDir
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let config = config;
     let engine = Engine::new(config.clone()).unwrap();
-    let app = api::router(engine, config, None);
+    
+    // For tests not using search, a temporary dropped dir is fine.
+    let temp_dir = tempfile::tempdir().unwrap(); 
+    let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
+    
+    let app = api::router(engine, config, None, search_engine);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

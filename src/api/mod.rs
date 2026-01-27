@@ -6,14 +6,17 @@ mod routes_events;
 mod routes_sql;
 mod routes_state;
 mod routes_vector;
+mod routes_search;
 
 use crate::config::Config;
 use crate::engine::Engine;
+use crate::search::engine::SearchEngine;
 use crate::sqlite::SqliteService;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -23,13 +26,20 @@ pub struct AppState {
     pub engine: Engine,
     pub config: Config,
     pub sqlite: Option<SqliteService>,
+    pub search_engine: Arc<SearchEngine>,
 }
 
-pub fn router(engine: Engine, config: Config, sqlite: Option<SqliteService>) -> Router {
+pub fn router(
+    engine: Engine,
+    config: Config,
+    sqlite: Option<SqliteService>,
+    search_engine: Arc<SearchEngine>,
+) -> Router {
     let state = AppState {
         engine,
         config,
         sqlite,
+        search_engine,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -97,6 +107,8 @@ pub fn router(engine: Engine, config: Config, sqlite: Option<SqliteService>) -> 
         )
         .route("/v1/sql/query", post(routes_sql::query))
         .route("/v1/sql/exec", post(routes_sql::exec))
+        .route("/search", post(routes_search::search))
+        .route("/search/ingest", post(routes_search::ingest))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

@@ -4,3 +4,4 @@ pub mod docstore;
 pub mod engine;
 pub mod sqlite;
 pub mod vector;
+pub mod search;

@@ -2,7 +2,10 @@ use futures_util::StreamExt;
 use rust_kiss_vdb::api;
 use rust_kiss_vdb::config::Config;
 use rust_kiss_vdb::engine::Engine;
+use rust_kiss_vdb::search::engine::SearchEngine;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 async fn start() -> (String, oneshot::Sender<()>) {
@@ -50,7 +53,11 @@ async fn start() -> (String, oneshot::Sender<()>) {
         compaction_max_bytes_per_pass: 64 * 1024 * 1024,
     };
     let engine = Engine::new(config.clone()).unwrap();
-    let app = api::router(engine, config, None);
+    
+    let temp_dir = tempfile::tempdir().unwrap(); 
+    let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
+    
+    let app = api::router(engine, config, None, search_engine);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
