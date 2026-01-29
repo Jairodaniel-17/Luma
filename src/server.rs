@@ -1,7 +1,7 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::search::engine::SearchEngine;
-use rust_kiss_vdb::sqlite::SqliteService;
+use luma::config::Config;
+use luma::engine::Engine;
+use luma::search::engine::SearchEngine;
+use luma::sqlite::SqliteService;
 use std::net::SocketAddr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     };
 
     let auth_store = if let Some(svc) = &sqlite {
-        let store = Arc::new(rust_kiss_vdb::api::auth_store::AuthStore::new(Arc::new(svc.clone())));
+        let store = Arc::new(luma::api::auth_store::AuthStore::new(Arc::new(svc.clone())));
         store.init().await?;
         // Ensure the key configured in env/args (default "dev") exists
         store.ensure_bootstrap_key(&config.api_key).await?;
@@ -37,7 +37,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let data_dir = config.data_dir.clone().map(PathBuf::from).unwrap_or(PathBuf::from("data"));
     let search_engine = Arc::new(SearchEngine::new(data_dir)?);
 
-    let app = rust_kiss_vdb::api::router(engine.clone(), config.clone(), sqlite, search_engine, auth_store);
+    let app = luma::api::router(engine.clone(), config.clone(), sqlite, search_engine, auth_store);
     let addr = SocketAddr::new(config.bind_addr, config.port);
 
     tracing::info!(%addr, "listening");

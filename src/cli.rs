@@ -1,5 +1,5 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::vector::VectorStore;
+use luma::config::Config;
+use luma::vector::VectorStore;
 
 #[derive(Debug)]
 pub enum Command {
