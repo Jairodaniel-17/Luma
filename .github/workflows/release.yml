@@ -6,7 +6,7 @@ permissions:
 on:
   push:
     tags:
-      - "v*" # Ejecutar al pushear un tag (ej. v0.1.0)
+      - "v*" # Se activa con tags como v0.2.2
 
 jobs:
   build-and-upload:
@@ -16,21 +16,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux
+          # --- Linux (x86_64) ---
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: luma              # <--- CORREGIDO: Nombre real del binario
-            asset_name: luma-linux-amd64     # Nombre final para descarga
-          # Windows
+            artifact_name: luma
+            asset_name: luma-linux-amd64
+          
+          # --- Windows (x86_64) ---
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: luma.exe          # <--- CORREGIDO: Extensión .exe
+            artifact_name: luma.exe
             asset_name: luma-windows-amd64.exe
-          # macOS
+          
+          # --- macOS (Intel - compatible con M1/M2 vía Rosetta) ---
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: luma              # <--- CORREGIDO
+            artifact_name: luma
             asset_name: luma-macos-amd64
+
+          # --- macOS (Apple Silicon - Nativo M1/M2/M3) ---
+          # Opcional: Descomenta si quieres binario nativo ARM64
+          # - os: macos-latest
+          #   target: aarch64-apple-darwin
+          #   artifact_name: luma
+          #   asset_name: luma-macos-arm64
 
     steps:
       - name: Checkout code
@@ -41,13 +50,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Caché inteligente para no recompilar dependencias pesadas como hnsw_rs en cada release
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        # --locked asegura que se usen las versiones exactas de tu Cargo.lock
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Rename Binary
         shell: bash
         run: |
-          # Copia el binario generado (luma) al nombre del asset final
           cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
 
       - name: Upload to Release
