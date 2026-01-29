@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
-if TYPE_CHECKING:
-    from .client import Client
+from luma.doc import Client
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +42,7 @@ class Config:
         base = (
             os.getenv("RUSTKISS_URL")
             or os.getenv("VDB_BASE_URL")
-            or f"http://127.0.0.1:{os.getenv('PORT_RUST_KISS_VDB', '9917')}"
+            or f"http://127.0.0.1:{os.getenv('PORT_RUST_KISS_VDB', '1234')}"
         ).rstrip("/")
 
         api_key = os.getenv("RUSTKISS_API_KEY") or os.getenv("API_KEY")
@@ -51,8 +50,7 @@ class Config:
 
         return cls(base_url=base, api_key=api_key, timeout=timeout)
 
-    def create_client(self) -> Client:
-        from .client import Client
+    def create_client(self):
         return Client(
             base_url=self.base_url,
             api_key=self.api_key,

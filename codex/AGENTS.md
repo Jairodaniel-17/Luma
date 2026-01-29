@@ -544,9 +544,9 @@ Payload:
 **Truncado seguro**
 
 - Al leer:
-  - si no hay header completo -> fin (ok)
-  - si LEN excede límite -> fin (ok)
-  - si CRC falla -> truncar desde el último offset válido (o parar y marcar corrupto, según política)
+  - si no hay header completo → fin (ok)
+  - si LEN excede límite → fin (ok)
+  - si CRC falla → truncar desde el último offset válido (o parar y marcar corrupto, según política)
   - nunca “panic” por tail parcial
 
 ### Compactación incremental (LSM-like)
@@ -578,8 +578,8 @@ Payload:
 ### Escrituras
 
 - Upsert:
-  - asignación cluster -> lock solo del cluster (no lock global)
-  - append run -> flush según política (fsync configurable)
+  - asignación cluster → lock solo del cluster (no lock global)
+  - append run → flush según política (fsync configurable)
   - actualizar índices in-memory (si existen) sin bloquear lecturas excesivamente
 
 ### Locks recomendados
@@ -682,7 +682,7 @@ Git: Tienes permitido utilizar comandos git para versionar tu trabajo.
 
 ---
 
-## 14) Fase actual: Preparaci¢n DiskANN/Vamana
+## 14) Fase actual: Preparación DiskANN/Vamana
 
 1. **Interfaces claras**
    - `VectorIndex` para los ¡ndices en RAM (HNSW, IVF/Q8).
@@ -706,3 +706,175 @@ La fase se considera cerrada cuando:
 - El manifest soporte metadatos de ¡ndice en disco sin romper colecciones viejas.
 - `bench` pueda ejecutar baseline/IVF/DiskANN reutilizando datasets.
 - Haya docs/tests que expliquen c¢mo habilitar validar DiskANN.
+
+---
+
+## 15) Active Order: Luma — Configuration & Limits Unification
+
+### 🎯 Objetivo
+
+Unificar **todos los límites operativos y anti-DoS** de Luma para que:
+
+1. **Puedan configurarse por línea de comandos**
+2. **Acepten unidades humanas (MB, no bytes)**
+3. **Tengan fallback por variables de entorno**
+4. **Mantengan defaults seguros**
+5. **No existan valores hardcodeados dispersos**
+
+Prioridad estricta:
+
+```
+CLI args > Environment variables > Default values
+```
+
+---
+
+## 🧠 Principios de diseño (NO negociables)
+
+* ❌ No se aceptan bytes en CLI (`1048576`)
+* ✅ Solo MB (`--max-body-mb 20`)
+* ❌ No duplicar parsing (un solo resolver por límite)
+* ✅ Todo límite debe:
+  * estar documentado
+  * tener default
+  * ser trazable en logs al boot
+* ❌ No introducir perfiles mágicos todavía (`prod/ingest`)
+* ✅ Arquitectura explícita, no implícita
+
+---
+
+## 📌 Límites soportados (estado objetivo)
+
+| Límite                 | CLI Flag                 | ENV                      | Default          |
+| ---------------------- | ------------------------ | ------------------------ | ---------------- |
+| Max body size          | `--max-body-mb`          | `MAX_BODY_MB`            | `1`              |
+| Max JSON size          | `--max-json-mb`          | `MAX_JSON_MB`            | `0.0625` (64 KB) |
+| Max vector dim         | `--max-vector-dim`       | `MAX_VECTOR_DIM`         | `4096`           |
+| Max top-k              | `--max-k`                | `MAX_K`                  | `256`            |
+| Max key length         | `--max-key-len`          | `MAX_KEY_LEN`            | `512`            |
+| Max collection len     | `--max-collection-len`   | `MAX_COLLECTION_LEN`     | `64`             |
+| WAL retention segments | `--wal-retention`        | `WAL_RETENTION_SEGMENTS` | `8`              |
+| Request timeout        | `--request-timeout-secs` | `REQUEST_TIMEOUT_SECS`   | `30`             |
+
+---
+
+## 🛠️ Orden de implementación (obligatorio)
+
+### **Tarea 1 — Crear resolvers unificados**
+
+Crear en `config/resolve.rs` funciones **puras** por límite.
+
+### **Tarea 2 — Eliminar lectura directa de ENV**
+
+❌ Prohibido: `std::env::var("MAX_BODY_BYTES")`
+✅ Único punto válido: `let max_body_bytes = resolve_max_body_mb();`
+
+### **Tarea 3 — Actualizar `Config::from_env`**
+
+`Config` **ya no lee ENV directamente**. Solo recibe valores ya resueltos.
+
+### **Tarea 4 — Alinear middleware Axum**
+
+Confirmar que **solo** usa config.
+
+### **Tarea 5 — Normalizar naming**
+
+Eliminar `MAX_BODY_BYTES`, reemplazar por `MAX_BODY_MB`.
+
+### **Tarea 6 — Logging obligatorio al boot**
+
+Al iniciar Luma:
+
+```text
+[config] max_body_mb = 20
+[config] max_json_mb = 0.0625
+...
+```
+
+### **Tarea 7 — Documentación CLI**
+
+Ejemplo válido:
+
+```bash
+luma serve \
+  --port 8080 \
+  --max-body-mb 20 \
+  --max-json-mb 1 \
+  --max-k 128 \
+  --request-timeout-secs 60
+```
+
+---
+
+## 🚨 Reglas Anti-DoS (criterio de seguridad)
+
+* `max_body_mb` **límite duro HTTP**
+* `max_json_mb` **límite semántico**
+* `max_vector_dim`, `max_k`, `max_key_len` → validar **antes** de ejecutar lógica
+* Errores deben devolver:
+  * `413 Payload Too Large`
+  * `422 Unprocessable Entity`
+
+---
+
+## 📘 Objetivo de esta sección (Documentación y Semántica)
+
+Explicar **qué protege cada límite**, **en qué capa actúa**, y **por qué existen varios límites distintos**.
+
+### 🧠 Modelo mental correcto
+
+Luma aplica **defensa en profundidad**.
+
+```
+┌──────────────────────────┐
+│ HTTP Request (raw bytes) │  ← MAX_BODY_MB
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ JSON parsing / decoding  │  ← MAX_JSON_MB
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ Semantic validation      │  ← vector dim, k, key len…
+└──────────────────────────┘
+```
+
+### 🔐 Diferencia crítica: `MAX_BODY_MB` vs `MAX_JSON_MB`
+
+#### 🔹 `MAX_BODY_MB` — Límite físico (transporte)
+**Protege contra**: Requests gigantes, uploads accidentales.
+**Actúa**: Middleware HTTP (`DefaultBodyLimit`).
+
+#### 🔹 `MAX_JSON_MB` — Límite lógico (contenido)
+**Protege contra**: JSONs inflados, ataques de parsing.
+**Actúa**: Después de parsear HTTP.
+
+### 🧠 Relación correcta entre ambos
+
+Regla **no escrita pero obligatoria**:
+
+```
+MAX_JSON_MB <= MAX_BODY_MB
+```
+
+---
+
+## 🧩 Tabla resumida (para README)
+
+| Límite                 | Capa      | Protege         | Error típico             |
+| ---------------------- | --------- | --------------- | ------------------------ |
+| `MAX_BODY_MB`          | HTTP      | Infraestructura | `413 Payload Too Large`  |
+| `MAX_JSON_MB`          | Parsing   | CPU / Memoria   | `413 Payload Too Large`  |
+| `MAX_VECTOR_DIM`       | Semántica | Algoritmo       | `422 Invalid vector dim` |
+| `MAX_K`                | Semántica | Performance     | `422 Invalid k`          |
+| `REQUEST_TIMEOUT_SECS` | Ejecución | Latencia        | `408 / 504`              |
+
+---
+
+## 🧪 Obligación de validación
+
+Al boot, Luma debe **rechazar configuración inválida**:
+
+```text
+ERROR: MAX_JSON_MB (2) cannot be greater than MAX_BODY_MB (1)
+```

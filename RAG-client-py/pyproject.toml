@@ -1,7 +1,7 @@
 [project]
-name = "rustkissvdb"
-version = "0.2.0"
-description = "High-performance RAG SDK for RustKissVDB. Compatible with OpenAI, DeepSeek, and LocalAI."
+name = "luma-vdb"
+version = "0.2.2"
+description = "Luma: High-performance RAG SDK powered by RustKissVDB."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,11 +12,15 @@ dependencies = [
     "tenacity>=8.0.0",
     "pymupdf>=1.26.7",
     "rich>=14.3.1",
+    "requests>=2.32.5",
 ]
 
 [project.optional-dependencies]
 pdf = [
     "pymupdf>=1.26.7",
+]
+langchain = [
+    "langchain-core>=0.1.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,7 +1,9 @@
 [package]
-name = "rust-kiss-vdb"
-version = "0.1.0"
+name = "luma"
+version = "0.2.2"
 edition = "2021"
+description = "Luma: High-performance Vector DB powered by RustKissVDB"
+default-run = "luma"
 
 [dependencies]
 anyhow = "1"
@@ -22,9 +24,9 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-hnsw_rs = "0.3"
+hnsw_rs = "=0.3.1"
 bincode = "1"
-anndists = "0.1"
+anndists = "=0.1.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.21"
 clap = { version = "4.5", features = ["derive"] }

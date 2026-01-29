@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
+pub mod resolve;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub port: u16,
@@ -76,50 +78,20 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(64 * 1024 * 1024);
 
-        let wal_retention_segments = std::env::var("WAL_RETENTION_SEGMENTS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8);
-
-        let request_timeout_secs = std::env::var("REQUEST_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
-
-        let max_body_bytes = std::env::var("MAX_BODY_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1_048_576);
-
-        let max_key_len = std::env::var("MAX_KEY_LEN")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(512);
-
-        let max_collection_len = std::env::var("MAX_COLLECTION_LEN")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(64);
+        let wal_retention_segments = resolve::resolve_wal_retention_segments();
+        let request_timeout_secs = resolve::resolve_request_timeout_secs();
+        let max_body_bytes = resolve::resolve_max_body_mb();
+        let max_key_len = resolve::resolve_max_key_len();
+        let max_collection_len = resolve::resolve_max_collection_len();
 
         let max_id_len = std::env::var("MAX_ID_LEN")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(128);
 
-        let max_vector_dim = std::env::var("MAX_VECTOR_DIM")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4096);
-
-        let max_k = std::env::var("MAX_K")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(256);
-
-        let max_json_bytes = std::env::var("MAX_JSON_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(64 * 1024);
+        let max_vector_dim = resolve::resolve_max_vector_dim();
+        let max_k = resolve::resolve_max_k();
+        let max_json_bytes = resolve::resolve_max_json_mb();
 
         let max_state_batch = std::env::var("MAX_STATE_BATCH")
             .ok()

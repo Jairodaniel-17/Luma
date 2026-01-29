@@ -1,0 +1,12 @@
+target/
+.git/
+.gitignore
+*.log
+*.db
+data_storage/
+.env
+Dockerfile
+docker-compose.yml
+README.md
+.gitlab-ci.yml
+.dockerignore

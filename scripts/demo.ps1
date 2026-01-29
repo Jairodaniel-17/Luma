@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $port = $env:PORT_RUST_KISS_VDB
 if ([string]::IsNullOrWhiteSpace($port)) {
-  $port = "9917"
+  $port = "1234"
 }
 $base = "http://localhost:$port"
 

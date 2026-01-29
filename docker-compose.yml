@@ -1,0 +1,21 @@
+services:
+  luma:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: luma:latest
+    container_name: rust-kiss-vdb
+    ports:
+      - "1234:1234"
+    volumes:
+      - ./data_storage:/data
+    # Override de comandos si es necesario
+    command: ["--port", "1234", "--bind", "0.0.0.0", "--DATA_DIR", "/data"]
+    restart: unless-stopped
+    # Optimización para producción
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
