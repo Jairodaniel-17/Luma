@@ -1,5 +1,5 @@
-use rust_kiss_vdb::config::Config;
-use tracing_subscriber::EnvFilter;
+use luma::config::Config;
+use tracing::info;
 
 mod cli;
 mod server;
@@ -7,7 +7,9 @@ mod diskann;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_logging();
+    tracing_subscriber::fmt::init();
+    info!("Starting Luma (powered by RustKissVDB) v{}", env!("CARGO_PKG_VERSION"));
+
 
     let command = cli::parse_command()?;
     let config = Config::from_env()?;
@@ -31,13 +33,4 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
 }

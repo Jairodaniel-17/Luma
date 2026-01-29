@@ -1,6 +1,6 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::vector::index::DiskAnnBuildParams;
+use luma::config::Config;
+use luma::engine::Engine;
+use luma::vector::index::DiskAnnBuildParams;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]

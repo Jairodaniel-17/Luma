@@ -51,7 +51,7 @@ impl Config {
         let port = resolve_port();
         let bind_addr = resolve_bind_addr();
 
-        let api_key = std::env::var("RUSTKISS_API_KEY")
+        let api_key = std::env::var("LUMA_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
             .unwrap_or_else(|_| "dev".to_string());
         let data_dir = resolve_data_dir();
@@ -284,16 +284,16 @@ fn resolve_port() -> u16 {
         }
     }
 
-    if let Ok(value) = std::env::var("PORT_RUST_KISS_VDB") {
+    if let Ok(value) = std::env::var("PORT_LUMA_VDB") {
         if let Ok(port) = value.parse::<u16>() {
             return port;
         }
         eprintln!(
-            "Valor de puerto invalido `{value}` para `PORT_RUST_KISS_VDB`. Usando valor por defecto."
+            "Valor de puerto invalido `{value}` para `PORT_LUMA_VDB`. Usando valor por defecto."
         );
     }
 
-    9917
+    1234
 }
 
 fn resolve_data_dir() -> Option<String> {
