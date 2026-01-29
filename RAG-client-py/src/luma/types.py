@@ -23,8 +23,9 @@ class SearchResult(BaseModel):
     id: str
     score: float
     meta: Optional[Dict[str, Any]] = None
-    # For high-level search (text content)
     content: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None  # Alias para compatibilidad
+    vector: Optional[List[float]] = None
 
 
 class SearchResponse(BaseModel):
@@ -37,7 +38,7 @@ class SearchResponse(BaseModel):
 class RAGGeneration(BaseModel):
     answer: str
     sources: List[SearchResult]
-    usage: Dict[str, Any]
+    usage: Optional[Dict[str, Any]] = None
 
 
 class DocumentChunk(BaseModel):

@@ -1,0 +1,35 @@
+# Etapa de construcción - Binario estático MUSL
+FROM clux/muslrust:stable AS builder
+
+WORKDIR /app
+
+# 1. Copiar TODO el proyecto (necesario para rust-embed)
+COPY . .
+
+# 2. Cache de dependencias (solo si quieres optimizar)
+# Primero copia Cargo.toml y Cargo.lock
+COPY Cargo.toml Cargo.lock ./
+
+# Crear estructura dummy para cache
+RUN mkdir -p src docs ui && \
+    echo "fn main() {println!(\"dummy\");}" > src/main.rs && \
+    echo "openapi: 3.0.0" > docs/openapi.yaml && \
+    echo "<html>dummy</html>" > ui/index.html && \
+    cargo build --release --target x86_64-unknown-linux-musl && \
+    rm -rf src docs ui target/x86_64-unknown-linux-musl/release/deps/luma*
+
+# 3. Copiar todo el código real
+COPY . .
+
+# 4. Build final
+RUN cargo build --release --target x86_64-unknown-linux-musl --bin luma
+
+# Etapa final - Solo el binario (sin shell, sin sistema)
+FROM scratch
+
+# Copiar solo el binario estático
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/luma /luma
+
+# Punto de entrada directo al binario
+ENTRYPOINT ["/luma"]
+CMD ["--port", "1234", "--bind", "0.0.0.0", "--DATA_DIR", "/data"]

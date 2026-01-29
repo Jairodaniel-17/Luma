@@ -9,7 +9,7 @@ param(
 if (-not $PSBoundParameters.ContainsKey('Base') -or [string]::IsNullOrWhiteSpace($Base)) {
   $port = $env:PORT_RUST_KISS_VDB
   if ([string]::IsNullOrWhiteSpace($port)) {
-    $port = "9917"
+    $port = "1234"
   }
   $Base = "http://localhost:$port"
 }

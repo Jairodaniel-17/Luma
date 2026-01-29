@@ -9,6 +9,28 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
+    // ---------------------------------------------------------
+    // 1. Config Validation & Logging (Anti-DoS Order)
+    // ---------------------------------------------------------
+    if config.max_json_bytes > config.max_body_bytes {
+        let msg = format!(
+            "CRITICAL: MAX_JSON_MB ({:.4}) cannot be greater than MAX_BODY_MB ({:.4})",
+            config.max_json_bytes as f64 / 1_048_576.0,
+            config.max_body_bytes as f64 / 1_048_576.0
+        );
+        tracing::error!("{}", msg);
+        anyhow::bail!(msg);
+    }
+
+    tracing::info!("[config] max_body_mb = {:.4}", config.max_body_bytes as f64 / 1_048_576.0);
+    tracing::info!("[config] max_json_mb = {:.4}", config.max_json_bytes as f64 / 1_048_576.0);
+    tracing::info!("[config] max_vector_dim = {}", config.max_vector_dim);
+    tracing::info!("[config] max_k = {}", config.max_k);
+    tracing::info!("[config] request_timeout_secs = {}", config.request_timeout_secs);
+    tracing::info!("[config] wal_retention_segments = {}", config.wal_retention_segments);
+
+    // ---------------------------------------------------------
+
     if let Some(ref dir) = config.data_dir {
         ensure_data_dir(dir)?;
         let abs_path = fs::canonicalize(dir)?;
