@@ -20,7 +20,6 @@ async fn start_with_diskann() -> (String, oneshot::Sender<()>, tempfile::TempDir
 }
 
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
-    let config = config;
     let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
 
     // For tests not using search, a temporary dropped dir is fine.
@@ -260,7 +259,7 @@ async fn docstore_put_get_find() {
         .unwrap();
     assert!(find.status().is_success());
     let v: serde_json::Value = find.json().await.unwrap();
-    assert!(v["documents"].as_array().unwrap().len() >= 1);
+    assert!(!v["documents"].as_array().unwrap().is_empty());
     assert_eq!(v["documents"][0]["doc"]["role"], "admin");
 
     let _ = shutdown.send(());

@@ -247,14 +247,16 @@ async fn ivf_retrain_updates_manifest_and_results() {
 )]
 #[test]
 fn ivf_large_dataset_retrain_consistent() {
-    let mut settings = VectorSettings::default();
-    settings.index_kind = IndexKind::IvfFlatQ8;
+    let mut settings = VectorSettings {
+        index_kind: IndexKind::IvfFlatQ8,
+        q8_refine_topk: 128,
+        hnsw_fallback_enabled: false,
+        ..Default::default()
+    };
     settings.ivf.clusters = 128;
     settings.ivf.nprobe = 8;
     settings.ivf.min_train_vectors = 512;
     settings.ivf.retrain_min_deltas = 200_000;
-    settings.q8_refine_topk = 128;
-    settings.hnsw_fallback_enabled = false;
     let store = VectorStore::with_settings(settings);
     store.create_collection("big", 2, Metric::Cosine).unwrap();
     let total = 1_000_000u32;

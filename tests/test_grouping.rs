@@ -139,7 +139,7 @@ fn test_no_grouping() {
     let engine = create_engine(&dir);
 
     // 2 docs, 2 chunks each. All distinct scores.
-    let docs = vec![
+    let docs = [
         ("doc1", vec![0.9, 0.1]),
         ("doc1", vec![0.85, 0.15]),
         ("doc2", vec![0.8, 0.2]),
@@ -162,9 +162,9 @@ fn test_no_grouping() {
     let res = engine.search(req).unwrap();
     assert_eq!(res.results.len(), 4);
     // Ordered by score
-    assert_eq!(res.results[0].score > res.results[1].score, true);
-    assert_eq!(res.results[1].score > res.results[2].score, true);
-    assert_eq!(res.results[2].score > res.results[3].score, true);
+    assert!(res.results[0].score > res.results[1].score);
+    assert!(res.results[1].score > res.results[2].score);
+    assert!(res.results[2].score > res.results[3].score);
 }
 
 #[test]

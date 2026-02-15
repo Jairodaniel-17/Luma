@@ -4,7 +4,6 @@ use luma::api::router;
 use luma::config::Config;
 use luma::engine::Engine;
 use luma::search::engine::SearchEngine;
-use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
