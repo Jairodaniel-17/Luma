@@ -1,11 +1,9 @@
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
-use luma::vector::{
-    IndexKind, Metric, SearchRequest, VectorItem, VectorSettings, VectorStore,
-};
+use luma::vector::{IndexKind, Metric, SearchRequest, VectorItem, VectorSettings, VectorStore};
 use serde_json::json;
 use std::fs;
+use tokio_util::sync::CancellationToken;
 
 fn config_with_dir(dir: &str) -> Config {
     Config {

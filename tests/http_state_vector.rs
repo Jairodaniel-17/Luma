@@ -1,12 +1,11 @@
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start() -> (String, oneshot::Sender<()>) {
     start_with_config(base_test_config()).await
@@ -53,7 +52,7 @@ async fn state_put_get() {
     let client = reqwest::Client::new();
 
     let put = client
-        .put(format!("{}/v1/state/job:1", base))
+        .put(format!("{}/v1/state/job:1?api_key=test", base))
         .json(&serde_json::json!({"value":{"progress":1}}))
         .send()
         .await
@@ -61,7 +60,7 @@ async fn state_put_get() {
     assert!(put.status().is_success());
 
     let got = client
-        .get(format!("{}/v1/state/job:1", base))
+        .get(format!("{}/v1/state/job:1?api_key=test", base))
         .send()
         .await
         .unwrap();
@@ -79,7 +78,7 @@ async fn vector_create_upsert_search() {
     let client = reqwest::Client::new();
 
     let create = client
-        .post(format!("{}/v1/vector/docs", base))
+        .post(format!("{}/v1/vector/docs?api_key=test", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .send()
         .await
@@ -87,7 +86,7 @@ async fn vector_create_upsert_search() {
     assert!(create.status().is_success());
 
     let upsert = client
-        .post(format!("{}/v1/vector/docs/upsert", base))
+        .post(format!("{}/v1/vector/docs/upsert?api_key=test", base))
         .json(&serde_json::json!({"id":"a","vector":[1.0,0.0],"meta":{"tag":"x"}}))
         .send()
         .await
@@ -95,7 +94,7 @@ async fn vector_create_upsert_search() {
     assert!(upsert.status().is_success());
 
     let search = client
-        .post(format!("{}/v1/vector/docs/search", base))
+        .post(format!("{}/v1/vector/docs/search?api_key=test", base))
         .json(&serde_json::json!({"vector":[0.9,0.1],"k":1,"include_meta":true}))
         .send()
         .await
@@ -159,7 +158,7 @@ async fn vector_list_collections_endpoint() {
     let client = reqwest::Client::new();
 
     let initial = client
-        .get(format!("{}/v1/vector", base))
+        .get(format!("{}/v1/vector?api_key=test", base))
         .send()
         .await
         .unwrap();
@@ -168,7 +167,7 @@ async fn vector_list_collections_endpoint() {
     assert!(value["collections"].as_array().unwrap().is_empty());
 
     let create = client
-        .post(format!("{}/v1/vector/docs", base))
+        .post(format!("{}/v1/vector/docs?api_key=test", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .send()
         .await
@@ -176,7 +175,7 @@ async fn vector_list_collections_endpoint() {
     assert!(create.status().is_success());
 
     let listed = client
-        .get(format!("{}/v1/vector", base))
+        .get(format!("{}/v1/vector?api_key=test", base))
         .send()
         .await
         .unwrap();
@@ -196,16 +195,19 @@ async fn vector_collection_detail_endpoint() {
     let client = reqwest::Client::new();
 
     let missing = client
-        .get(format!("{}/v1/vector/none", base))
+        .get(format!("{}/v1/vector/none?api_key=test", base))
         .send()
         .await
         .unwrap();
+    // 404 is expected, but authentication happens first.
+    // If auth fails, we get 401. We want 404.
+    // So we MUST provide api_key even for 404 test.
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
     let body: serde_json::Value = missing.json().await.unwrap();
     assert_eq!(body["error"], "not_found");
 
     let create = client
-        .post(format!("{}/v1/vector/docs", base))
+        .post(format!("{}/v1/vector/docs?api_key=test", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .send()
         .await
@@ -213,7 +215,7 @@ async fn vector_collection_detail_endpoint() {
     assert!(create.status().is_success());
 
     let detail = client
-        .get(format!("{}/v1/vector/docs", base))
+        .get(format!("{}/v1/vector/docs?api_key=test", base))
         .send()
         .await
         .unwrap();
@@ -234,7 +236,7 @@ async fn docstore_put_get_find() {
     let client = reqwest::Client::new();
 
     let put = client
-        .put(format!("{}/v1/doc/users/u1", base))
+        .put(format!("{}/v1/doc/users/u1?api_key=test", base))
         .json(&serde_json::json!({"name":"Ada","role":"admin"}))
         .send()
         .await
@@ -242,7 +244,7 @@ async fn docstore_put_get_find() {
     assert!(put.status().is_success());
 
     let get = client
-        .get(format!("{}/v1/doc/users/u1", base))
+        .get(format!("{}/v1/doc/users/u1?api_key=test", base))
         .send()
         .await
         .unwrap();
@@ -251,7 +253,7 @@ async fn docstore_put_get_find() {
     assert_eq!(doc["doc"]["name"], "Ada");
 
     let find = client
-        .post(format!("{}/v1/doc/users/find", base))
+        .post(format!("{}/v1/doc/users/find?api_key=test", base))
         .json(&serde_json::json!({"filter":{"role":"admin"},"limit":10}))
         .send()
         .await
@@ -270,7 +272,7 @@ async fn vector_diskann_build_status_and_tune() {
     let client = reqwest::Client::new();
 
     let create = client
-        .post(format!("{}/v1/vector/docs", base))
+        .post(format!("{}/v1/vector/docs?api_key=test", base))
         .json(&serde_json::json!({"dim":3,"metric":"cosine"}))
         .send()
         .await
@@ -279,7 +281,7 @@ async fn vector_diskann_build_status_and_tune() {
 
     for (id, vector) in [("a", vec![1.0, 0.0, 0.0]), ("b", vec![0.0, 1.0, 0.0])] {
         let upsert = client
-            .post(format!("{}/v1/vector/docs/upsert", base))
+            .post(format!("{}/v1/vector/docs/upsert?api_key=test", base))
             .json(&serde_json::json!({"id":id,"vector":vector}))
             .send()
             .await
@@ -288,7 +290,10 @@ async fn vector_diskann_build_status_and_tune() {
     }
 
     let build = client
-        .post(format!("{}/v1/vector/docs/diskann/build", base))
+        .post(format!(
+            "{}/v1/vector/docs/diskann/build?api_key=test",
+            base
+        ))
         .json(&serde_json::json!({"max_degree":16,"search_list_size":48}))
         .send()
         .await
@@ -299,7 +304,10 @@ async fn vector_diskann_build_status_and_tune() {
     assert_eq!(body["params"]["max_degree"], 16);
 
     let status = client
-        .get(format!("{}/v1/vector/docs/diskann/status", base))
+        .get(format!(
+            "{}/v1/vector/docs/diskann/status?api_key=test",
+            base
+        ))
         .send()
         .await
         .unwrap();
@@ -308,7 +316,7 @@ async fn vector_diskann_build_status_and_tune() {
     assert_eq!(status_body["available"], true);
 
     let tune = client
-        .post(format!("{}/v1/vector/docs/diskann/tune", base))
+        .post(format!("{}/v1/vector/docs/diskann/tune?api_key=test", base))
         .json(&serde_json::json!({"search_list_size":96}))
         .send()
         .await

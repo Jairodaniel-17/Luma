@@ -119,7 +119,7 @@ pub async fn get_collection_detail(
         collection,
         dim: dim.or(manifest_dim),
         metric: metric.or(manifest_metric),
-        count: count,
+        count,
         created_at_ms,
         updated_at_ms,
         manifest,

@@ -333,15 +333,15 @@ pub fn init_collection(
     Ok(())
 }
 
-pub fn load_collection(
-    layout: &CollectionLayout,
-) -> anyhow::Result<(
-    Manifest,
-    HashMap<String, VectorItem>,
-    HashMap<String, QuantizedVec>,
-    HashMap<String, String>,
-    u64,
-)> {
+pub struct CollectionData {
+    pub manifest: Manifest,
+    pub items: HashMap<String, VectorItem>,
+    pub quantized: HashMap<String, QuantizedVec>,
+    pub item_runs: HashMap<String, String>,
+    pub applied_offset: u64,
+}
+
+pub fn load_collection(layout: &CollectionLayout) -> anyhow::Result<CollectionData> {
     let manifest = read_manifest(layout).map_err(|_| VectorError::Persistence)?;
     let data = read_records(layout, &manifest)?;
     let mut manifest2 = manifest.clone();
@@ -351,13 +351,13 @@ pub fn load_collection(
     manifest2.file_len = data.file_len;
     manifest2.upsert_count = data.upserts;
     let _ = store_manifest(layout, &manifest2);
-    Ok((
-        manifest2,
-        data.items,
-        data.quantized,
-        data.item_runs,
-        data.applied_offset,
-    ))
+    Ok(CollectionData {
+        manifest: manifest2,
+        items: data.items,
+        quantized: data.quantized,
+        item_runs: data.item_runs,
+        applied_offset: data.applied_offset,
+    })
 }
 
 pub fn append_record(

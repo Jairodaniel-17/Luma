@@ -286,6 +286,7 @@ impl Config {
     }
 }
 
+#[allow(clippy::while_let_on_iterator)]
 fn resolve_port() -> u16 {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -374,8 +375,7 @@ fn resolve_bind_addr() -> IpAddr {
 }
 
 fn resolve_sqlite_enabled() -> bool {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+    for arg in std::env::args().skip(1) {
         if arg == "--no-sqlite" {
             return false;
         }
@@ -384,10 +384,10 @@ fn resolve_sqlite_enabled() -> bool {
         }
     }
     match std::env::var("SQLITE_ENABLED").ok().as_deref() {
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "0" | "false" | "off" | "no" => false,
-            _ => true,
-        },
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         None => true,
     }
 }
