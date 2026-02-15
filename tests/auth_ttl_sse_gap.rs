@@ -2,12 +2,11 @@ use futures_util::StreamExt;
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
@@ -87,7 +86,7 @@ async fn ttl_emits_event() {
 
     let resp = client
         .get(format!(
-            "{}/v1/stream?types=state_deleted&key_prefix=ttl:",
+            "{}/v1/stream?types=state_deleted&key_prefix=ttl:&api_key=test",
             base
         ))
         .send()
@@ -96,7 +95,7 @@ async fn ttl_emits_event() {
     assert!(resp.status().is_success());
 
     let put = client
-        .put(format!("{}/v1/state/ttl:1", base))
+        .put(format!("{}/v1/state/ttl:1?api_key=test", base))
         .json(&serde_json::json!({"value":{"v":1},"ttl_ms":50}))
         .send()
         .await
@@ -131,7 +130,10 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{}/v1/stream?types=state_updated&since=0", base))
+        .get(format!(
+            "{}/v1/stream?types=state_updated&since=0&api_key=test",
+            base
+        ))
         .send()
         .await
         .unwrap();
@@ -142,7 +144,7 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
 
     for i in 0..5000u32 {
         let _ = client
-            .put(format!("{}/v1/state/lag:{}", base, i))
+            .put(format!("{}/v1/state/lag:{}?api_key=test", base, i))
             .json(&serde_json::json!({"value":{"i":i}}))
             .send()
             .await

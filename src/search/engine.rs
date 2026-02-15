@@ -46,8 +46,8 @@ impl SearchEngine {
         let is_latest = version_policy == "latest";
         let group_field = req.group_by.as_deref();
 
-        let mut iter = self.storage.scan_metadata()?;
-        while let Some(res) = iter.next() {
+        let iter = self.storage.scan_metadata()?;
+        for res in iter {
             let (offset, _id, meta) = res?;
 
             // Filters
@@ -201,8 +201,8 @@ impl SearchEngine {
     }
 
     fn embed(&self, text: &str, dim: usize) -> Vec<f32> {
-        if text.starts_with("TEST_VEC:") {
-            let parts: Vec<&str> = text["TEST_VEC:".len()..].split(',').collect();
+        if let Some(stripped) = text.strip_prefix("TEST_VEC:") {
+            let parts: Vec<&str> = stripped.split(',').collect();
             if let Ok(vec) = parts
                 .iter()
                 .map(|s| s.trim().parse::<f32>())
@@ -244,11 +244,13 @@ impl PartialEq for ScoredDoc {
 impl Eq for ScoredDoc {}
 impl PartialOrd for ScoredDoc {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.score.partial_cmp(&other.score)
+        Some(self.cmp(other))
     }
 }
 impl Ord for ScoredDoc {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
     }
 }

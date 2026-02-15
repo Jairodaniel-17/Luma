@@ -47,7 +47,7 @@ fn test_vector_collection_ops() {
         .search(
             collection_name,
             SearchRequest {
-                vector: vector,
+                vector,
                 k: 1,
                 filters: None,
                 include_meta: None,

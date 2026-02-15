@@ -1,6 +1,5 @@
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::vector::index::DiskAnnBuildParams;
 use luma::vector::{Metric, SearchRequest, VectorItem};
 use serde_json::json;
@@ -8,6 +7,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 fn config_with_dir(dir: &str) -> Config {
     Config {

@@ -18,8 +18,8 @@ impl SqliteService {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&db_path)?;
-        conn.pragma_update(None, "journal_mode", &"WAL")?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

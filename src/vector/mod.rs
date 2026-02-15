@@ -360,16 +360,15 @@ impl VectorStore {
             }
             let name = entry.file_name().to_string_lossy().to_string();
             let layout = CollectionLayout::new(&vectors_dir, &name);
-            let (manifest, items, quantized, item_runs, applied_offset) =
-                persist::load_collection(&layout)
-                    .with_context(|| format!("load vector collection {name}"))?;
+            let data = persist::load_collection(&layout)
+                .with_context(|| format!("load vector collection {name}"))?;
             let mut c = Collection::new(
                 Some(layout),
-                manifest,
-                items,
-                quantized,
-                item_runs,
-                applied_offset,
+                data.manifest,
+                data.items,
+                data.quantized,
+                data.item_runs,
+                data.applied_offset,
                 settings.clone(),
             )?;
             c.rebuild_index();
@@ -428,7 +427,14 @@ impl VectorStore {
         let (manifest, items, quantized, item_runs, applied_offset) = if let Some(layout) = &layout
         {
             persist::init_collection(layout, dim, metric).map_err(|_| VectorError::Persistence)?;
-            persist::load_collection(layout).map_err(|_| VectorError::Persistence)?
+            let data = persist::load_collection(layout).map_err(|_| VectorError::Persistence)?;
+            (
+                data.manifest,
+                data.items,
+                data.quantized,
+                data.item_runs,
+                data.applied_offset,
+            )
         } else {
             (
                 Manifest::new(dim, metric),
@@ -581,7 +587,15 @@ impl VectorStore {
                     if let Some(layout) = &layout {
                         persist::init_collection(layout, dim, metric)
                             .map_err(|_| VectorError::Persistence)?;
-                        persist::load_collection(layout).map_err(|_| VectorError::Persistence)?
+                        let data = persist::load_collection(layout)
+                            .map_err(|_| VectorError::Persistence)?;
+                        (
+                            data.manifest,
+                            data.items,
+                            data.quantized,
+                            data.item_runs,
+                            data.applied_offset,
+                        )
                     } else {
                         (
                             Manifest::new(dim, metric),
@@ -1218,9 +1232,7 @@ impl Collection {
         let obj = filters.as_object()?;
         let mut current: Option<HashSet<String>> = None;
         for (k, v) in obj {
-            let Some(value) = v.as_str() else {
-                return None;
-            };
+            let value = v.as_str()?;
             let Some(by_value) = self.keyword_index.get(k) else {
                 return Some(HashSet::new());
             };

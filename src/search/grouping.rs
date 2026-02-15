@@ -37,12 +37,14 @@ impl PartialEq for ScoredOffset {
 impl Eq for ScoredOffset {}
 impl PartialOrd for ScoredOffset {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.score.partial_cmp(&other.score)
+        Some(self.cmp(other))
     }
 }
 impl Ord for ScoredOffset {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -62,7 +64,7 @@ impl GroupedResults {
     }
 
     pub fn push(&mut self, key: GroupKey, score: f32, offset: u64) {
-        let entry = self.groups.entry(key).or_insert_with(BinaryHeap::new);
+        let entry = self.groups.entry(key).or_default();
 
         entry.push(Reverse(ScoredOffset { score, offset }));
         if entry.len() > self.limit {

@@ -1,12 +1,12 @@
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
     let config = Config {
@@ -88,7 +88,7 @@ async fn sqlite_exec_and_query() {
     let client = reqwest::Client::new();
 
     let create = client
-        .post(format!("{}/v1/sql/exec", base))
+        .post(format!("{}/v1/sql/exec?api_key=test", base))
         .json(&serde_json::json!({"sql":"CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT)","params":[]}))
         .send()
         .await
@@ -96,7 +96,7 @@ async fn sqlite_exec_and_query() {
     assert!(create.status().is_success());
 
     let insert = client
-        .post(format!("{}/v1/sql/exec", base))
+        .post(format!("{}/v1/sql/exec?api_key=test", base))
         .json(&serde_json::json!({"sql":"INSERT INTO notes(body) VALUES (?)","params":["hola"]}))
         .send()
         .await
@@ -104,7 +104,7 @@ async fn sqlite_exec_and_query() {
     assert!(insert.status().is_success());
 
     let query = client
-        .post(format!("{}/v1/sql/query", base))
+        .post(format!("{}/v1/sql/query?api_key=test", base))
         .json(&serde_json::json!({"sql":"SELECT body FROM notes","params":[]}))
         .send()
         .await
