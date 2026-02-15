@@ -12,7 +12,13 @@ pub async fn auth_middleware(
 ) -> Result<Response, ApiError> {
     // Allow public assets
     let path = req.uri().path();
-    if path == "/" || path == "/index.html" || path.starts_with("/assets/") || path == "/v1/health" || path.starts_with("/docs") || path.ends_with("openapi.yaml") {
+    if path == "/"
+        || path == "/index.html"
+        || path.starts_with("/assets/")
+        || path == "/v1/health"
+        || path.starts_with("/docs")
+        || path.ends_with("openapi.yaml")
+    {
         return Ok(next.run(req).await);
     }
 
@@ -40,14 +46,14 @@ pub async fn auth_middleware(
             if let Some((_, v)) = params.iter().find(|(k, _)| k == "api_key") {
                 v.clone()
             } else {
-                 return Err(ApiError::new(
+                return Err(ApiError::new(
                     axum::http::StatusCode::UNAUTHORIZED,
                     "unauthorized",
                     "missing authorization header",
                 ));
             }
         } else {
-             return Err(ApiError::new(
+            return Err(ApiError::new(
                 axum::http::StatusCode::UNAUTHORIZED,
                 "unauthorized",
                 "missing authorization header",

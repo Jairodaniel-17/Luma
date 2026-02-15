@@ -1,3 +1,4 @@
+use crate::api::errors::ApiError;
 use crate::api::AppState;
 use crate::search::types::{IngestRequest, SearchRequest};
 use axum::{
@@ -9,12 +10,30 @@ use axum::{
 pub async fn search(
     State(state): State<AppState>,
     Json(payload): Json<SearchRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
+    if payload.query.len() > 1024 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "query too long",
+        ));
+    }
+    if payload.top_k == 0 || payload.top_k > state.config.max_k {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "top_k invalid",
+        ));
+    }
     match state.search_engine.search(payload) {
-        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Ok(res) => Ok((StatusCode::OK, Json(res))),
         Err(err) => {
             tracing::error!(%err, "search failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "search failed",
+            ))
         }
     }
 }
@@ -22,12 +41,23 @@ pub async fn search(
 pub async fn ingest(
     State(state): State<AppState>,
     Json(payload): Json<IngestRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
+    if payload.document.content.len() > state.config.max_body_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "document content too large",
+        ));
+    }
     match state.search_engine.ingest(payload.document) {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => Ok(StatusCode::OK),
         Err(err) => {
             tracing::error!(%err, "ingest failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "ingest failed",
+            ))
         }
     }
 }

@@ -2,7 +2,9 @@ use crate::api::errors::{ApiError, ErrorBody};
 use crate::api::AppState;
 use crate::engine::EngineError;
 use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};
-use crate::vector::{Metric, SearchRequest, VectorCollectionInfo, VectorError, VectorItem, SearchHit};
+use crate::vector::{
+    Metric, SearchHit, SearchRequest, VectorCollectionInfo, VectorError, VectorItem,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

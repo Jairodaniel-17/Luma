@@ -1,7 +1,8 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::vector::index::DiskAnnBuildParams;
-use rust_kiss_vdb::vector::{Metric, SearchRequest, VectorItem};
+use luma::config::Config;
+use luma::engine::Engine;
+use tokio_util::sync::CancellationToken;
+use luma::vector::index::DiskAnnBuildParams;
+use luma::vector::{Metric, SearchRequest, VectorItem};
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -110,7 +111,7 @@ async fn vector_persistence_restart_search() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -126,7 +127,7 @@ async fn vector_persistence_restart_search() {
         .unwrap();
     drop(engine);
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     let hits = engine2
         .vector_search(
             "docs",
@@ -149,7 +150,7 @@ async fn vector_rebuild_handles_many_vectors() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 2, Metric::Cosine)
         .unwrap();
@@ -168,7 +169,7 @@ async fn vector_rebuild_handles_many_vectors() {
     }
     drop(engine);
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     let hits = engine2
         .vector_search(
             "docs",
@@ -190,7 +191,7 @@ async fn vector_delete_update_persisted() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -220,7 +221,7 @@ async fn vector_delete_update_persisted() {
         .unwrap();
     drop(engine);
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     assert!(engine2.vector_get("docs", "gone").unwrap().is_none());
     let hits = engine2
         .vector_search(
@@ -242,7 +243,7 @@ async fn vector_runs_tail_truncation_safe() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 4, Metric::Cosine)
         .unwrap();
@@ -269,7 +270,7 @@ async fn vector_runs_tail_truncation_safe() {
     file.flush().unwrap();
     drop(file);
 
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     assert!(reopened.vector_get("docs", "id-0").unwrap().is_some());
     let hits = reopened
         .vector_search(
@@ -294,7 +295,7 @@ async fn vector_runs_checksum_detection() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 4, Metric::Cosine)
         .unwrap();
@@ -329,7 +330,7 @@ async fn vector_runs_checksum_detection() {
     file.flush().unwrap();
     drop(file);
 
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     assert!(
         reopened.vector_get("docs", "crc-0").unwrap().is_some(),
         "earlier records must still load"
@@ -348,7 +349,7 @@ async fn vector_q8_run_roundtrip() {
     config.ivf_clusters = 2;
     config.ivf_nprobe = 1;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -394,7 +395,7 @@ async fn vector_q8_run_roundtrip() {
         fs::remove_file(&legacy).unwrap();
     }
 
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     let hits = reopened
         .vector_search(
             "docs",
@@ -419,7 +420,7 @@ async fn vector_run_retention_compacts_old_runs() {
     config.run_target_bytes = 512;
     config.run_retention = 1;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 6, Metric::Cosine)
         .unwrap();
@@ -457,7 +458,7 @@ async fn vector_run_retention_compacts_old_runs() {
     let removed = before_set.difference(&after_set).count();
     assert!(removed > 0, "old run files should be removed");
     drop(engine);
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     assert!(
         reopened.vector_get("docs", "doc-0").unwrap().is_some(),
         "data must survive retention compaction"
@@ -473,7 +474,7 @@ async fn vector_compaction_triggers_on_tombstones() {
     config.run_retention = 8;
     config.compaction_trigger_tombstone_ratio = 0.01;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -508,7 +509,7 @@ async fn vector_compaction_triggers_on_tombstones() {
         "tombstone ratio trigger should rewrite runs"
     );
 
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     for idx in 0..16usize {
         assert!(
             reopened
@@ -534,7 +535,7 @@ async fn vector_manifest_settings_persisted() {
     config.compaction_trigger_tombstone_ratio = 0.35;
     config.compaction_max_bytes_per_pass = 16 * 1024;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 4, Metric::Cosine)
         .unwrap();
@@ -570,7 +571,7 @@ async fn vector_manifest_settings_persisted() {
 
     let mut config2 = config.clone();
     config2.run_target_bytes = 1024;
-    let engine2 = Engine::new(config2.clone()).unwrap();
+    let engine2 = Engine::new(config2.clone(), CancellationToken::new()).unwrap();
     engine2
         .vector_upsert(
             "docs",
@@ -601,7 +602,7 @@ async fn vector_compaction_budget_multiple_passes() {
     config.compaction_trigger_tombstone_ratio = 0.1;
     config.compaction_max_bytes_per_pass = 600;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -669,7 +670,7 @@ async fn vector_disk_index_manifest_roundtrip() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -727,7 +728,7 @@ async fn vector_disk_index_manifest_roundtrip() {
         .join(graph_path);
     assert!(graph_full.exists(), "disk graph file should exist");
 
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     reopened.vector_drop_disk_index("docs").unwrap();
     let manifest2 = read_manifest_json(&data_dir, "docs");
     assert!(
@@ -746,7 +747,7 @@ async fn vector_diskann_search_roundtrip() {
     let mut config = config_with_dir(&data_dir);
     config.index_kind = "DISKANN".to_string();
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -790,7 +791,7 @@ async fn vector_diskann_search_roundtrip() {
         .expect("build disk index");
     drop(engine);
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     let hits = engine2
         .vector_search(
             "docs",

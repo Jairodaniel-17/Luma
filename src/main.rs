@@ -2,14 +2,16 @@ use luma::config::Config;
 use tracing::info;
 
 mod cli;
-mod server;
 mod diskann;
+mod server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    info!("Starting Luma (powered by RustKissVDB) v{}", env!("CARGO_PKG_VERSION"));
-
+    info!(
+        "Starting Luma (powered by RustKissVDB) v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let command = cli::parse_command()?;
     let config = Config::from_env()?;

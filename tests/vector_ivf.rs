@@ -1,6 +1,7 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::vector::{
+use luma::config::Config;
+use luma::engine::Engine;
+use tokio_util::sync::CancellationToken;
+use luma::vector::{
     IndexKind, Metric, SearchRequest, VectorItem, VectorSettings, VectorStore,
 };
 use serde_json::json;
@@ -58,7 +59,7 @@ async fn ivf_centroids_persist_and_filter() {
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_with_dir(&data_dir);
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 2, Metric::Cosine)
         .unwrap();
@@ -89,7 +90,7 @@ async fn ivf_centroids_persist_and_filter() {
         .join("vectors/docs/centroids.json")
         .exists());
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     let hits_a = engine2
         .vector_search(
             "docs",
@@ -134,7 +135,7 @@ async fn ivf_config_clamps_values() {
     config.ivf_min_train_vectors = 0;
     config.ivf_retrain_min_deltas = 0;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -172,7 +173,7 @@ async fn ivf_retrain_updates_manifest_and_results() {
     config.ivf_clusters = 2;
     config.ivf_nprobe = 1;
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     engine
         .create_vector_collection("docs", 3, Metric::Cosine)
         .unwrap();
@@ -219,7 +220,7 @@ async fn ivf_retrain_updates_manifest_and_results() {
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     let trained_at = manifest["centroids_trained_at_ms"].as_u64().unwrap();
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     for idx in 16..24 {
         engine2
             .vector_upsert(

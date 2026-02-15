@@ -48,6 +48,54 @@ pub struct Config {
     pub compaction_max_bytes_per_pass: u64,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            port: 8080,
+            bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            api_key: "dev".to_string(),
+            data_dir: Some("data".to_string()),
+            snapshot_interval_secs: 30,
+            event_buffer_size: 10_000,
+            live_broadcast_capacity: 4096,
+            wal_segment_max_bytes: 64 * 1024 * 1024,
+            wal_retention_segments: 10,
+            request_timeout_secs: 30,
+            max_body_bytes: 10 * 1024 * 1024,
+            max_key_len: 256,
+            max_collection_len: 64,
+            max_id_len: 128,
+            max_vector_dim: 1536,
+            max_k: 100,
+            max_json_bytes: 1024 * 1024,
+            max_state_batch: 256,
+            max_vector_batch: 256,
+            max_doc_find: 100,
+            cors_allowed_origins: None,
+            sqlite_enabled: true,
+            sqlite_path: None,
+            search_threads: 0,
+            parallel_probe: true,
+            parallel_probe_min_segments: 4,
+            simd_enabled: true,
+            index_kind: "IVF_FLAT_Q8".to_string(),
+            ivf_clusters: 4096,
+            ivf_nprobe: 16,
+            ivf_training_sample: 200_000,
+            ivf_min_train_vectors: 1_024,
+            ivf_retrain_min_deltas: 50_000,
+            q8_refine_topk: 512,
+            diskann_max_degree: 48,
+            diskann_build_threads: 1,
+            diskann_search_list_size: 64,
+            run_target_bytes: 134_217_728,
+            run_retention: 8,
+            compaction_trigger_tombstone_ratio: 0.2,
+            compaction_max_bytes_per_pass: 1_073_741_824,
+        }
+    }
+}
+
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let port = resolve_port();
@@ -280,9 +328,10 @@ fn resolve_data_dir() -> Option<String> {
             }
         }
     }
-    std::env::var("DATA_DIR").ok().or_else(|| Some("./data".to_string()))
+    std::env::var("DATA_DIR")
+        .ok()
+        .or_else(|| Some("./data".to_string()))
 }
-
 
 fn resolve_bind_addr() -> IpAddr {
     use std::net::{IpAddr, Ipv4Addr};
