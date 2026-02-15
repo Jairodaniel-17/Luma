@@ -38,7 +38,7 @@ async fn test_api_vector_flow() {
                 .body(Body::from(
                     json!({
                         "dim": 4,
-                        "metric": "cosine"
+                        "metric": "dot"
                     })
                     .to_string(),
                 ))
@@ -71,6 +71,26 @@ async fn test_api_vector_flow() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
+    // 2.5 Verify Count
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/vector/test_col")
+                .header("Authorization", "Bearer test-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["count"], 1, "Collection count should be 1 after add");
+
     // 3. Search
     let response = app
         .clone()
@@ -99,7 +119,14 @@ async fn test_api_vector_flow() {
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
 
     // Search returns {"hits": [...]}
-    assert_eq!(body["hits"][0]["id"], "vec1");
+    if body.get("hits").is_none() {
+        panic!("Response missing 'hits' field. Body: {}", body);
+    }
+    let hits = body["hits"].as_array().expect("hits should be array");
+    if hits.is_empty() {
+        panic!("Search returned 0 hits. Body: {}", body);
+    }
+    assert_eq!(hits[0]["id"], "vec1");
 }
 
 #[tokio::test]
