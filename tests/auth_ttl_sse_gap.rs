@@ -1,20 +1,21 @@
 use futures_util::StreamExt;
-use rust_kiss_vdb::api;
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::search::engine::SearchEngine;
+use luma::api;
+use luma::config::Config;
+use luma::engine::Engine;
+use tokio_util::sync::CancellationToken;
+use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
-    let engine = Engine::new(config.clone()).unwrap();
-    
-    let temp_dir = tempfile::tempdir().unwrap(); 
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+
+    let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
-    
-    let app = api::router(engine, config, None, search_engine);
+
+    let app = api::router(engine, config, None, search_engine, None);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

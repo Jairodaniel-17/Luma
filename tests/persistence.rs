@@ -1,5 +1,6 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
+use luma::config::Config;
+use luma::engine::Engine;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn snapshot_and_wal_replay_no_loss() {
@@ -50,7 +51,7 @@ async fn snapshot_and_wal_replay_no_loss() {
         compaction_max_bytes_per_pass: 64 * 1024 * 1024,
     };
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
 
     for i in 0..200u32 {
         engine
@@ -68,7 +69,7 @@ async fn snapshot_and_wal_replay_no_loss() {
 
     drop(engine);
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     for i in 0..400u32 {
         let item = engine2.get_state(&format!("k:{i}")).unwrap();
         assert_eq!(item.value["i"], i);
@@ -124,7 +125,7 @@ async fn state_survives_restart_without_wal() {
         compaction_max_bytes_per_pass: 64 * 1024 * 1024,
     };
 
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     for i in 0..2000u32 {
         engine
             .put_state(
@@ -146,7 +147,7 @@ async fn state_survives_restart_without_wal() {
         }
     }
 
-    let engine2 = Engine::new(config).unwrap();
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     for i in 0..2000u32 {
         let item = engine2.get_state(&format!("big:{i}")).unwrap();
         assert_eq!(item.value["i"], i);

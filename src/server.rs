@@ -2,8 +2,8 @@ use luma::config::Config;
 use luma::engine::Engine;
 use luma::search::engine::SearchEngine;
 use luma::sqlite::SqliteService;
-use std::net::SocketAddr;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -22,12 +22,24 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         anyhow::bail!(msg);
     }
 
-    tracing::info!("[config] max_body_mb = {:.4}", config.max_body_bytes as f64 / 1_048_576.0);
-    tracing::info!("[config] max_json_mb = {:.4}", config.max_json_bytes as f64 / 1_048_576.0);
+    tracing::info!(
+        "[config] max_body_mb = {:.4}",
+        config.max_body_bytes as f64 / 1_048_576.0
+    );
+    tracing::info!(
+        "[config] max_json_mb = {:.4}",
+        config.max_json_bytes as f64 / 1_048_576.0
+    );
     tracing::info!("[config] max_vector_dim = {}", config.max_vector_dim);
     tracing::info!("[config] max_k = {}", config.max_k);
-    tracing::info!("[config] request_timeout_secs = {}", config.request_timeout_secs);
-    tracing::info!("[config] wal_retention_segments = {}", config.wal_retention_segments);
+    tracing::info!(
+        "[config] request_timeout_secs = {}",
+        config.request_timeout_secs
+    );
+    tracing::info!(
+        "[config] wal_retention_segments = {}",
+        config.wal_retention_segments
+    );
 
     // ---------------------------------------------------------
 
@@ -56,10 +68,20 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let shutdown_token = CancellationToken::new();
     let engine = Engine::new(config.clone(), shutdown_token.clone())?;
 
-    let data_dir = config.data_dir.clone().map(PathBuf::from).unwrap_or(PathBuf::from("data"));
+    let data_dir = config
+        .data_dir
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or(PathBuf::from("data"));
     let search_engine = Arc::new(SearchEngine::new(data_dir)?);
 
-    let app = luma::api::router(engine.clone(), config.clone(), sqlite, search_engine, auth_store);
+    let app = luma::api::router(
+        engine.clone(),
+        config.clone(),
+        sqlite,
+        search_engine,
+        auth_store,
+    );
     let addr = SocketAddr::new(config.bind_addr, config.port);
 
     tracing::info!(%addr, "listening");
@@ -87,9 +109,12 @@ fn ensure_data_dir(path: &str) -> anyhow::Result<()> {
 }
 
 fn init_sqlite(config: &Config) -> anyhow::Result<SqliteService> {
-    let path = config.sqlite_path.clone()
+    let path = config
+        .sqlite_path
+        .clone()
         .or_else(|| {
-            config.data_dir
+            config
+                .data_dir
                 .as_ref()
                 .map(|d| format!("{d}/sqlite/rustkiss.db"))
         })
@@ -123,7 +148,7 @@ async fn shutdown_signal(token: CancellationToken) {
             tracing::info!("Received terminate signal, shutting down...");
         },
     }
-    
+
     token.cancel();
 
     // Force exit if graceful shutdown takes too long (e.g. open streams)

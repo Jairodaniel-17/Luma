@@ -1,7 +1,8 @@
-use rust_kiss_vdb::api;
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::search::engine::SearchEngine;
+use luma::api;
+use luma::config::Config;
+use luma::engine::Engine;
+use tokio_util::sync::CancellationToken;
+use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,16 +52,16 @@ async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
         compaction_trigger_tombstone_ratio: 0.2,
         compaction_max_bytes_per_pass: 64 * 1024 * 1024,
     };
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     let sqlite = Some(
-        rust_kiss_vdb::sqlite::SqliteService::new(
+        luma::sqlite::SqliteService::new(
             config.data_dir.as_ref().unwrap().to_string() + "/sqlite/rustkiss.db",
         )
         .unwrap(),
     );
     let search_dir = PathBuf::from(&data_dir);
     let search_engine = Arc::new(SearchEngine::new(search_dir).unwrap());
-    let app = api::router(engine, config, sqlite, search_engine);
+    let app = api::router(engine, config, sqlite, search_engine, None);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

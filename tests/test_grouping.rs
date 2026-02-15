@@ -1,5 +1,5 @@
-use rust_kiss_vdb::search::engine::SearchEngine;
-use rust_kiss_vdb::search::types::{Document, DocumentMetadata, SearchRequest};
+use luma::search::engine::SearchEngine;
+use luma::search::types::{Document, DocumentMetadata, SearchRequest};
 use tempfile::tempdir;
 
 fn create_engine(dir: &tempfile::TempDir) -> SearchEngine {
@@ -9,12 +9,21 @@ fn create_engine(dir: &tempfile::TempDir) -> SearchEngine {
 // Helper to inject vector via content so we can control similarity
 // engine.embed checks for "TEST_VEC:v1,v2,..."
 // But we inject the vector directly into the document struct, which is stored in the log.
-// The content is used by engine.embed if we were embedding the document content, 
+// The content is used by engine.embed if we were embedding the document content,
 // but here we provide the vector explicitly in Document struct.
 // The search function embeds the QUERY.
-fn create_doc_with_vec(id: u32, vec: &[f32], group_id: Option<u32>, doc_id: Option<&str>) -> Document {
+fn create_doc_with_vec(
+    id: u32,
+    vec: &[f32],
+    group_id: Option<u32>,
+    doc_id: Option<&str>,
+) -> Document {
     // Content doesn't matter for vector retrieval, but we can set it to TEST_VEC for consistency if we were embedding it
-    let vec_str = vec.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",");
+    let vec_str = vec
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let content = format!("TEST_VEC:{}", vec_str);
     Document {
         id,
@@ -48,7 +57,7 @@ fn test_grouping_basic_collapse() {
     // 3: [0.97, 0.03]
     // 4: [0.96, 0.04]
     // 5: [0.95, 0.05]
-    
+
     for i in 0..5 {
         let val = 0.99 - (i as f32 * 0.01);
         let vec = vec![val, 1.0 - val];
@@ -78,23 +87,23 @@ fn test_grouping_multiple_documents() {
     // Doc A: [0.9, ...] (Score ~0.9)
     // Doc B: [0.8, ...] (Score ~0.8)
     // Doc C: [0.7, ...] (Score ~0.7)
-    
+
     // Doc A
     for i in 0..3 {
         let vec = vec![0.9, 0.1];
-        let doc = create_doc_with_vec(10+i, &vec, None, Some("docA"));
+        let doc = create_doc_with_vec(10 + i, &vec, None, Some("docA"));
         engine.ingest(doc).unwrap();
     }
     // Doc B
     for i in 0..3 {
         let vec = vec![0.8, 0.2];
-        let doc = create_doc_with_vec(20+i, &vec, None, Some("docB"));
+        let doc = create_doc_with_vec(20 + i, &vec, None, Some("docB"));
         engine.ingest(doc).unwrap();
     }
     // Doc C
     for i in 0..3 {
         let vec = vec![0.7, 0.3];
-        let doc = create_doc_with_vec(30+i, &vec, None, Some("docC"));
+        let doc = create_doc_with_vec(30 + i, &vec, None, Some("docC"));
         engine.ingest(doc).unwrap();
     }
 
@@ -108,11 +117,20 @@ fn test_grouping_multiple_documents() {
 
     let res = engine.search(req).unwrap();
     assert_eq!(res.results.len(), 3);
-    
+
     // Check order (should be A, B, C)
-    assert_eq!(res.results[0].document.metadata.document_id.as_deref(), Some("docA"));
-    assert_eq!(res.results[1].document.metadata.document_id.as_deref(), Some("docB"));
-    assert_eq!(res.results[2].document.metadata.document_id.as_deref(), Some("docC"));
+    assert_eq!(
+        res.results[0].document.metadata.document_id.as_deref(),
+        Some("docA")
+    );
+    assert_eq!(
+        res.results[1].document.metadata.document_id.as_deref(),
+        Some("docB")
+    );
+    assert_eq!(
+        res.results[2].document.metadata.document_id.as_deref(),
+        Some("docC")
+    );
 }
 
 #[test]

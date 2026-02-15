@@ -1,8 +1,11 @@
+pub mod adapters;
 mod events;
+pub mod meta;
 mod metrics;
 mod persist;
 mod state;
 mod state_db;
+pub mod traits;
 
 use crate::config::Config;
 use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};

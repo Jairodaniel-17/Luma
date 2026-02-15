@@ -1,6 +1,7 @@
-use rust_kiss_vdb::config::Config;
-use rust_kiss_vdb::engine::Engine;
-use rust_kiss_vdb::vector::{Metric, SearchRequest, VectorItem};
+use luma::config::Config;
+use luma::engine::Engine;
+use tokio_util::sync::CancellationToken;
+use luma::vector::{Metric, SearchRequest, VectorItem};
 
 fn config_for(dir: &str) -> Config {
     Config {
@@ -53,7 +54,7 @@ async fn vector_roundtrip_matrix_dims() {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().to_string_lossy().to_string();
     let config = config_for(&data_dir);
-    let engine = Engine::new(config.clone()).unwrap();
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
 
     let dims = [8usize, 128, 384, 768];
     for &dim in &dims {
@@ -78,7 +79,7 @@ async fn vector_roundtrip_matrix_dims() {
     }
     drop(engine);
 
-    let reopened = Engine::new(config).unwrap();
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     for &dim in &dims {
         let collection = format!("roundtrip_{dim}");
         let hits = reopened

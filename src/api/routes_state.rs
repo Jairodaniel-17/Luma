@@ -6,8 +6,19 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
+    pub uptime_secs: u64,
+}
+
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    state.engine.health()
+    axum::Json(HealthResponse {
+        status: state.engine.health().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: 0,
+    })
 }
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {

@@ -26,29 +26,36 @@ impl AuthStore {
     }
 
     pub async fn init(&self) -> anyhow::Result<()> {
-        self.sqlite.execute(
-            "CREATE TABLE IF NOT EXISTS sys_api_keys (
+        self.sqlite
+            .execute(
+                "CREATE TABLE IF NOT EXISTS sys_api_keys (
                 id TEXT PRIMARY KEY,
                 key_hash TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL,
                 role TEXT NOT NULL,
                 permissions TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
-            )".to_string(),
-            vec![],
-        ).await?;
-        
+            )"
+                .to_string(),
+                vec![],
+            )
+            .await?;
+
         self.bootstrap().await?;
         Ok(())
     }
 
     async fn bootstrap(&self) -> anyhow::Result<()> {
-        let count_res = self.sqlite.query(
-            "SELECT COUNT(*) as count FROM sys_api_keys".to_string(),
-            vec![]
-        ).await?;
-        
-        let count = count_res.first()
+        let count_res = self
+            .sqlite
+            .query(
+                "SELECT COUNT(*) as count FROM sys_api_keys".to_string(),
+                vec![],
+            )
+            .await?;
+
+        let count = count_res
+            .first()
             .and_then(|row| row.get("count"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
@@ -58,19 +65,26 @@ impl AuthStore {
             tracing::warn!("🔑 INITIAL SETUP: Creating Admin API Key...");
             tracing::warn!("🔑 KEY: {}", key);
             tracing::warn!("⚠️  Save this key! It will not be shown again.");
-            
-            self.create_key("Admin", "admin", &key, serde_json::json!({"allow": "*"})).await?;
+
+            self.create_key("Admin", "admin", &key, serde_json::json!({"allow": "*"}))
+                .await?;
         }
         Ok(())
     }
 
-    pub async fn create_key(&self, name: &str, role: &str, plain_key: &str, permissions: serde_json::Value) -> anyhow::Result<String> {
+    pub async fn create_key(
+        &self,
+        name: &str,
+        role: &str,
+        plain_key: &str,
+        permissions: serde_json::Value,
+    ) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
         let hash = self.hash_key(plain_key);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis() as u64;
-        
+
         self.sqlite.execute(
             "INSERT INTO sys_api_keys (id, key_hash, name, role, permissions, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)".to_string(),
             vec![
@@ -82,17 +96,20 @@ impl AuthStore {
                 serde_json::json!(now),
             ]
         ).await?;
-        
+
         Ok(id)
     }
 
     pub async fn validate_key(&self, plain_key: &str) -> anyhow::Result<Option<ApiKeyRecord>> {
         let hash = self.hash_key(plain_key);
-        let rows = self.sqlite.query(
-            "SELECT * FROM sys_api_keys WHERE key_hash = ?".to_string(),
-            vec![serde_json::json!(hash)]
-        ).await?;
-        
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT * FROM sys_api_keys WHERE key_hash = ?".to_string(),
+                vec![serde_json::json!(hash)],
+            )
+            .await?;
+
         if let Some(mut row) = rows.into_iter().next() {
             if let Some(obj) = row.as_object_mut() {
                 if let Some(perm_str) = obj.get("permissions").and_then(|v| v.as_str()) {
@@ -108,11 +125,14 @@ impl AuthStore {
     }
 
     pub async fn list_keys(&self) -> anyhow::Result<Vec<ApiKeyRecord>> {
-        let rows = self.sqlite.query(
-            "SELECT * FROM sys_api_keys ORDER BY created_at_ms DESC".to_string(),
-            vec![]
-        ).await?;
-        
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT * FROM sys_api_keys ORDER BY created_at_ms DESC".to_string(),
+                vec![],
+            )
+            .await?;
+
         let mut keys = Vec::new();
         for mut row in rows {
             if let Some(obj) = row.as_object_mut() {
@@ -133,19 +153,25 @@ impl AuthStore {
     }
 
     pub async fn revoke_key(&self, id: &str) -> anyhow::Result<bool> {
-        let affected = self.sqlite.execute(
-            "DELETE FROM sys_api_keys WHERE id = ?".to_string(),
-            vec![serde_json::json!(id)]
-        ).await?;
+        let affected = self
+            .sqlite
+            .execute(
+                "DELETE FROM sys_api_keys WHERE id = ?".to_string(),
+                vec![serde_json::json!(id)],
+            )
+            .await?;
         Ok(affected > 0)
     }
 
     pub async fn ensure_bootstrap_key(&self, plain_key: &str) -> anyhow::Result<()> {
         let hash = self.hash_key(plain_key);
-        let rows = self.sqlite.query(
-            "SELECT id FROM sys_api_keys WHERE key_hash = ?".to_string(),
-            vec![serde_json::json!(hash)]
-        ).await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT id FROM sys_api_keys WHERE key_hash = ?".to_string(),
+                vec![serde_json::json!(hash)],
+            )
+            .await?;
 
         if rows.is_empty() {
             tracing::info!("🔑 Ensuring bootstrap API Key exists: '{}'", plain_key);
@@ -153,7 +179,7 @@ impl AuthStore {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u64;
-            
+
             // Default permissions for admin
             let permissions = serde_json::json!({"allow": "*"});
 
