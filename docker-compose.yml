@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: luma:latest
-    container_name: rust-kiss-vdb
+    container_name: luma
     ports:
       - "1234:1234"
     volumes:
