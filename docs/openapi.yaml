@@ -1,9 +1,9 @@
 openapi: 3.0.3
 info:
-  title: RustKissVDB API
+  title: Luma API
   version: "0.1.0"
   description: |
-    API documentation for **RustKissVDB**, a lightweight, high-performance vector database optimized for RAG (Retrieval-Augmented Generation).
+    API documentation for **Luma**, a lightweight, high-performance vector database optimized for RAG (Retrieval-Augmented Generation).
 
     ## Features
     - **Vector Operations**: Exact and ANN search.
@@ -45,10 +45,10 @@ components:
       type: object
       required: [error, message]
       properties:
-        error: 
+        error:
           type: string
           example: "invalid_argument"
-        message: 
+        message:
           type: string
           example: "The provided vector dimension does not match the collection."
 
@@ -59,7 +59,7 @@ components:
       properties:
         key: { type: string, example: "config/retention" }
         value: { type: object, example: { "days": 30 } }
-        revision: 
+        revision:
           type: integer
           format: uint64
           description: "Monotonically increasing revision ID. Used for CAS."
@@ -71,12 +71,12 @@ components:
       required: [value]
       properties:
         value: { type: object, example: { "days": 30 } }
-        ttl_ms: 
+        ttl_ms:
           type: integer
           format: uint64
           nullable: true
           description: "Time-to-live in milliseconds"
-        if_revision: 
+        if_revision:
           type: integer
           format: uint64
           nullable: true
@@ -131,7 +131,7 @@ components:
       type: object
       required: [dim, metric]
       properties:
-        dim: 
+        dim:
           type: integer
           minimum: 1
           description: "Dimension of the vectors in this collection"
@@ -193,7 +193,7 @@ components:
           items: { type: number, format: float }
           description: "Floating point vector data"
           example: [0.1, 0.23, -0.5, 0.8]
-        meta: 
+        meta:
           type: object
           description: "Arbitrary JSON metadata"
           example: { "category": "finance", "year": 2024 }
@@ -240,7 +240,7 @@ components:
           items: { type: number, format: float }
           example: [0.1, 0.23, -0.5, 0.8]
         k: { type: integer, minimum: 1, example: 5 }
-        filters: 
+        filters:
           nullable: true
           description: "Exact match metadata filters"
           example: { "category": "finance" }
@@ -328,7 +328,7 @@ components:
     HighLevelSearchFilters:
       type: object
       properties:
-        category: 
+        category:
           type: string
           example: "netsuite"
         language:
@@ -337,10 +337,10 @@ components:
             - type: array
               items: { type: string }
           example: ["en", "es"]
-        status: 
+        status:
           type: string
           example: "active"
-        version_policy: 
+        version_policy:
           type: string
           enum: ["latest", "all"]
           description: "Strategy for handling document versions"
@@ -350,20 +350,20 @@ components:
       type: object
       required: [query]
       properties:
-        query: 
+        query:
           type: string
           description: "Natural language query text"
           example: "oracle approval workflow"
-        top_k: 
+        top_k:
           type: integer
           default: 10
           example: 10
         filters: { $ref: "#/components/schemas/HighLevelSearchFilters" }
-        group_by: 
+        group_by:
           type: string
           description: "Field to group results by (e.g. 'document_id')"
           example: "document_id"
-        group_limit: 
+        group_limit:
           type: integer
           default: 1
           description: "Max results per group"
@@ -463,7 +463,7 @@ paths:
       summary: Legacy SSE alias (Deprecated)
       description: |
         **DEPRECATED**: Use `/v1/stream` instead.
-        
+
         Legacy alias where `prefix` maps to `key_prefix`. Does not support `collection` filter.
       parameters:
         - in: query
