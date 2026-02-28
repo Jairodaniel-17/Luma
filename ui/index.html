@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RustKissVDB Dashboard</title>
+    <title>Luma Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script>
@@ -13,285 +13,371 @@
                 extend: {
                     colors: {
                         gray: {
+                            950: '#0a0a0f',
                             900: '#111827',
                             800: '#1f2937',
                             700: '#374151',
                             600: '#4b5563',
                         },
                         accent: '#8b5cf6', // Violet
+                        secondary: '#3b82f6', // Blue
                     },
                     fontFamily: {
-                        mono: ['Consolas', 'Monaco', 'Courier New', 'monospace'],
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+                    },
+                    animation: {
+                        'gradient-x': 'gradient-x 3s ease infinite',
+                        'fade-in-up': 'fadeInUp 0.4s ease-out forwards',
+                    },
+                    keyframes: {
+                        'gradient-x': {
+                            '0%, 100%': {
+                                'background-size': '200% 200%',
+                                'background-position': 'left center'
+                            },
+                            '50%': {
+                                'background-size': '200% 200%',
+                                'background-position': 'right center'
+                            },
+                        },
+                        fadeInUp: {
+                            '0%': { opacity: '0', transform: 'translateY(10px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' },
+                        }
                     }
                 }
             }
         }
     </script>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
         [x-cloak] { display: none !important; }
-        ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: #1f2937; }
-        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
-        body { background-color: #0f1115; color: #e5e7eb; }
-        .tab-active { border-bottom-color: #8b5cf6; color: white; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+        body { background-color: #050505; color: #e5e7eb; background-image: radial-gradient(circle at top right, rgba(139, 92, 246, 0.05), transparent 40%), radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.05), transparent 40%); background-attachment: fixed; }
+        .glass-panel { background: rgba(17, 24, 39, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.05); }
+        .tab-active { border-bottom-color: #8b5cf6; color: white; background: linear-gradient(to top, rgba(139, 92, 246, 0.1), transparent); }
         .tab-inactive { border-bottom-color: transparent; color: #9ca3af; }
-        .tab-inactive:hover { color: #d1d5db; border-bottom-color: #374151; }
+        .tab-inactive:hover { color: #e5e7eb; border-bottom-color: #4b5563; }
     </style>
 </head>
-<body class="antialiased min-h-screen flex flex-col font-sans" x-data="app()">
+<body class="antialiased min-h-screen flex flex-col" x-data="app()">
 
     <!-- Login Modal -->
-    <div x-show="!apiKey" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-90 backdrop-blur-sm">
-        <div class="bg-gray-800 border border-gray-700 p-8 rounded-xl shadow-2xl max-w-md w-full text-center">
-            <div class="mb-6 flex justify-center">
-                <div class="w-12 h-12 rounded bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center font-bold text-white text-xl shadow-lg shadow-purple-500/20">
-                    RK
+    <div x-show="!apiKey" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
+        <div class="glass-panel p-10 rounded-2xl shadow-2xl max-w-md w-full text-center relative overflow-hidden animate-fade-in-up">
+            <div class="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-accent to-secondary"></div>
+            <div class="mb-8 flex justify-center relative">
+                <div class="absolute inset-0 bg-accent blur-xl opacity-20 rounded-full"></div>
+                <div class="w-16 h-16 rounded-xl bg-gradient-to-br from-accent to-secondary flex items-center justify-center font-bold text-white text-2xl shadow-xl relative z-10">
+                    Luma
                 </div>
             </div>
-            <h2 class="text-2xl font-bold text-white mb-2">RustKissVDB</h2>
-            <p class="text-gray-400 text-sm mb-6">Enter your API Key to access the dashboard.</p>
+            <h2 class="text-3xl font-bold text-white mb-2 tracking-tight">Welcome to Luma</h2>
+            <p class="text-gray-400 text-sm mb-8">Convergent Data Engine Dashboard</p>
             
             <form @submit.prevent="login">
-                <input type="password" x-model="inputKey" placeholder="rk_live_..." class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent mb-4 text-center font-mono">
-                <button type="submit" class="w-full bg-accent hover:bg-accent/80 text-white font-bold py-3 rounded-lg transition-colors">
-                    Connect
+                <div class="relative mb-6">
+                    <svg class="w-5 h-5 text-gray-500 absolute left-4 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                    <input type="password" x-model="inputKey" placeholder="Enter API Key (e.g. rk_live_...)" class="w-full bg-gray-950/50 border border-gray-700 rounded-xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent transition-all font-mono text-sm placeholder-gray-600">
+                </div>
+                <button type="submit" class="w-full bg-gradient-to-r from-accent to-secondary hover:from-accent hover:to-blue-600 text-white font-bold py-4 rounded-xl transition-all shadow-lg hover:shadow-accent/25 hover:-translate-y-0.5 active:translate-y-0">
+                    Connect Instance
                 </button>
             </form>
-            <p class="text-xs text-gray-500 mt-4">If this is your first time, check the server console for the generated Admin Key.</p>
+            <p class="text-xs text-gray-500 mt-6">Check the server console for the root Admin Key on first launch.</p>
         </div>
     </div>
 
     <!-- Header -->
-    <header x-show="apiKey" class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-10">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <div class="w-8 h-8 rounded bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center font-bold text-white shadow-lg shadow-purple-500/20">
-                    RK
+    <header x-show="apiKey" class="glass-panel border-b-0 sticky top-0 z-40 shadow-sm">
+        <div class="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-4">
+                <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-accent to-secondary flex items-center justify-center font-bold text-white shadow-lg shadow-accent/20">
+                    Lu
                 </div>
-                <h1 class="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
-                    RustKissVDB
-                </h1>
-                <span class="px-2 py-0.5 rounded-full bg-gray-800 border border-gray-700 text-xs text-gray-400 font-mono">v0.2.0</span>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight text-white leading-none">Luma Engine</h1>
+                    <div class="text-[10px] text-accent uppercase tracking-widest font-semibold">Dashboard v1.2.0</div>
+                </div>
             </div>
             <div class="flex items-center gap-4">
-                 <div class="flex items-center gap-2 text-sm text-gray-400 font-mono bg-gray-800/50 px-3 py-1.5 rounded border border-gray-700/50">
-                    <div class="w-2 h-2 rounded-full" :class="status === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></div>
-                    <span x-text="status === 'online' ? 'ONLINE' : 'OFFLINE'"></span>
-                    <span x-show="latency" x-text="`(${latency}ms)`" class="text-xs text-gray-500 ml-1"></span>
+                 <div class="flex items-center gap-2 text-xs font-mono bg-gray-900/50 px-3 py-1.5 rounded-full border border-gray-800">
+                    <div class="w-2 h-2 rounded-full shadow-[0_0_8px_rgba(34,197,94,0.8)]" :class="status === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></div>
+                    <span class="text-gray-300" x-text="status === 'online' ? 'ONLINE' : 'OFFLINE'"></span>
+                    <span x-show="latency" x-text="`${latency}ms`" class="text-gray-500 ml-1"></span>
                 </div>
-                <button @click="logout" class="text-xs text-red-400 hover:text-red-300 border border-red-900/50 bg-red-900/10 px-3 py-1.5 rounded transition-colors">
-                    Logout
+                <button @click="logout" class="text-xs text-gray-400 hover:text-white hover:bg-gray-800 px-3 py-1.5 rounded-full transition-colors">
+                    Disconnect
                 </button>
             </div>
         </div>
     </header>
 
     <!-- Main Content -->
-    <main x-show="apiKey" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <main x-show="apiKey" class="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fade-in-up">
         
-        <!-- Tabs -->
-        <div class="border-b border-gray-800">
-            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
-                <button @click="currentTab = 'vectors'" :class="currentTab === 'vectors' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-                    Vectors
+        <!-- Modern Tabs -->
+        <div class="glass-panel rounded-xl overflow-hidden px-2 pt-2">
+            <nav class="flex overflow-x-auto no-scrollbar" aria-label="Tabs">
+                <button @click="currentTab = 'hybrid'" :class="currentTab === 'hybrid' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg">
+                    <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    Hybrid RAG (Level 2)
+                    <span class="ml-1 bg-accent/20 text-accent text-[9px] px-1.5 py-0.5 rounded uppercase font-bold tracking-wider">New</span>
                 </button>
-                <button @click="currentTab = 'state'" :class="currentTab === 'state' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
-                    Key-Value Store
+                <button @click="currentTab = 'vectors'" :class="currentTab === 'vectors' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                    Raw Vectors
                 </button>
-                <button @click="currentTab = 'sql'" :class="currentTab === 'sql' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
-                    SQL (SQLite)
+                <button @click="currentTab = 'sql'" :class="currentTab === 'sql' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
+                    SQLite Console
                 </button>
-                <button @click="currentTab = 'realtime'" :class="currentTab === 'realtime' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                    Realtime Events
+                <button @click="currentTab = 'state'" :class="currentTab === 'state' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path></svg>
+                    Key-Value
                 </button>
-                <button @click="currentTab = 'access'" :class="currentTab === 'access' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
-                    Access Management
+                <button @click="currentTab = 'realtime'" :class="currentTab === 'realtime' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+                    Events
+                </button>
+                <button @click="currentTab = 'access'" :class="currentTab === 'access' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg ml-auto">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                    Access
                 </button>
             </nav>
         </div>
 
-        <!-- TAB: VECTORS -->
-        <div x-show="currentTab === 'vectors'" x-transition.opacity>
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-semibold text-white">Collections</h2>
-                <button @click="fetchVectors()" class="text-xs text-accent hover:text-white transition-colors">Refresh</button>
-            </div>
-            
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <template x-for="col in collections" :key="col.name">
-                    <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-gray-700 transition-all cursor-pointer group flex flex-col justify-between h-full" @click="inspectCollection(col.name)">
-                        <div>
-                            <div class="flex justify-between items-start mb-2">
-                                <h3 class="text-white font-medium truncate" x-text="col.name"></h3>
-                                <span class="bg-gray-800 text-gray-400 text-[10px] px-1.5 py-0.5 rounded border border-gray-700 font-mono" x-text="col.metric"></span>
+        <!-- TAB: HYBRID RAG (LEVEL 2) -->
+        <div x-show="currentTab === 'hybrid'" x-transition.opacity.duration.300ms>
+            <div class="grid grid-cols-1 xl:grid-cols-3 gap-8">
+                
+                <!-- Query Control Panel -->
+                <div class="xl:col-span-1 space-y-6">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl relative overflow-hidden">
+                        <div class="absolute top-0 right-0 w-32 h-32 bg-accent opacity-5 rounded-full blur-3xl"></div>
+                        <h3 class="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                            <svg class="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                            Semantic Search
+                        </h3>
+                        
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1.5 uppercase tracking-wide font-semibold">Namespace</label>
+                                <input type="text" x-model="ragNamespace" class="w-full bg-gray-950/50 border border-gray-800 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent transition-all text-sm font-mono" placeholder="e.g. documents">
                             </div>
-                            <div class="flex items-end justify-between mb-4">
-                                <div>
-                                    <div class="text-2xl font-bold text-white" x-text="col.live_count || 0"></div>
-                                    <div class="text-xs text-gray-500">Vectors</div>
+                            
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1.5 uppercase tracking-wide font-semibold">Natural Language Query</label>
+                                <textarea x-model="ragQuery" rows="3" class="w-full bg-gray-950/50 border border-gray-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent transition-all text-sm resize-none" placeholder="What are the main causes of climate change?"></textarea>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1.5 uppercase tracking-wide font-semibold flex items-center justify-between">
+                                    <span>SQL Pre-Filter (Optional)</span>
+                                    <span class="text-[9px] bg-secondary/20 text-secondary px-1.5 py-0.5 rounded">SQLite</span>
+                                </label>
+                                <input type="text" x-model="ragSqlFilter" class="w-full bg-gray-950/50 border border-gray-800 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-secondary focus:ring-1 focus:ring-secondary transition-all text-sm font-mono" placeholder="json_extract(metadata, '$.year') > 2022">
+                            </div>
+
+                            <div class="flex gap-4">
+                                <div class="w-1/3">
+                                    <label class="block text-xs text-gray-400 mb-1.5 uppercase tracking-wide font-semibold">Limit</label>
+                                    <input type="number" x-model="ragLimit" min="1" max="100" class="w-full bg-gray-950/50 border border-gray-800 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent transition-all text-sm font-mono">
                                 </div>
-                                <div class="text-right">
-                                    <div class="text-sm font-mono text-gray-400" x-text="`${col.dim}d`"></div>
-                                    <div class="text-xs text-gray-500">Dimension</div>
+                                <div class="flex-1 flex items-end">
+                                    <button @click="runRagSearch()" class="w-full bg-gradient-to-r from-accent to-secondary hover:from-accent hover:to-blue-600 text-white font-bold py-2.5 rounded-lg transition-all shadow-lg hover:shadow-accent/25 flex items-center justify-center gap-2 group h-[42px]" :disabled="ragLoading">
+                                        <svg x-show="ragLoading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                        <span x-text="ragLoading ? 'Searching...' : 'Search'"></span>
+                                        <svg x-show="!ragLoading" class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+                                    </button>
                                 </div>
                             </div>
                         </div>
-                        <div class="border-t border-gray-800 pt-3 flex flex-col gap-1">
-                            <div class="flex justify-between text-[10px] text-gray-500">
-                                <span>Created</span>
-                                <span x-text="col.created_at_ms ? formatDate(col.created_at_ms) : '-'"></span>
+                    </div>
+
+                    <!-- Info Box -->
+                    <div class="glass-panel rounded-xl p-5 border-l-4 border-l-secondary text-sm">
+                        <h4 class="text-secondary font-bold mb-2 flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            LumaDatabase Architecture
+                        </h4>
+                        <p class="text-gray-400 mb-2 leading-relaxed">
+                            This endpoint uses the <span class="text-gray-200">Level 2 Orchestrator</span>. It automatically:
+                        </p>
+                        <ul class="text-gray-500 space-y-1 list-disc pl-4 marker:text-gray-700">
+                            <li>Applies <strong class="text-gray-300">SQLite Hard-Filtering</strong> before vector search.</li>
+                            <li>Embeds your query via configured LLM provider.</li>
+                            <li>Searches DiskANN/HNSW indices.</li>
+                            <li>Groups matching chunks back into their parent document.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Results Area -->
+                <div class="xl:col-span-2 relative min-h-[600px]">
+                    
+                    <!-- Empty State -->
+                    <div x-show="ragResults === null && !ragLoading" class="absolute inset-0 flex flex-col items-center justify-center text-gray-500 glass-panel rounded-2xl border-dashed border-gray-700">
+                        <div class="w-16 h-16 rounded-full bg-gray-800/50 flex items-center justify-center mb-4 text-gray-600">
+                            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        </div>
+                        <p class="text-lg font-medium text-gray-400">Ready to search</p>
+                        <p class="text-sm mt-1">Enter a query to test the Hybrid RAG engine.</p>
+                    </div>
+
+                    <!-- Results List -->
+                    <div x-show="ragResults !== null && !ragLoading" class="space-y-4 animate-fade-in-up">
+                        <div class="flex justify-between items-end mb-6 pl-2">
+                            <h3 class="text-lg font-bold text-white">Results</h3>
+                            <span class="text-xs text-gray-500 bg-gray-900 px-2 py-1 rounded-full border border-gray-800" x-text="`Found ${ragResults.length} documents`"></span>
+                        </div>
+
+                        <div x-show="ragResults.length === 0" class="text-center py-12 glass-panel rounded-2xl text-gray-400">
+                            No documents matched your search and filter criteria.
+                        </div>
+
+                        <template x-for="(res, index) in ragResults" :key="res.id || index">
+                            <div class="glass-panel rounded-2xl p-6 hover:border-gray-600 transition-colors group">
+                                <div class="flex justify-between items-start mb-4">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-8 h-8 rounded bg-gray-800 text-gray-400 flex items-center justify-center text-sm font-bold border border-gray-700">
+                                            <span x-text="index + 1"></span>
+                                        </div>
+                                        <div>
+                                            <h4 class="text-base font-bold text-white font-mono break-all" x-text="res.id"></h4>
+                                        </div>
+                                    </div>
+                                    <div class="flex flex-col items-end">
+                                        <span class="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1">Relevance Score</span>
+                                        <div class="flex items-center gap-2">
+                                            <div class="w-24 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                                <div class="h-full bg-accent" :style="`width: ${Math.min(res.score * 100, 100)}%`"></div>
+                                            </div>
+                                            <span class="text-accent font-mono text-sm font-bold" x-text="res.score ? res.score.toFixed(4) : 'N/A'"></span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Snippets -->
+                                <div class="mb-4 space-y-2">
+                                    <div class="text-xs text-gray-500 uppercase tracking-wider font-semibold">Matched Snippets</div>
+                                    <template x-for="snippet in res.snippets || []" :key="snippet">
+                                        <div class="text-sm text-gray-300 bg-gray-950/50 p-3 rounded-lg border-l-2 border-accent font-serif italic" x-text="`...${snippet.substring(0, 200)}...`"></div>
+                                    </template>
+                                </div>
+
+                                <!-- Raw JSON Data -->
+                                <div x-data="{ expanded: false }" class="mt-4 border-t border-gray-800/50 pt-4">
+                                    <button @click="expanded = !expanded" class="text-xs text-gray-400 hover:text-white flex items-center gap-1 transition-colors">
+                                        <svg class="w-4 h-4 transition-transform duration-200" :class="expanded ? 'rotate-90' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                                        <span x-text="expanded ? 'Hide Source Document' : 'View Source Document (KV Store)'"></span>
+                                    </button>
+                                    <div x-show="expanded" x-collapse>
+                                        <pre class="mt-3 p-4 rounded-lg bg-black text-xs text-green-400 font-mono overflow-x-auto border border-gray-800 shadow-inner" x-text="JSON.stringify(res.document, null, 2)"></pre>
+                                    </div>
+                                </div>
                             </div>
-                             <div class="flex justify-between text-[10px] text-gray-500">
-                                <span>Updated</span>
-                                <span x-text="col.updated_at_ms ? formatDate(col.updated_at_ms) : '-'"></span>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: VECTORS -->
+        <div x-show="currentTab === 'vectors'" x-transition.opacity.duration.300ms>
+            <div class="flex justify-between items-center mb-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white">Vector Collections</h2>
+                    <p class="text-sm text-gray-500 mt-1">Raw DiskANN / IVF indices underlying the engine.</p>
+                </div>
+                <button @click="fetchVectors()" class="text-xs bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1 border border-gray-700">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    Refresh
+                </button>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <template x-for="col in collections" :key="col.name">
+                    <div class="glass-panel rounded-xl p-6 hover:border-gray-600 transition-all cursor-pointer group flex flex-col justify-between h-full relative overflow-hidden" @click="inspectCollection(col.name)">
+                        <div class="absolute -right-6 -top-6 w-24 h-24 bg-gray-800 rounded-full opacity-50 group-hover:bg-accent/20 transition-colors"></div>
+                        <div class="relative z-10">
+                            <div class="flex justify-between items-start mb-4">
+                                <h3 class="text-lg font-bold text-white truncate" x-text="col.name"></h3>
+                                <span class="bg-gray-800 text-accent text-[10px] px-2 py-1 rounded border border-gray-700 font-mono uppercase tracking-wider font-semibold" x-text="col.metric"></span>
+                            </div>
+                            <div class="flex items-end justify-between mb-6 bg-gray-950/50 p-4 rounded-lg border border-gray-800/50">
+                                <div>
+                                    <div class="text-3xl font-bold text-white font-mono" x-text="col.live_count || 0"></div>
+                                    <div class="text-xs text-gray-500 uppercase tracking-widest mt-1">Vectors</div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-lg font-mono text-gray-300" x-text="`${col.dim}d`"></div>
+                                    <div class="text-xs text-gray-500 uppercase tracking-widest mt-1">Dimension</div>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </template>
                 
-                <!-- Empty State -->
-                <div x-show="collections.length === 0" class="col-span-full py-12 text-center text-gray-500 border border-dashed border-gray-800 rounded-lg">
-                    No collections found. Create one via API or SDK.
+                <div x-show="collections.length === 0" class="col-span-full py-16 text-center text-gray-500 glass-panel rounded-xl border-dashed border-gray-700">
+                    <svg class="w-12 h-12 mx-auto text-gray-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
+                    No vector collections found.
                 </div>
             </div>
 
-            <!-- Inspector Modal -->
-            <div x-show="selectedCollection" x-cloak class="fixed inset-0 z-50 overflow-y-auto">
-                <div class="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
-                    <div class="fixed inset-0 transition-opacity bg-gray-900 bg-opacity-75" @click="selectedCollection = null"></div>
-                    <div class="inline-block w-full max-w-5xl p-6 my-8 overflow-hidden text-left align-middle transition-all transform bg-gray-900 border border-gray-700 rounded-lg shadow-xl">
-                        <div class="flex justify-between items-center mb-4">
-                            <h3 class="text-lg font-medium text-white">Collection: <span class="text-accent font-mono" x-text="selectedCollection"></span></h3>
-                            <button @click="selectedCollection = null" class="text-gray-400 hover:text-white">✕</button>
-                        </div>
-                        
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                            <!-- Tools -->
-                            <div class="bg-gray-800/50 p-4 rounded border border-gray-700">
-                                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Search / Peek</h4>
-                                <div class="flex gap-2">
-                                     <input type="text" x-model="searchId" placeholder="Lookup by ID..." class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-accent font-mono">
-                                     <button @click="lookupId()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm transition-colors">Get</button>
-                                </div>
-                                <div class="mt-2">
-                                     <button @click="runInspectorSearch()" class="w-full bg-accent/20 hover:bg-accent/30 text-accent border border-accent/50 px-4 py-2 rounded text-sm font-medium transition-colors">
-                                        🎲 Peek Random Vectors
-                                    </button>
-                                </div>
-                            </div>
-                            <!-- Metadata Info -->
-                             <div class="bg-gray-800/50 p-4 rounded border border-gray-700 text-xs text-gray-400 space-y-1">
-                                <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Details</h4>
-                                <div class="flex justify-between"><span>Created:</span> <span class="text-white" x-text="collections.find(c=>c.name===selectedCollection)?.created_at_ms ? formatDate(collections.find(c=>c.name===selectedCollection).created_at_ms) : '-'"></span></div>
-                                <div class="flex justify-between"><span>Updated:</span> <span class="text-white" x-text="collections.find(c=>c.name===selectedCollection)?.updated_at_ms ? formatDate(collections.find(c=>c.name===selectedCollection).updated_at_ms) : '-'"></span></div>
-                            </div>
-                        </div>
-
-                        <!-- Data Preview -->
-                        <h4 class="text-sm font-medium text-gray-400 mb-2 uppercase tracking-wider">Sample Data (Last 10)</h4>
-                        
-                        <div x-show="collectionLoading" class="flex justify-center py-8">
-                           <svg class="animate-spin h-8 w-8 text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                        </div>
-
-                        <div x-show="!collectionLoading && collectionItems.length === 0" class="text-center py-8 text-gray-500 border border-dashed border-gray-700 rounded">
-                            No items found in this collection.
-                        </div>
-
-                        <div x-show="!collectionLoading && collectionItems.length > 0" class="space-y-3">
-                            <template x-for="item in collectionItems" :key="item.id">
-                                <div class="bg-gray-800 rounded border border-gray-700 overflow-hidden text-sm" x-data="{ expanded: false }">
-                                    <div class="px-4 py-3 bg-gray-800 border-b border-gray-700 flex justify-between items-start cursor-pointer hover:bg-gray-700 transition-colors" @click="expanded = !expanded">
-                                        <div class="flex-1 min-w-0 pr-4">
-                                            <div class="flex items-center gap-2 mb-1">
-                                                 <span class="font-mono text-accent font-bold" x-text="item.id"></span>
-                                                 <span class="text-[10px] bg-gray-700 px-1.5 rounded text-gray-400" x-show="item.score" x-text="`Score: ${item.score.toFixed(4)}`"></span>
-                                            </div>
-                                            <!-- Smart Content Preview -->
-                                            <div class="text-gray-300 line-clamp-2 font-serif text-sm opacity-90" 
-                                                 x-text="getPreviewText(item.meta)"></div>
-                                        </div>
-                                        <div class="text-gray-500 pt-1">
-                                            <svg class="w-5 h-5 transition-transform" :class="expanded ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
-                                        </div>
-                                    </div>
-                                    
-                                    <div x-show="expanded" x-collapse class="bg-gray-900/50 p-4 space-y-4 border-t border-gray-700">
-                                        
-                                        <!-- Full Text Content -->
-                                        <div x-show="hasTextContent(item.meta)">
-                                            <div class="text-xs text-gray-500 mb-1 uppercase font-semibold">Content</div>
-                                            <div class="bg-gray-950 p-3 rounded border border-gray-800 text-gray-300 font-serif whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto" x-text="getTextContent(item.meta)"></div>
-                                        </div>
-
-                                        <!-- Metadata JSON -->
-                                        <div>
-                                            <div class="text-xs text-gray-500 mb-1 uppercase font-semibold">Metadata</div>
-                                            <pre class="bg-gray-950 p-3 rounded border border-gray-800 text-xs text-green-400 overflow-x-auto font-mono" x-text="JSON.stringify(getMetaWithoutText(item.meta), null, 2)"></pre>
-                                        </div>
-                                    </div>
-                                </div>
-                            </template>
-                        </div>
-                        
-                        <div class="mt-4 flex justify-end">
-                             <button @click="deleteCollection(selectedCollection)" type="button" class="text-red-400 hover:text-red-300 text-sm underline">
-                                Delete Collection
-                            </button>
-                        </div>
+            <!-- Inspector Modal (Simplified for length) -->
+            <div x-show="selectedCollection" x-cloak class="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4">
+                <div class="fixed inset-0 transition-opacity bg-black/80 backdrop-blur-sm" @click="selectedCollection = null"></div>
+                <div class="glass-panel w-full max-w-4xl p-8 rounded-2xl shadow-2xl relative z-10">
+                    <div class="flex justify-between items-center mb-6">
+                        <h3 class="text-xl font-bold text-white">Inspecting <span class="text-accent font-mono" x-text="selectedCollection"></span></h3>
+                        <button @click="selectedCollection = null" class="text-gray-400 hover:text-white bg-gray-800 rounded-full p-2">✕</button>
+                    </div>
+                    <div class="text-center py-10">
+                         <p class="text-gray-400 mb-4">Raw collection inspection is limited in this view. Use the Hybrid RAG tab for semantic search.</p>
+                         <button @click="runInspectorSearch()" class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded border border-gray-700">Peek Random Raw Vectors</button>
+                    </div>
+                    <div x-show="inspectionHits.length > 0" class="mt-4 bg-black p-4 rounded-lg overflow-auto max-h-64 border border-gray-800">
+                        <pre class="text-xs text-gray-300 font-mono" x-text="JSON.stringify(inspectionHits, null, 2)"></pre>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- TAB: STATE -->
-        <div x-show="currentTab === 'state'" x-transition.opacity>
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-semibold text-white">Key-Value Store</h2>
-                <button @click="fetchState()" class="text-xs text-accent hover:text-white transition-colors">Refresh</button>
+        <!-- TAB: STATE / KV -->
+        <div x-show="currentTab === 'state'" x-transition.opacity.duration.300ms>
+            <div class="flex justify-between items-center mb-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white">State Store (ACID)</h2>
+                    <p class="text-sm text-gray-500 mt-1">High-speed Key-Value storage powered by redb.</p>
+                </div>
+                <button @click="fetchState()" class="text-xs bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1 border border-gray-700">Refresh</button>
             </div>
-             <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+             <div class="glass-panel rounded-xl overflow-hidden shadow-lg border border-gray-800">
                 <table class="w-full text-left text-sm">
-                    <thead class="bg-gray-800/50 text-gray-400 uppercase font-mono text-xs">
+                    <thead class="bg-gray-900/80 text-gray-400 uppercase font-mono text-xs border-b border-gray-800">
                         <tr>
-                            <th class="px-6 py-3 font-medium w-1/3">Key</th>
-                            <th class="px-6 py-3 font-medium w-24">Rev</th>
-                            <th class="px-6 py-3 font-medium">Value</th>
+                            <th class="px-6 py-4 font-semibold w-1/3">Key</th>
+                            <th class="px-6 py-4 font-semibold w-24">Rev</th>
+                            <th class="px-6 py-4 font-semibold">Value</th>
                         </tr>
                     </thead>
-                    <tbody class="divide-y divide-gray-800">
+                    <tbody class="divide-y divide-gray-800/50">
                         <template x-for="item in stateItems" :key="item.key">
-                            <tr class="hover:bg-gray-800/30 group">
-                                <td class="px-6 py-4 font-mono text-accent align-top" x-text="item.key"></td>
+                            <tr class="hover:bg-gray-800/30 transition-colors">
+                                <td class="px-6 py-4 font-mono text-accent align-top truncate max-w-[200px]" x-text="item.key"></td>
                                 <td class="px-6 py-4 font-mono text-gray-500 align-top" x-text="item.revision"></td>
-                                <td class="px-6 py-4 align-top" x-data="{ expanded: false }">
-                                    <div class="relative">
-                                        <pre class="font-mono text-xs text-gray-300 overflow-hidden transition-all duration-300" 
-                                             :class="expanded ? 'max-h-none' : 'max-h-20'"
-                                             @click="expanded = !expanded"
-                                             x-text="JSON.stringify(item.value, null, 2)"></pre>
-                                        
-                                        <!-- Gradient Fade for collapsed state -->
-                                        <div x-show="!expanded" class="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-gray-900/100 to-transparent pointer-events-none"></div>
-                                        
-                                        <button @click="expanded = !expanded" class="text-[10px] text-gray-500 hover:text-white mt-1 uppercase tracking-wider font-semibold">
-                                            <span x-text="expanded ? 'Collapse' : 'Expand'"></span>
-                                        </button>
-                                    </div>
+                                <td class="px-6 py-4 align-top">
+                                    <pre class="font-mono text-[11px] text-gray-300 bg-black/50 p-2 rounded max-h-24 overflow-y-auto" x-text="JSON.stringify(item.value, null, 2)"></pre>
                                 </td>
                             </tr>
                         </template>
                         <tr x-show="stateItems.length === 0">
-                            <td colspan="3" class="px-6 py-12 text-center text-gray-500">No keys found.</td>
+                            <td colspan="3" class="px-6 py-12 text-center text-gray-500">No keys found in State Store.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -299,173 +385,198 @@
         </div>
 
         <!-- TAB: SQL -->
-        <div x-show="currentTab === 'sql'" x-transition.opacity>
-             <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-semibold text-white">SQL Console (SQLite)</h2>
-                 <span class="text-xs text-yellow-500" x-show="!sqlEnabled">⚠ SQLite module might be disabled</span>
-            </div>
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <textarea x-model="sqlQuery" class="w-full bg-gray-950 text-gray-200 font-mono text-sm p-3 rounded border border-gray-700 focus:border-accent focus:outline-none mb-3" rows="4" placeholder="SELECT * FROM ..."></textarea>
-                <div class="flex justify-end gap-2">
-                     <button @click="sqlQuery = 'SELECT name FROM sqlite_master WHERE type=\'table\';'" class="text-xs text-gray-400 hover:text-white px-3 py-2">List Tables</button>
-                    <button @click="runSql()" class="bg-accent hover:bg-accent/80 text-white px-4 py-2 rounded text-sm font-medium transition-colors flex items-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        Execute
-                    </button>
+        <div x-show="currentTab === 'sql'" x-transition.opacity.duration.300ms>
+             <div class="flex justify-between items-center mb-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white">SQLite Console</h2>
+                    <p class="text-sm text-gray-500 mt-1">Direct access to the embedded relational engine.</p>
                 </div>
             </div>
+            
+            <div class="grid grid-cols-1 gap-6">
+                <div class="glass-panel rounded-xl p-4 border border-gray-800">
+                    <textarea x-model="sqlQuery" class="w-full bg-gray-950 text-green-400 font-mono text-sm p-4 rounded-lg border border-gray-800 focus:border-secondary focus:outline-none mb-4 shadow-inner resize-y min-h-[120px]" spellcheck="false" placeholder="SELECT * FROM ..."></textarea>
+                    <div class="flex justify-between items-center">
+                        <button @click="sqlQuery = 'SELECT name FROM sqlite_master WHERE type=\'table\';'" class="text-xs text-gray-400 hover:text-white transition-colors underline decoration-gray-600 underline-offset-4">List Tables</button>
+                        <button @click="runSql()" class="bg-secondary hover:bg-blue-600 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-secondary/25 flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            Execute Query
+                        </button>
+                    </div>
+                </div>
 
-            <div x-show="sqlResult" class="mt-6">
-                <div class="text-xs text-gray-500 mb-2 uppercase font-semibold">Result</div>
-                <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-x-auto">
-                    <!-- If result is array of objects -->
-                    <template x-if="Array.isArray(sqlResult) && sqlResult.length > 0">
-                        <table class="w-full text-left text-sm whitespace-nowrap">
-                            <thead class="bg-gray-800 text-gray-400 font-mono text-xs">
-                                <tr>
-                                    <template x-for="key in Object.keys(sqlResult[0])" :key="key">
-                                        <th class="px-4 py-2" x-text="key"></th>
-                                    </template>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-gray-800">
-                                <template x-for="(row, idx) in sqlResult" :key="idx">
-                                    <tr class="hover:bg-gray-800/30">
-                                        <template x-for="key in Object.keys(row)" :key="key">
-                                            <td class="px-4 py-2 font-mono text-gray-300" x-text="row[key]"></td>
+                <div x-show="sqlResult" class="glass-panel rounded-xl overflow-hidden border border-gray-800 animate-fade-in-up">
+                    <div class="bg-gray-900/80 px-4 py-2 border-b border-gray-800 text-xs text-gray-400 uppercase tracking-wider font-semibold">
+                        Query Result
+                    </div>
+                    <div class="overflow-x-auto">
+                        <template x-if="Array.isArray(sqlResult) && sqlResult.length > 0">
+                            <table class="w-full text-left text-sm whitespace-nowrap">
+                                <thead class="bg-gray-900 text-gray-400 font-mono text-[10px] border-b border-gray-800">
+                                    <tr>
+                                        <template x-for="key in Object.keys(sqlResult[0])" :key="key">
+                                            <th class="px-4 py-3 uppercase" x-text="key"></th>
                                         </template>
                                     </tr>
-                                </template>
-                            </tbody>
-                        </table>
-                    </template>
-                    <!-- If empty array -->
-                    <div x-show="Array.isArray(sqlResult) && sqlResult.length === 0" class="p-4 text-gray-500 text-sm">Query returned no rows.</div>
-                    <!-- If error or other object -->
-                    <template x-if="!Array.isArray(sqlResult)">
-                         <pre class="p-4 text-xs text-red-400 font-mono whitespace-pre-wrap" x-text="typeof sqlResult === 'string' ? sqlResult : JSON.stringify(sqlResult, null, 2)"></pre>
-                    </template>
+                                </thead>
+                                <tbody class="divide-y divide-gray-800/50">
+                                    <template x-for="(row, idx) in sqlResult" :key="idx">
+                                        <tr class="hover:bg-gray-800/50">
+                                            <template x-for="key in Object.keys(row)" :key="key">
+                                                <td class="px-4 py-2.5 font-mono text-gray-300 text-xs" x-text="row[key]"></td>
+                                            </template>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </template>
+                        <div x-show="Array.isArray(sqlResult) && sqlResult.length === 0" class="p-6 text-center text-gray-500 text-sm">Query returned no rows.</div>
+                        <template x-if="!Array.isArray(sqlResult)">
+                             <pre class="p-6 text-xs text-red-400 font-mono whitespace-pre-wrap bg-black/50" x-text="typeof sqlResult === 'string' ? sqlResult : JSON.stringify(sqlResult, null, 2)"></pre>
+                        </template>
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- TAB: REALTIME -->
-        <div x-show="currentTab === 'realtime'" x-transition.opacity>
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-semibold text-white">Live Events</h2>
-                <div class="flex items-center gap-2">
-                     <span class="w-2 h-2 rounded-full" :class="sseConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></span>
-                     <span class="text-xs text-gray-400" x-text="sseConnected ? 'Connected' : 'Disconnected'"></span>
+        <div x-show="currentTab === 'realtime'" x-transition.opacity.duration.300ms>
+            <div class="flex justify-between items-center mb-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white">Event Stream (SSE)</h2>
+                    <p class="text-sm text-gray-500 mt-1">Live core changes and triggers.</p>
+                </div>
+                <div class="glass-panel px-3 py-1.5 rounded-full flex items-center gap-2 border border-gray-800">
+                     <span class="w-2 h-2 rounded-full shadow-lg" :class="sseConnected ? 'bg-green-500 shadow-green-500/50 animate-pulse' : 'bg-red-500 shadow-red-500/50'"></span>
+                     <span class="text-xs text-gray-300 font-mono uppercase tracking-wider" x-text="sseConnected ? 'Connected' : 'Disconnected'"></span>
                 </div>
             </div>
-            <div class="bg-gray-950 border border-gray-800 rounded-lg p-4 h-[600px] overflow-y-auto font-mono text-xs shadow-inner" id="logs-container">
-                <template x-for="(log, idx) in realtimeLogs" :key="idx">
-                    <div class="mb-2 border-l-2 border-gray-800 pl-3 py-1 hover:border-accent transition-colors bg-gray-900/30 rounded-r">
-                        <div class="flex items-center gap-2 mb-1">
-                            <span class="text-gray-500" x-text="log.time"></span>
-                            <span class="text-accent font-bold" x-text="log.type"></span>
-                            <span class="text-gray-600">ID: <span x-text="log.id"></span></span>
+            
+            <div class="glass-panel border border-gray-800 rounded-xl p-1 relative h-[600px] flex flex-col">
+                <!-- Mac-like header for console -->
+                <div class="bg-gray-900/50 h-8 rounded-t-lg border-b border-gray-800 flex items-center px-4 gap-2">
+                    <div class="w-3 h-3 rounded-full bg-red-500/20 border border-red-500/50"></div>
+                    <div class="w-3 h-3 rounded-full bg-yellow-500/20 border border-yellow-500/50"></div>
+                    <div class="w-3 h-3 rounded-full bg-green-500/20 border border-green-500/50"></div>
+                    <div class="ml-4 text-[10px] text-gray-500 font-mono tracking-widest uppercase">luma-event-bus</div>
+                </div>
+                <div class="flex-1 bg-[#0a0a0a] p-4 overflow-y-auto font-mono text-[11px] rounded-b-lg scroll-smooth" id="logs-container">
+                    <template x-for="(log, idx) in realtimeLogs" :key="idx">
+                        <div class="mb-3 hover:bg-white/[0.02] p-1 rounded transition-colors group">
+                            <div class="flex items-center gap-3 mb-1 opacity-70 group-hover:opacity-100">
+                                <span class="text-gray-500" x-text="log.time"></span>
+                                <span class="text-accent font-bold bg-accent/10 px-1 rounded" x-text="log.type"></span>
+                                <span class="text-gray-500">ID: <span class="text-gray-400" x-text="log.id"></span></span>
+                            </div>
+                            <pre class="text-gray-300 whitespace-pre-wrap pl-16 opacity-90 group-hover:opacity-100" x-text="log.dataFormatted"></pre>
                         </div>
-                        <pre class="text-gray-300 whitespace-pre-wrap overflow-x-auto" x-text="log.dataFormatted"></pre>
-                    </div>
-                </template>
-                <div x-show="realtimeLogs.length === 0" class="text-gray-600 italic">Waiting for events...</div>
+                    </template>
+                    <div x-show="realtimeLogs.length === 0" class="text-gray-600 italic mt-4 text-center">Awaiting global events...</div>
+                </div>
             </div>
         </div>
 
         <!-- TAB: ACCESS -->
-        <div x-show="currentTab === 'access'" x-transition.opacity>
-            <div class="flex justify-between items-center mb-6">
-                <h2 class="text-lg font-semibold text-white">Access Management</h2>
-                <button @click="fetchKeys()" class="text-xs text-accent hover:text-white transition-colors">Refresh</button>
-            </div>
-
-            <!-- Create Key Form -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-8">
-                <h3 class="text-sm font-semibold text-white mb-4 uppercase tracking-wider">Create New API Key</h3>
-                <div class="flex gap-4 items-end">
-                    <div class="flex-1">
-                        <label class="block text-xs text-gray-500 mb-1">Name / Description</label>
-                        <input type="text" x-model="newKeyName" class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-accent focus:outline-none" placeholder="e.g. Mobile App, Client X">
-                    </div>
-                    <div class="w-32">
-                        <label class="block text-xs text-gray-500 mb-1">Role</label>
-                        <select x-model="newKeyRole" class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-accent focus:outline-none">
-                            <option value="user">User</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                    </div>
-                    <button @click="createKey()" class="bg-accent hover:bg-accent/80 text-white px-4 py-2 rounded text-sm font-bold transition-colors h-[38px]">
-                        Create Key
-                    </button>
+        <div x-show="currentTab === 'access'" x-transition.opacity.duration.300ms>
+            <div class="max-w-3xl mx-auto">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold text-white">API Keys</h2>
+                    <button @click="fetchKeys()" class="text-xs bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded transition-colors border border-gray-700">Refresh</button>
                 </div>
-            </div>
 
-            <!-- New Key Modal -->
-            <div x-show="createdKey" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-90 backdrop-blur-sm">
-                <div class="bg-gray-800 border border-green-500/50 p-8 rounded-xl shadow-2xl max-w-lg w-full text-center">
-                    <div class="text-green-500 text-4xl mb-4">✨</div>
-                    <h3 class="text-xl font-bold text-white mb-2">API Key Created</h3>
-                    <p class="text-gray-400 text-sm mb-6">Please copy this key now. You won't be able to see it again.</p>
-                    
-                    <div class="bg-black/50 p-4 rounded border border-gray-700 font-mono text-green-400 text-lg break-all select-all mb-6">
-                        <span x-text="createdKey"></span>
+                <div class="glass-panel border border-gray-800 rounded-xl p-6 mb-8">
+                    <div class="flex gap-4 items-end">
+                        <div class="flex-1">
+                            <label class="block text-xs text-gray-400 mb-2 uppercase tracking-wider font-semibold">Key Identifier</label>
+                            <input type="text" x-model="newKeyName" class="w-full bg-gray-950/50 border border-gray-800 rounded-lg px-4 py-2.5 text-white focus:border-accent focus:outline-none text-sm" placeholder="e.g. Production Backend">
+                        </div>
+                        <div class="w-40">
+                            <label class="block text-xs text-gray-400 mb-2 uppercase tracking-wider font-semibold">Role</label>
+                            <select x-model="newKeyRole" class="w-full bg-gray-950/50 border border-gray-800 rounded-lg px-4 py-2.5 text-white focus:border-accent focus:outline-none text-sm appearance-none">
+                                <option value="user">User (Read/Write)</option>
+                                <option value="admin">Admin (All)</option>
+                            </select>
+                        </div>
+                        <button @click="createKey()" class="bg-white text-black hover:bg-gray-200 px-6 py-2.5 rounded-lg text-sm font-bold transition-colors h-[42px]">
+                            Generate
+                        </button>
                     </div>
-                    
-                    <button @click="createdKey = null" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded-lg transition-colors">
-                        Done
-                    </button>
                 </div>
-            </div>
 
-            <!-- Keys List -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-gray-800/50 text-gray-400 uppercase font-mono text-xs">
-                        <tr>
-                            <th class="px-6 py-3 font-medium">Name</th>
-                            <th class="px-6 py-3 font-medium">Role</th>
-                            <th class="px-6 py-3 font-medium">Created</th>
-                            <th class="px-6 py-3 font-medium text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-800">
-                        <template x-for="key in accessKeys" :key="key.id">
-                            <tr class="hover:bg-gray-800/30">
-                                <td class="px-6 py-4">
-                                    <div class="font-medium text-white" x-text="key.name"></div>
-                                    <div class="text-[10px] text-gray-500 font-mono" x-text="key.id"></div>
-                                </td>
-                                <td class="px-6 py-4">
-                                    <span class="px-2 py-1 rounded text-xs font-medium uppercase border"
-                                          :class="key.role === 'admin' ? 'bg-purple-900/30 text-purple-400 border-purple-900' : 'bg-blue-900/30 text-blue-400 border-blue-900'"
-                                          x-text="key.role"></span>
-                                </td>
-                                <td class="px-6 py-4 text-gray-400 text-xs" x-text="formatDate(key.created_at_ms)"></td>
-                                <td class="px-6 py-4 text-right">
-                                    <button @click="revokeKey(key.id)" class="text-red-400 hover:text-red-300 text-xs hover:underline">Revoke</button>
-                                </td>
+                <!-- Keys List -->
+                <div class="glass-panel border border-gray-800 rounded-xl overflow-hidden">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-gray-900/80 text-gray-400 uppercase font-mono text-[10px] border-b border-gray-800">
+                            <tr>
+                                <th class="px-6 py-4 font-semibold">Name / ID</th>
+                                <th class="px-6 py-4 font-semibold">Role</th>
+                                <th class="px-6 py-4 font-semibold text-right">Action</th>
                             </tr>
-                        </template>
-                        <tr x-show="accessKeys.length === 0">
-                            <td colspan="4" class="px-6 py-12 text-center text-gray-500">No keys found.</td>
-                        </tr>
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody class="divide-y divide-gray-800/50">
+                            <template x-for="key in accessKeys" :key="key.id">
+                                <tr class="hover:bg-gray-800/30">
+                                    <td class="px-6 py-4">
+                                        <div class="font-bold text-white mb-1" x-text="key.name"></div>
+                                        <div class="text-[10px] text-gray-500 font-mono bg-black/30 inline-block px-1.5 py-0.5 rounded border border-gray-800" x-text="key.id"></div>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider border"
+                                              :class="key.role === 'admin' ? 'bg-purple-900/20 text-purple-400 border-purple-900/50' : 'bg-blue-900/20 text-blue-400 border-blue-900/50'"
+                                              x-text="key.role"></span>
+                                    </td>
+                                    <td class="px-6 py-4 text-right">
+                                        <button @click="revokeKey(key.id)" class="text-red-400 hover:text-white bg-red-900/20 hover:bg-red-600 border border-red-900/30 px-3 py-1.5 rounded text-xs transition-colors">Revoke</button>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="accessKeys.length === 0">
+                                <td colspan="3" class="px-6 py-12 text-center text-gray-500">No extra keys configured.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
     </main>
+
+    <!-- New Key Modal (Moved outside for better z-index handling) -->
+    <div x-show="createdKey" x-cloak class="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-md">
+        <div class="glass-panel border border-green-500/30 p-10 rounded-2xl shadow-2xl max-w-lg w-full text-center animate-fade-in-up relative overflow-hidden">
+             <div class="absolute top-0 left-0 right-0 h-1 bg-green-500"></div>
+            <div class="w-16 h-16 rounded-full bg-green-500/10 text-green-500 border border-green-500/20 flex items-center justify-center text-3xl mx-auto mb-6">✓</div>
+            <h3 class="text-2xl font-bold text-white mb-2">Save Your Key</h3>
+            <p class="text-gray-400 text-sm mb-6">Store this token securely. It will not be shown again.</p>
+            
+            <div class="bg-black p-4 rounded-xl border border-gray-800 font-mono text-green-400 text-lg break-all select-all mb-8 shadow-inner relative group">
+                <span x-text="createdKey"></span>
+                <div class="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none rounded-xl"></div>
+            </div>
+            
+            <button @click="createdKey = null" class="w-full bg-white text-black hover:bg-gray-200 font-bold py-3.5 rounded-xl transition-colors shadow-lg">
+                I have saved it
+            </button>
+        </div>
+    </div>
 
     <script>
         function app() {
             return {
                 apiKey: null,
                 inputKey: '',
-                currentTab: 'vectors',
+                currentTab: 'hybrid', // Default to Hybrid now
                 status: 'offline',
                 latency: 0,
                 
+                // Hybrid RAG
+                ragNamespace: 'docs',
+                ragQuery: '',
+                ragSqlFilter: '',
+                ragLimit: 10,
+                ragResults: null,
+                ragLoading: false,
+
                 // Vectors
                 collections: [],
                 selectedCollection: null,
@@ -478,7 +589,6 @@
                 // SQL
                 sqlQuery: 'SELECT name FROM sqlite_master WHERE type=\'table\';',
                 sqlResult: null,
-                sqlEnabled: true,
                 
                 // Realtime
                 realtimeLogs: [],
@@ -521,7 +631,6 @@
                     this.fetchVectors();
                     this.fetchState();
                     
-                    // Polling
                     setInterval(() => this.checkHealth(), 5000);
                     setInterval(() => {
                         if(this.apiKey) {
@@ -566,14 +675,50 @@
                     }
                 },
 
+                // --- HYBRID RAG ---
+                async runRagSearch() {
+                    if (!this.ragNamespace || !this.ragQuery) return alert('Namespace and Query are required');
+                    
+                    this.ragLoading = true;
+                    this.ragResults = null;
+
+                    let payload = {
+                        query: this.ragQuery,
+                        limit: parseInt(this.ragLimit) || 10
+                    };
+
+                    if (this.ragSqlFilter.trim()) {
+                        payload.sql_filter = this.ragSqlFilter.trim();
+                    }
+
+                    try {
+                        const res = await this.authenticatedFetch(`/v1/db/${this.ragNamespace}/search`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        const data = await res.json();
+                        
+                        if (!res.ok) {
+                            alert(data.message || 'Error occurred during search');
+                        } else {
+                            this.ragResults = data.results || [];
+                        }
+                    } catch(e) {
+                        console.error('RAG Search Error:', e);
+                        alert('Connection error');
+                    } finally {
+                        this.ragLoading = false;
+                    }
+                },
+
                 // --- ACCESS ---
                 async fetchKeys() {
                     try {
                         const res = await this.authenticatedFetch('/v1/auth/keys');
                         this.accessKeys = await res.json();
-                    } catch(e) {
-                        console.error("Access fetch error", e);
-                    }
+                    } catch(e) { console.error("Access fetch error", e); }
                 },
 
                 async createKey() {
@@ -582,32 +727,23 @@
                         const res = await this.authenticatedFetch('/v1/auth/keys', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                name: this.newKeyName,
-                                role: this.newKeyRole
-                            })
+                            body: JSON.stringify({ name: this.newKeyName, role: this.newKeyRole })
                         });
                         if (res.ok) {
                             const data = await res.json();
                             this.createdKey = data.key;
                             this.newKeyName = '';
                             this.fetchKeys();
-                        } else {
-                            alert("Failed to create key");
                         }
-                    } catch(e) {
-                        console.error("Create key error", e);
-                    }
+                    } catch(e) { console.error("Create key error", e); }
                 },
 
                 async revokeKey(id) {
-                    if (!confirm("Are you sure? This cannot be undone.")) return;
+                    if (!confirm("Revoke this key immediately?")) return;
                     try {
                         const res = await this.authenticatedFetch(`/v1/auth/keys/${id}`, { method: 'DELETE' });
                         if(res.ok) this.fetchKeys();
-                    } catch(e) {
-                        console.error("Revoke error", e);
-                    }
+                    } catch(e) { console.error("Revoke error", e); }
                 },
 
                 // --- VECTORS ---
@@ -616,54 +752,22 @@
                         const res = await this.authenticatedFetch('/v1/vector');
                         const json = await res.json();
                         this.collections = json.collections || [];
-                    } catch (e) {
-                        console.error("Vectors fetch error", e);
-                    }
+                    } catch (e) { console.error("Vectors fetch error", e); }
                 },
                 
                 async inspectCollection(name) {
                     this.selectedCollection = name;
-                    this.searchId = '';
                     this.inspectionHits = [];
-                    this.runInspectorSearch(); // Auto-run random peek
-                },
-
-                async lookupId() {
-                    if (!this.selectedCollection || !this.searchId) return;
-                    try {
-                        const res = await this.authenticatedFetch(`/v1/vector/${this.selectedCollection}/get?id=${this.searchId}`);
-                        if(!res.ok) {
-                             this.inspectionHits = []; // clear or show error
-                             alert("ID not found or error.");
-                             return;
-                        }
-                        const item = await res.json();
-                        this.inspectionHits = [{
-                            id: item.id,
-                            score: 1.0,
-                            meta: item.meta
-                        }];
-                    } catch(e) {
-                        console.error("Lookup error", e);
-                    }
                 },
 
                 async runInspectorSearch() {
                     if (!this.selectedCollection) return;
-                    
                     try {
                         const col = this.collections.find(c => c.name === this.selectedCollection);
                         if (!col) return;
 
-                        let body = {
-                            k: 10,
-                            include_meta: true,
-                            include_vector: false
-                        };
-                        
-                        // Create random vector
-                        const randomVec = Array(col.dim).fill(0).map(() => Math.random() - 0.5);
-                        body.vector = randomVec;
+                        let body = { k: 3, include_meta: true, include_vector: false };
+                        body.vector = Array(col.dim).fill(0).map(() => Math.random() - 0.5);
 
                         const res = await this.authenticatedFetch(`/v1/vector/${this.selectedCollection}/search`, {
                             method: 'POST',
@@ -673,20 +777,15 @@
                         
                         const data = await res.json();
                         this.inspectionHits = data.hits || [];
-                    } catch(e) {
-                        console.error("Search error", e);
-                    }
+                    } catch(e) { console.error("Search error", e); }
                 },
 
                 // --- STATE ---
                 async fetchState() {
                     try {
-                        const res = await this.authenticatedFetch('/v1/state?limit=100');
-                        // API returns array directly
+                        const res = await this.authenticatedFetch('/v1/state?limit=50');
                         this.stateItems = await res.json();
-                    } catch (e) {
-                        console.error("State fetch error", e);
-                    }
+                    } catch (e) { console.error("State fetch error", e); }
                 },
 
                 // --- SQL ---
@@ -702,48 +801,40 @@
                         const contentType = res.headers.get("content-type");
                         if (contentType && contentType.includes("application/json")) {
                              const data = await res.json();
-                             if (!res.ok) {
-                                 this.sqlResult = data;
-                             } else {
-                                 this.sqlResult = data.rows || [];
-                             }
+                             this.sqlResult = res.ok ? (data.rows || []) : data;
                         } else {
-                            // Handle plain text response (common for 500/400 errors in some middlewares)
-                            const text = await res.text();
-                            this.sqlResult = text;
+                            this.sqlResult = await res.text();
                         }
-                        
-                    } catch(e) {
-                        this.sqlResult = { error: e.message };
-                    }
+                    } catch(e) { this.sqlResult = { error: e.message }; }
                 },
 
                 // --- REALTIME ---
                 connectSSE() {
                     if (this.sseSource || !this.apiKey) return;
-                    
-                    // Native EventSource doesn't support headers easily.
-                    // We use query param for auth: /v1/stream?api_key=...
                     this.sseSource = new EventSource(`/v1/stream?api_key=${this.apiKey}`);
                     
                     this.sseSource.onopen = () => {
                         this.sseConnected = true;
-                        this.logEvent("SYSTEM", "Connected to event stream");
+                        this.logEvent("SYS", "SSE Connected");
                     };
                     
                     this.sseSource.onerror = () => {
                         this.sseConnected = false;
                         this.sseSource.close();
                         this.sseSource = null;
-                        setTimeout(() => this.connectSSE(), 5000); // Reconnect
+                        setTimeout(() => this.connectSSE(), 5000);
                     };
 
                     this.sseSource.addEventListener('message', (e) => {
                          try {
-                             // The backend sends full JSON object in data
                              const ev = JSON.parse(e.data);
-                             // ev has: offset, event_type, data (object)
                              this.logEvent(ev.event_type, ev.offset, ev.data);
+                             
+                             // Auto-scroll
+                             setTimeout(() => {
+                                 const el = document.getElementById('logs-container');
+                                 if(el) el.scrollTop = el.scrollHeight;
+                             }, 10);
                          } catch(err) {
                              this.logEvent("RAW", "-", e.data);
                          }
@@ -751,51 +842,13 @@
                 },
 
                 logEvent(type, id, dataObj) {
-                    const time = new Date().toLocaleTimeString();
+                    const time = new Date().toLocaleTimeString([], {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
                     const dataFormatted = JSON.stringify(dataObj, null, 2);
                     
-                    this.realtimeLogs.unshift({ 
-                        time,
-                        type,
-                        id,
-                        data: dataObj,
-                        dataFormatted 
-                    });
-                    if (this.realtimeLogs.length > 50) this.realtimeLogs.pop();
-                },
-
-                // --- Helpers for Inspector ---
-                hasTextContent(meta) {
-                    if (!meta) return false;
-                    return meta.text || meta.text_snippet || meta.full_text;
-                },
-
-                getTextContent(meta) {
-                    if (!meta) return '';
-                    return meta.full_text || meta.text || meta.text_snippet || '';
-                },
-
-                getPreviewText(meta) {
-                     if (!meta) return 'No preview';
-                     const txt = meta.text_snippet || meta.text || meta.full_text;
-                     if (txt) return txt.substring(0, 150) + (txt.length > 150 ? '...' : '');
-                     return JSON.stringify(meta);
-                },
-
-                getMetaWithoutText(meta) {
-                    if (!meta) return {};
-                    const { text, full_text, text_snippet, ...rest } = meta;
-                    return rest;
+                    this.realtimeLogs.push({ time, type, id, dataFormatted });
+                    if (this.realtimeLogs.length > 100) this.realtimeLogs.shift();
                 }
             }
-        }
-        
-        function formatDate(ms) {
-            if (!ms) return '-';
-            return new Date(ms).toLocaleString('en-US', { 
-                month: 'short', day: 'numeric', year: 'numeric', 
-                hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true 
-            });
         }
     </script>
 </body>
