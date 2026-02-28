@@ -61,7 +61,7 @@ async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
     );
     let search_dir = PathBuf::from(&data_dir);
     let search_engine = Arc::new(SearchEngine::new(search_dir).unwrap());
-    let app = api::router(engine, config, sqlite, search_engine, None);
+    let app = api::router(engine, config, sqlite, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -90,7 +90,7 @@ async fn sqlite_exec_and_query() {
     let create = client
         .post(format!("{}/v1/sql/exec", base))
         .json(&serde_json::json!({"sql":"CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT)","params":[]}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(create.status().is_success());
@@ -98,7 +98,7 @@ async fn sqlite_exec_and_query() {
     let insert = client
         .post(format!("{}/v1/sql/exec", base))
         .json(&serde_json::json!({"sql":"INSERT INTO notes(body) VALUES (?)","params":["hola"]}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(insert.status().is_success());
@@ -106,7 +106,7 @@ async fn sqlite_exec_and_query() {
     let query = client
         .post(format!("{}/v1/sql/query", base))
         .json(&serde_json::json!({"sql":"SELECT body FROM notes","params":[]}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(query.status().is_success());

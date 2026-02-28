@@ -3,11 +3,14 @@ use base64::Engine;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params_from_iter, Connection, Row};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
+
+mod actor;
+use actor::{SqliteActor, SqliteCommand};
 
 #[derive(Clone)]
 pub struct SqliteService {
-    conn: Arc<Mutex<Connection>>,
+    sender: mpsc::Sender<SqliteCommand>,
     path: PathBuf,
 }
 
@@ -21,8 +24,16 @@ impl SqliteService {
         conn.pragma_update(None, "journal_mode", &"WAL")?;
         conn.pragma_update(None, "synchronous", &"NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        let (sender, receiver) = mpsc::channel(1000);
+        let actor = SqliteActor::new(conn, receiver);
+        
+        std::thread::spawn(move || {
+            actor.run();
+        });
+
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            sender,
             path: db_path,
         })
     }
@@ -32,11 +43,13 @@ impl SqliteService {
         sql: String,
         params: Vec<serde_json::Value>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let conn = self.conn.clone();
+        // Query operations still open a temporary connection locally and leverage WAL for concurrency.
+        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn
-                .lock()
-                .map_err(|_| anyhow::anyhow!("sqlite lock poisoned"))?;
+            let conn = Connection::open(&path)?;
+            conn.pragma_update(None, "journal_mode", &"WAL")?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
             let mut stmt = conn.prepare(&sql)?;
             let columns = stmt
                 .column_names()
@@ -60,17 +73,20 @@ impl SqliteService {
         sql: String,
         params: Vec<serde_json::Value>,
     ) -> anyhow::Result<u64> {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn
-                .lock()
-                .map_err(|_| anyhow::anyhow!("sqlite lock poisoned"))?;
-            let values = json_params_to_values(params)?;
-            let affected = conn.execute(&sql, params_from_iter(values.iter()))?;
-            Ok(affected as u64)
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!(err))?
+        let (respond_to, receiver) = oneshot::channel();
+        let values = json_params_to_values(params)?;
+        
+        let msg = SqliteCommand::Execute {
+            sql,
+            params: values,
+            respond_to,
+        };
+
+        if self.sender.send(msg).await.is_err() {
+            return Err(anyhow::anyhow!("sqlite actor channel closed"));
+        }
+
+        receiver.await.map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
     }
 
     pub fn path(&self) -> &Path {

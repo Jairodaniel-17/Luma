@@ -1,533 +1,755 @@
 openapi: 3.0.3
 info:
   title: Luma API
-  version: "0.1.0"
-  description: |
-    API documentation for **Luma**, a lightweight, high-performance vector database optimized for RAG (Retrieval-Augmented Generation).
+  version: 0.1.0
+  description: 'API documentation for **Luma**, a lightweight, high-performance vector
+    database optimized for RAG (Retrieval-Augmented Generation).
+
 
     ## Features
+
     - **Vector Operations**: Exact and ANN search.
+
     - **State Management**: Key-Value store with optimistic locking (CAS).
+
     - **Document Store**: Raw document storage linked to vectors.
+
     - **RAG Search**: High-level semantic search with grouping.
+
     - **Real-time**: SSE streaming of database events.
 
+    '
 servers:
-  - url: http://localhost:9917
-    description: Default Local Server
-
+- url: http://localhost:9917
+  description: Default Local Server
 tags:
-  - name: RAG Search
-    description: High-level semantic search API (Text-to-Vector abstraction)
-  - name: Vector Operations
-    description: Core vector database operations (Collections, Upsert, Search)
-  - name: State Management
-    description: Distributed Key-Value store with CAS (Compare-And-Swap) support
-  - name: Streaming
-    description: Real-time event subscription (SSE)
-  - name: Document Store
-    description: Storage for raw documents and metadata
-  - name: SQL
-    description: SQLite bridge for relational data
-  - name: System
-    description: Health checks and metrics
-
+- name: RAG Search
+  description: High-level semantic search API (Text-to-Vector abstraction)
+- name: Vector Operations
+  description: Core vector database operations (Collections, Upsert, Search)
+- name: State Management
+  description: Distributed Key-Value store with CAS (Compare-And-Swap) support
+- name: Streaming
+  description: Real-time event subscription (SSE)
+- name: Document Store
+  description: Storage for raw documents and metadata
+- name: SQL
+  description: SQLite bridge for relational data
+- name: System
+  description: Health checks and metrics
+- name: Meta
+  description: Meta Engine integrated operations
+- name: LumaDatabase
+  description: High-level unified orchestrator (Nivel 2) for complex RAG flows, chunking,
+    and multi-engine coordination.
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       description: Enter your API Key (default is `dev`)
-
   schemas:
-    # --- Common ---
     ErrorBody:
       type: object
-      required: [error, message]
+      required:
+      - error
+      - message
       properties:
         error:
           type: string
-          example: "invalid_argument"
+          example: invalid_argument
         message:
           type: string
-          example: "The provided vector dimension does not match the collection."
-
-    # --- State ---
+          example: The provided vector dimension does not match the collection.
     StateItem:
       type: object
-      required: [key, value, revision]
+      required:
+      - key
+      - value
+      - revision
       properties:
-        key: { type: string, example: "config/retention" }
-        value: { type: object, example: { "days": 30 } }
+        key:
+          type: string
+          example: config/retention
+        value:
+          type: object
+          example:
+            days: 30
         revision:
           type: integer
           format: uint64
-          description: "Monotonically increasing revision ID. Used for CAS."
+          description: Monotonically increasing revision ID. Used for CAS.
           example: 105
-        expires_at_ms: { type: integer, format: uint64, nullable: true }
-
+        expires_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
     PutStateRequest:
       type: object
-      required: [value]
+      required:
+      - value
       properties:
-        value: { type: object, example: { "days": 30 } }
+        value:
+          type: object
+          example:
+            days: 30
         ttl_ms:
           type: integer
           format: uint64
           nullable: true
-          description: "Time-to-live in milliseconds"
+          description: Time-to-live in milliseconds
         if_revision:
           type: integer
           format: uint64
           nullable: true
-          description: "Optimistic locking: only update if current revision matches this."
-
+          description: 'Optimistic locking: only update if current revision matches
+            this.'
     PutStateResponse:
       type: object
-      required: [key, revision]
+      required:
+      - key
+      - revision
       properties:
-        key: { type: string }
-        revision: { type: integer, format: uint64 }
-        expires_at_ms: { type: integer, format: uint64, nullable: true }
-
+        key:
+          type: string
+        revision:
+          type: integer
+          format: uint64
+        expires_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
     DeleteStateResponse:
       type: object
-      required: [deleted]
+      required:
+      - deleted
       properties:
-        deleted: { type: boolean }
-
+        deleted:
+          type: boolean
     StateBatchOperation:
       type: object
-      required: [key, value]
+      required:
+      - key
+      - value
       properties:
-        key: { type: string }
-        value: { type: object }
-        ttl_ms: { type: integer, format: uint64, nullable: true }
-        if_revision: { type: integer, format: uint64, nullable: true }
-
+        key:
+          type: string
+        value:
+          type: object
+        ttl_ms:
+          type: integer
+          format: uint64
+          nullable: true
+        if_revision:
+          type: integer
+          format: uint64
+          nullable: true
     StateBatchResult:
       type: object
       properties:
-        status: { type: string, enum: [ok, error] }
-        key: { type: string }
-        revision: { type: integer, format: uint64, nullable: true }
-        expires_at_ms: { type: integer, format: uint64, nullable: true }
-        error: { $ref: "#/components/schemas/ErrorBody", nullable: true }
-
+        status:
+          type: string
+          enum:
+          - ok
+          - error
+        key:
+          type: string
+        revision:
+          type: integer
+          format: uint64
+          nullable: true
+        expires_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+          nullable: true
     StateBatchResponse:
       type: object
       properties:
         results:
           type: array
-          items: { $ref: "#/components/schemas/StateBatchResult" }
-
-    # --- Vector ---
+          items:
+            $ref: '#/components/schemas/StateBatchResult'
     VectorMetric:
       type: string
-      enum: [cosine, dot]
-      example: "cosine"
-
+      enum:
+      - cosine
+      - dot
+      example: cosine
     CreateVectorCollectionRequest:
       type: object
-      required: [dim, metric]
+      required:
+      - dim
+      - metric
       properties:
         dim:
           type: integer
           minimum: 1
-          description: "Dimension of the vectors in this collection"
+          description: Dimension of the vectors in this collection
           example: 384
-        metric: { $ref: "#/components/schemas/VectorMetric" }
-
+        metric:
+          $ref: '#/components/schemas/VectorMetric'
     CreateVectorCollectionResponse:
       type: object
-      required: [collection, dim, metric]
+      required:
+      - collection
+      - dim
+      - metric
       properties:
-        collection: { type: string }
-        dim: { type: integer }
-        metric: { $ref: "#/components/schemas/VectorMetric" }
-
+        collection:
+          type: string
+        dim:
+          type: integer
+        metric:
+          $ref: '#/components/schemas/VectorMetric'
     VectorCollectionInfo:
       type: object
-      required: [collection, dim, metric, live_count, total_records, upsert_count, file_len, applied_offset]
+      required:
+      - collection
+      - dim
+      - metric
+      - live_count
+      - total_records
+      - upsert_count
+      - file_len
+      - applied_offset
       properties:
-        collection: { type: string }
-        dim: { type: integer }
-        metric: { $ref: "#/components/schemas/VectorMetric" }
-        live_count: { type: integer, format: uint64 }
-        total_records: { type: integer, format: uint64 }
-        upsert_count: { type: integer, format: uint64 }
-        file_len: { type: integer, format: uint64 }
-        applied_offset: { type: integer, format: uint64 }
-        created_at_ms: { type: integer, format: uint64, nullable: true }
-        updated_at_ms: { type: integer, format: uint64, nullable: true }
-
+        collection:
+          type: string
+        dim:
+          type: integer
+        metric:
+          $ref: '#/components/schemas/VectorMetric'
+        live_count:
+          type: integer
+          format: uint64
+        total_records:
+          type: integer
+          format: uint64
+        upsert_count:
+          type: integer
+          format: uint64
+        file_len:
+          type: integer
+          format: uint64
+        applied_offset:
+          type: integer
+          format: uint64
+        created_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
+        updated_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
     VectorCollectionsResponse:
       type: object
       properties:
         collections:
           type: array
-          items: { $ref: "#/components/schemas/VectorCollectionInfo" }
-
+          items:
+            $ref: '#/components/schemas/VectorCollectionInfo'
     VectorCollectionDetailResponse:
       type: object
-      required: [collection]
+      required:
+      - collection
       properties:
-        collection: { type: string }
-        dim: { type: integer, nullable: true }
-        metric: { $ref: "#/components/schemas/VectorMetric", nullable: true }
-        count: { type: integer, nullable: true }
-        created_at_ms: { type: integer, format: uint64, nullable: true }
-        updated_at_ms: { type: integer, format: uint64, nullable: true }
-        segments: { type: integer, nullable: true }
-        deleted: { type: integer, format: uint64, nullable: true }
-        manifest: { type: object, nullable: true }
-        notes: { type: string, nullable: true }
-
+        collection:
+          type: string
+        dim:
+          type: integer
+          nullable: true
+        metric:
+          $ref: '#/components/schemas/VectorMetric'
+          nullable: true
+        count:
+          type: integer
+          nullable: true
+        created_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
+        updated_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
+        segments:
+          type: integer
+          nullable: true
+        deleted:
+          type: integer
+          format: uint64
+          nullable: true
+        manifest:
+          type: object
+          nullable: true
+        notes:
+          type: string
+          nullable: true
     VectorAddRequest:
       type: object
-      required: [id, vector]
+      required:
+      - id
+      - vector
       properties:
-        id: { type: string, example: "doc_v1_101" }
+        id:
+          type: string
+          example: doc_v1_101
         vector:
           type: array
-          items: { type: number, format: float }
-          description: "Floating point vector data"
-          example: [0.1, 0.23, -0.5, 0.8]
+          items:
+            type: number
+            format: float
+          description: Floating point vector data
+          example:
+          - 0.1
+          - 0.23
+          - -0.5
+          - 0.8
         meta:
           type: object
-          description: "Arbitrary JSON metadata"
-          example: { "category": "finance", "year": 2024 }
-
+          description: Arbitrary JSON metadata
+          example:
+            category: finance
+            year: 2024
     VectorUpdateRequest:
       type: object
-      required: [id]
+      required:
+      - id
       properties:
-        id: { type: string }
+        id:
+          type: string
         vector:
           type: array
-          items: { type: number, format: float }
+          items:
+            type: number
+            format: float
           nullable: true
-        meta: { nullable: true }
-
+        meta:
+          nullable: true
     VectorDeleteRequest:
       type: object
-      required: [id]
+      required:
+      - id
       properties:
-        id: { type: string }
-
+        id:
+          type: string
     VectorDeleteResponse:
       type: object
-      required: [deleted]
+      required:
+      - deleted
       properties:
-        deleted: { type: boolean }
-
+        deleted:
+          type: boolean
     VectorGetResponse:
       type: object
-      required: [id, vector, meta]
+      required:
+      - id
+      - vector
+      - meta
       properties:
-        id: { type: string }
+        id:
+          type: string
         vector:
           type: array
-          items: { type: number, format: float }
+          items:
+            type: number
+            format: float
         meta: {}
-
     VectorSearchRequest:
       type: object
-      required: [vector, k]
+      required:
+      - vector
+      - k
       properties:
         vector:
           type: array
-          items: { type: number, format: float }
-          example: [0.1, 0.23, -0.5, 0.8]
-        k: { type: integer, minimum: 1, example: 5 }
+          items:
+            type: number
+            format: float
+          example:
+          - 0.1
+          - 0.23
+          - -0.5
+          - 0.8
+        k:
+          type: integer
+          minimum: 1
+          example: 5
         filters:
           nullable: true
-          description: "Exact match metadata filters"
-          example: { "category": "finance" }
-        include_meta: { type: boolean, nullable: true, default: false }
-
+          description: Exact match metadata filters
+          example:
+            category: finance
+        include_meta:
+          type: boolean
+          nullable: true
+          default: false
     VectorSearchHit:
       type: object
-      required: [id, score]
+      required:
+      - id
+      - score
       properties:
-        id: { type: string }
-        score: { type: number, format: float }
-        meta: { nullable: true }
-
+        id:
+          type: string
+        score:
+          type: number
+          format: float
+        meta:
+          nullable: true
     VectorSearchResponse:
       type: object
-      required: [hits]
+      required:
+      - hits
       properties:
         hits:
           type: array
-          items: { $ref: "#/components/schemas/VectorSearchHit" }
-
+          items:
+            $ref: '#/components/schemas/VectorSearchHit'
     VectorBatchItem:
       type: object
-      required: [id, vector]
+      required:
+      - id
+      - vector
       properties:
-        id: { type: string }
+        id:
+          type: string
         vector:
           type: array
-          items: { type: number, format: float }
+          items:
+            type: number
+            format: float
         meta: {}
-
     VectorBatchResult:
       type: object
       properties:
-        status: { type: string, enum: [upserted, deleted, error] }
-        id: { type: string }
-        error: { $ref: "#/components/schemas/ErrorBody", nullable: true }
-
+        status:
+          type: string
+          enum:
+          - upserted
+          - deleted
+          - error
+        id:
+          type: string
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+          nullable: true
     VectorBatchResponse:
       type: object
       properties:
         results:
           type: array
-          items: { $ref: "#/components/schemas/VectorBatchResult" }
-
-    # --- Docs & SQL ---
+          items:
+            $ref: '#/components/schemas/VectorBatchResult'
     DocRecord:
       type: object
-      required: [id, doc, revision]
+      required:
+      - id
+      - doc
+      - revision
       properties:
-        id: { type: string }
-        doc: { type: object }
-        revision: { type: integer, format: uint64 }
-
+        id:
+          type: string
+        doc:
+          type: object
+        revision:
+          type: integer
+          format: uint64
     DocFindResponse:
       type: object
       properties:
         documents:
           type: array
-          items: { $ref: "#/components/schemas/DocRecord" }
-
+          items:
+            $ref: '#/components/schemas/DocRecord'
     SqlQueryRequest:
       type: object
-      required: [sql]
+      required:
+      - sql
       properties:
-        sql: { type: string, example: "SELECT * FROM users WHERE id = ?" }
+        sql:
+          type: string
+          example: SELECT * FROM users WHERE id = ?
         params:
           type: array
           items: {}
-          example: [123]
-
+          example:
+          - 123
     SqlQueryResponse:
       type: object
       properties:
         rows:
           type: array
           items: {}
-
     SqlExecResponse:
       type: object
       properties:
-        rows_affected: { type: integer, format: uint64 }
-
-    # --- High Level Search (RAG) ---
+        rows_affected:
+          type: integer
+          format: uint64
     HighLevelSearchFilters:
       type: object
       properties:
         category:
           type: string
-          example: "netsuite"
+          example: netsuite
         language:
           oneOf:
-            - type: string
-            - type: array
-              items: { type: string }
-          example: ["en", "es"]
+          - type: string
+          - type: array
+            items:
+              type: string
+          example:
+          - en
+          - es
         status:
           type: string
-          example: "active"
+          example: active
         version_policy:
           type: string
-          enum: ["latest", "all"]
-          description: "Strategy for handling document versions"
-          default: "latest"
-
+          enum:
+          - latest
+          - all
+          description: Strategy for handling document versions
+          default: latest
     HighLevelSearchRequest:
       type: object
-      required: [query]
+      required:
+      - query
       properties:
         query:
           type: string
-          description: "Natural language query text"
-          example: "oracle approval workflow"
+          description: Natural language query text
+          example: oracle approval workflow
         top_k:
           type: integer
           default: 10
           example: 10
-        filters: { $ref: "#/components/schemas/HighLevelSearchFilters" }
+        filters:
+          $ref: '#/components/schemas/HighLevelSearchFilters'
         group_by:
           type: string
-          description: "Field to group results by (e.g. 'document_id')"
-          example: "document_id"
+          description: Field to group results by (e.g. 'document_id')
+          example: document_id
         group_limit:
           type: integer
           default: 1
-          description: "Max results per group"
-
+          description: Max results per group
     HighLevelDocumentMetadata:
       type: object
       properties:
-        filename: { type: string }
-        processed_at: { type: integer, format: uint64 }
-        category: { type: string }
-        language: { type: string }
-        status: { type: string }
-        version: { type: string }
-        group_id: { type: integer }
-        document_id: { type: string }
-
+        filename:
+          type: string
+        processed_at:
+          type: integer
+          format: uint64
+        category:
+          type: string
+        language:
+          type: string
+        status:
+          type: string
+        version:
+          type: string
+        group_id:
+          type: integer
+        document_id:
+          type: string
     HighLevelDocumentResponse:
       type: object
       properties:
-        id: { type: integer }
-        content: { type: string }
-        metadata: { $ref: "#/components/schemas/HighLevelDocumentMetadata" }
-
+        id:
+          type: integer
+        content:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/HighLevelDocumentMetadata'
     HighLevelSearchResult:
       type: object
       properties:
-        score: { type: number, format: float }
-        document: { $ref: "#/components/schemas/HighLevelDocumentResponse" }
-
+        score:
+          type: number
+          format: float
+        document:
+          $ref: '#/components/schemas/HighLevelDocumentResponse'
     HighLevelSearchResponse:
       type: object
       properties:
-        query: { type: string }
-        top_k: { type: integer }
+        query:
+          type: string
+        top_k:
+          type: integer
         results:
           type: array
-          items: { $ref: "#/components/schemas/HighLevelSearchResult" }
-
+          items:
+            $ref: '#/components/schemas/HighLevelSearchResult'
 paths:
-  # --- System ---
   /v1/health:
     get:
-      tags: [System]
+      tags:
+      - System
       summary: Health check
       responses:
-        "200": { description: Server is healthy }
+        '200':
+          description: Server is healthy
   /v1/metrics:
     get:
-      tags: [System]
+      tags:
+      - System
       summary: Prometheus-compatible metrics
       responses:
-        "200": { description: Metrics in text format }
-
-  # --- Streaming ---
+        '200':
+          description: Metrics in text format
   /v1/stream:
     get:
-      tags: [Streaming]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Streaming
+      security:
+      - bearerAuth: []
       summary: Real-time Event Stream (SSE)
-      description: |
-        Subscribe to database events (upserts, state changes) via Server-Sent Events.
+      description: 'Subscribe to database events (upserts, state changes) via Server-Sent
+        Events.
+
         Supports filtering by type, key prefix, and collection.
+
+        '
       parameters:
-        - in: query
-          name: since
-          description: Offset/event_id to replay from. Default 0.
-          schema: { type: integer, format: uint64, default: 0 }
-        - in: query
-          name: types
-          description: Comma-separated event types (e.g., `vector_upserted,state_changed`).
-          schema: { type: string }
-        - in: query
-          name: key_prefix
-          description: Filter events by key prefix.
-          schema: { type: string }
-        - in: query
-          name: collection
-          description: Filter events by collection name.
-          schema: { type: string }
-        - in: header
-          name: Last-Event-ID
-          required: false
-          schema: { type: string }
+      - in: query
+        name: since
+        description: Offset/event_id to replay from. Default 0.
+        schema:
+          type: integer
+          format: uint64
+          default: 0
+      - in: query
+        name: types
+        description: Comma-separated event types (e.g., `vector_upserted,state_changed`).
+        schema:
+          type: string
+      - in: query
+        name: key_prefix
+        description: Filter events by key prefix.
+        schema:
+          type: string
+      - in: query
+        name: collection
+        description: Filter events by collection name.
+        schema:
+          type: string
+      - in: header
+        name: Last-Event-ID
+        required: false
+        schema:
+          type: string
       responses:
-        "200":
+        '200':
           description: Stream of events
           content:
             text/event-stream:
-              schema: { type: string }
-        "401": { description: Unauthorized }
-
+              schema:
+                type: string
+        '401':
+          description: Unauthorized
   /v1/events:
     get:
-      tags: [Streaming]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Streaming
+      security:
+      - bearerAuth: []
       deprecated: true
       summary: Legacy SSE alias (Deprecated)
-      description: |
-        **DEPRECATED**: Use `/v1/stream` instead.
+      description: '**DEPRECATED**: Use `/v1/stream` instead.
 
-        Legacy alias where `prefix` maps to `key_prefix`. Does not support `collection` filter.
+
+        Legacy alias where `prefix` maps to `key_prefix`. Does not support `collection`
+        filter.
+
+        '
       parameters:
-        - in: query
-          name: since
-          schema: { type: integer, format: uint64, default: 0 }
-        - in: query
-          name: types
-          schema: { type: string }
-        - in: query
-          name: prefix
-          schema: { type: string }
+      - in: query
+        name: since
+        schema:
+          type: integer
+          format: uint64
+          default: 0
+      - in: query
+        name: types
+        schema:
+          type: string
+      - in: query
+        name: prefix
+        schema:
+          type: string
       responses:
-        "200": { description: text/event-stream }
-        "401": { description: Unauthorized }
-
-  # --- High Level Search ---
+        '200':
+          description: text/event-stream
+        '401':
+          description: Unauthorized
   /search:
     post:
-      tags: [RAG Search]
+      tags:
+      - RAG Search
       summary: High-level Semantic Search
-      description: |
-        Performs a semantic search using a text query.
+      description: 'Performs a semantic search using a text query.
+
         Currently uses **mock embeddings** (random deterministic) for testing flows.
+
         Supports advanced filtering and grouping for RAG.
+
+        '
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/HighLevelSearchRequest" }
+            schema:
+              $ref: '#/components/schemas/HighLevelSearchRequest'
       responses:
-        "200":
+        '200':
           description: Search results
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/HighLevelSearchResponse" }
-        "500": { description: Internal Error }
-
-  # --- State ---
+              schema:
+                $ref: '#/components/schemas/HighLevelSearchResponse'
+        '500':
+          description: Internal Error
   /v1/state:
     get:
-      tags: [State Management]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
       summary: List keys
       parameters:
-        - in: query
-          name: prefix
-          schema: { type: string }
-        - in: query
-          name: limit
-          schema: { type: integer, default: 100 }
+      - in: query
+        name: prefix
+        schema:
+          type: string
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          default: 100
       responses:
-        "200":
+        '200':
           description: List of state items
           content:
             application/json:
               schema:
                 type: array
-                items: { $ref: "#/components/schemas/StateItem" }
-        "401": { description: Unauthorized }
-
+                items:
+                  $ref: '#/components/schemas/StateItem'
+        '401':
+          description: Unauthorized
   /v1/state/batch_put:
     post:
-      tags: [State Management]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
       summary: Batch put keys
       requestBody:
         required: true
@@ -538,168 +760,206 @@ paths:
               properties:
                 operations:
                   type: array
-                  items: { $ref: "#/components/schemas/StateBatchOperation" }
+                  items:
+                    $ref: '#/components/schemas/StateBatchOperation'
       responses:
-        "200":
+        '200':
           description: Batch result
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/StateBatchResponse" }
-
+              schema:
+                $ref: '#/components/schemas/StateBatchResponse'
   /v1/state/{key}:
     get:
-      tags: [State Management]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
       summary: Get key value
       parameters:
-        - in: path
-          name: key
-          required: true
-          schema: { type: string }
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
       responses:
-        "200":
+        '200':
           description: Found
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/StateItem" }
-        "404": { description: Key not found }
+              schema:
+                $ref: '#/components/schemas/StateItem'
+        '404':
+          description: Key not found
     put:
-      tags: [State Management]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
       summary: Set key value
       description: Supports Optimistic Locking via `if_revision`.
       parameters:
-        - in: path
-          name: key
-          required: true
-          schema: { type: string }
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/PutStateRequest" }
+            schema:
+              $ref: '#/components/schemas/PutStateRequest'
       responses:
-        "200":
+        '200':
           description: Updated successfully
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/PutStateResponse" }
-        "409": { description: Revision mismatch (CAS failed) }
+              schema:
+                $ref: '#/components/schemas/PutStateResponse'
+        '409':
+          description: Revision mismatch (CAS failed)
     delete:
-      tags: [State Management]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
       summary: Delete key
       parameters:
-        - in: path
-          name: key
-          required: true
-          schema: { type: string }
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
       responses:
-        "200":
+        '200':
           description: Deleted
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DeleteStateResponse" }
-
-  # --- Vector Operations ---
+              schema:
+                $ref: '#/components/schemas/DeleteStateResponse'
   /v1/vector:
     get:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: List all collections
       responses:
-        "200":
+        '200':
           description: List of collections
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorCollectionsResponse" }
-
+              schema:
+                $ref: '#/components/schemas/VectorCollectionsResponse'
   /v1/vector/{collection}:
     get:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Get collection details
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       responses:
-        "200":
+        '200':
           description: Details
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorCollectionDetailResponse" }
-        "404": { description: Collection not found }
+              schema:
+                $ref: '#/components/schemas/VectorCollectionDetailResponse'
+        '404':
+          description: Collection not found
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Create new collection
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/CreateVectorCollectionRequest" }
+            schema:
+              $ref: '#/components/schemas/CreateVectorCollectionRequest'
       responses:
-        "200":
+        '200':
           description: Created
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/CreateVectorCollectionResponse" }
-        "409": { description: Collection already exists }
-
+              schema:
+                $ref: '#/components/schemas/CreateVectorCollectionResponse'
+        '409':
+          description: Collection already exists
   /v1/vector/{collection}/add:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Add vector (fail if exists)
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/VectorAddRequest" }
+            schema:
+              $ref: '#/components/schemas/VectorAddRequest'
       responses:
-        "200": { description: Added }
-        "409": { description: ID already exists }
-
+        '200':
+          description: Added
+        '409':
+          description: ID already exists
   /v1/vector/{collection}/upsert:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Upsert vector (Insert or Update)
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/VectorAddRequest" }
+            schema:
+              $ref: '#/components/schemas/VectorAddRequest'
       responses:
-        "200": { description: Upserted }
-
+        '200':
+          description: Upserted
   /v1/vector/{collection}/upsert_batch:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Batch Upsert
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
@@ -709,67 +969,81 @@ paths:
               properties:
                 items:
                   type: array
-                  items: { $ref: "#/components/schemas/VectorBatchItem" }
+                  items:
+                    $ref: '#/components/schemas/VectorBatchItem'
       responses:
-        "200":
+        '200':
           description: Batch results
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorBatchResponse" }
-
+              schema:
+                $ref: '#/components/schemas/VectorBatchResponse'
   /v1/vector/{collection}/update:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Partial Update
       description: Update vector or metadata for an existing ID. Fails if ID not found.
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/VectorUpdateRequest" }
+            schema:
+              $ref: '#/components/schemas/VectorUpdateRequest'
       responses:
-        "200": { description: Updated }
-        "404": { description: ID not found }
-
+        '200':
+          description: Updated
+        '404':
+          description: ID not found
   /v1/vector/{collection}/delete:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Delete vector
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/VectorDeleteRequest" }
+            schema:
+              $ref: '#/components/schemas/VectorDeleteRequest'
       responses:
-        "200":
+        '200':
           description: Deleted
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorDeleteResponse" }
-        "404": { description: ID not found }
-
+              schema:
+                $ref: '#/components/schemas/VectorDeleteResponse'
+        '404':
+          description: ID not found
   /v1/vector/{collection}/delete_batch:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Batch Delete
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
@@ -779,131 +1053,161 @@ paths:
               properties:
                 ids:
                   type: array
-                  items: { type: string }
+                  items:
+                    type: string
       responses:
-        "200":
+        '200':
           description: Batch results
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorBatchResponse" }
-
+              schema:
+                $ref: '#/components/schemas/VectorBatchResponse'
   /v1/vector/{collection}/get:
     get:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Get vector by ID
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
-        - in: query
-          name: id
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: id
+        required: true
+        schema:
+          type: string
       responses:
-        "200":
+        '200':
           description: Found
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorGetResponse" }
-        "404": { description: Not found }
-
+              schema:
+                $ref: '#/components/schemas/VectorGetResponse'
+        '404':
+          description: Not found
   /v1/vector/{collection}/search:
     post:
-      tags: [Vector Operations]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
       summary: Low-level Vector Search (KNN)
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/VectorSearchRequest" }
+            schema:
+              $ref: '#/components/schemas/VectorSearchRequest'
       responses:
-        "200":
+        '200':
           description: Search results
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/VectorSearchResponse" }
-
-  # --- Document Store ---
+              schema:
+                $ref: '#/components/schemas/VectorSearchResponse'
   /v1/doc/{collection}/{id}:
     put:
-      tags: [Document Store]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Document Store
+      security:
+      - bearerAuth: []
       summary: Store document
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { type: object, description: "Arbitrary JSON document" }
+            schema:
+              type: object
+              description: Arbitrary JSON document
       responses:
-        "200":
+        '200':
           description: Stored
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DocRecord" }
+              schema:
+                $ref: '#/components/schemas/DocRecord'
     get:
-      tags: [Document Store]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Document Store
+      security:
+      - bearerAuth: []
       summary: Retrieve document
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
       responses:
-        "200":
+        '200':
           description: Found
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DocRecord" }
-        "404": { description: Not found }
+              schema:
+                $ref: '#/components/schemas/DocRecord'
+        '404':
+          description: Not found
     delete:
-      tags: [Document Store]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Document Store
+      security:
+      - bearerAuth: []
       summary: Delete document
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
       responses:
-        "200": { description: Deleted }
-        "404": { description: Not found }
-
+        '200':
+          description: Deleted
+        '404':
+          description: Not found
   /v1/doc/{collection}/find:
     post:
-      tags: [Document Store]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - Document Store
+      security:
+      - bearerAuth: []
       summary: Find docs by metadata
       parameters:
-        - in: path
-          name: collection
-          required: true
-          schema: { type: string }
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
@@ -911,46 +1215,199 @@ paths:
             schema:
               type: object
               properties:
-                filter: { nullable: true }
-                limit: { type: integer, default: 20 }
+                filter:
+                  nullable: true
+                limit:
+                  type: integer
+                  default: 20
       responses:
-        "200":
+        '200':
           description: Found docs
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/DocFindResponse" }
-
-  # --- SQL ---
+              schema:
+                $ref: '#/components/schemas/DocFindResponse'
   /v1/sql/query:
     post:
-      tags: [SQL]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - SQL
+      security:
+      - bearerAuth: []
       summary: Execute SELECT query
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/SqlQueryRequest" }
+            schema:
+              $ref: '#/components/schemas/SqlQueryRequest'
       responses:
-        "200":
+        '200':
           description: Result set
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/SqlQueryResponse" }
-
+              schema:
+                $ref: '#/components/schemas/SqlQueryResponse'
   /v1/sql/exec:
     post:
-      tags: [SQL]
-      security: [{ bearerAuth: [] }]
+      tags:
+      - SQL
+      security:
+      - bearerAuth: []
       summary: Execute DDL/DML
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/SqlQueryRequest" }
+            schema:
+              $ref: '#/components/schemas/SqlQueryRequest'
       responses:
-        "200":
+        '200':
           description: Execution result
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/SqlExecResponse" }
+              schema:
+                $ref: '#/components/schemas/SqlExecResponse'
+  /v1/meta/{collection}/execute:
+    post:
+      tags:
+      - Meta
+      security:
+      - bearerAuth: []
+      summary: Execute a Meta Engine query
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: A flexible query object that specifies type (vector, sql,
+                hybrid)
+      responses:
+        '200':
+          description: Query results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /v1/db/{namespace}/ingest:
+    post:
+      tags:
+      - LumaDatabase
+      security:
+      - bearerAuth: []
+      summary: Ingest a document using the Unified Hub
+      description: Automatically extracts text, chunks it, calls an Embedding provider,
+        and saves the vectors, the raw document, and relational metadata synchronously
+        with transactional safety.
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - text
+              properties:
+                text:
+                  type: string
+                  description: The full document text to process and chunk.
+                id:
+                  type: string
+                  description: Optional custom ID for the document. Auto-generated
+                    if omitted.
+                metadata:
+                  type: object
+                  description: Metadata attributes to save in SQLite for relational
+                    filtering.
+      responses:
+        '200':
+          description: Ingested successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  doc_id:
+                    type: string
+                  namespace:
+                    type: string
+        '400':
+          description: Bad Request (e.g. dimension mismatch)
+        '500':
+          description: Internal Server Error (e.g. io_failure_during_transaction)
+  /v1/db/{namespace}/search:
+    post:
+      tags:
+      - LumaDatabase
+      security:
+      - bearerAuth: []
+      summary: Hybrid RAG Search
+      description: Performs a semantic search with SQL pre-filtering. Automatically
+        groups vector chunks and hydrates the full document.
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - query
+              properties:
+                query:
+                  type: string
+                  description: The semantic question or search terms.
+                sql_filter:
+                  type: string
+                  description: Optional. A valid SQL WHERE clause to pre-filter documents
+                    (e.g., "JSON_EXTRACT(metadata, '$.year') = 2024").
+                limit:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Search results with grouped snippets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        score:
+                          type: number
+                          format: float
+                        snippets:
+                          type: array
+                          items:
+                            type: string
+                        document:
+                          type: object
+        '500':
+          description: Internal Server Error
