@@ -75,12 +75,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .unwrap_or(PathBuf::from("data"));
     let search_engine = Arc::new(SearchEngine::new(data_dir)?);
 
+    let embeddings = std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default());
     let app = luma::api::router(
         engine.clone(),
         config.clone(),
         sqlite,
         search_engine,
         auth_store,
+        embeddings,
     );
     let addr = SocketAddr::new(config.bind_addr, config.port);
 

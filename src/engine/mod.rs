@@ -1,6 +1,10 @@
 pub mod adapters;
+pub mod chunking;
+pub mod embeddings;
 mod events;
+pub mod hub;
 pub mod meta;
+pub mod parser;
 mod metrics;
 mod persist;
 mod state;

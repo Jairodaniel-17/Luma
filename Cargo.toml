@@ -45,9 +45,14 @@ serde_urlencoded = "0.7.1"
 sha2 = "0.10.9"
 validator = { version = "0.19", features = ["derive"] }
 async-trait = "0.1.89"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+pdf-extract = "0.10.0"
+docx-rs = "0.4.19"
+quick-xml = { version = "0.31.0", features = ["escape-html"] }
+zip = { version = "8.1.0", features = ["default"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tempfile = "3"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tokio-test = "0.4"

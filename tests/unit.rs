@@ -6,3 +6,5 @@ mod test_meta_engine;
 mod test_sqlite_service;
 #[path = "unit/test_vector_store.rs"]
 mod test_vector_store;
+pub mod test_chunking;
+pub mod test_parser;

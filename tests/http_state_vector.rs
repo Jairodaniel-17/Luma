@@ -4,7 +4,6 @@ use luma::engine::Engine;
 use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -28,7 +27,7 @@ async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
 
-    let app = api::router(engine, config, None, search_engine, None);
+    let app = api::router(engine, config, None, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -55,14 +54,14 @@ async fn state_put_get() {
     let put = client
         .put(format!("{}/v1/state/job:1", base))
         .json(&serde_json::json!({"value":{"progress":1}}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(put.status().is_success());
 
     let got = client
         .get(format!("{}/v1/state/job:1", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(got.status().is_success());
@@ -81,7 +80,7 @@ async fn vector_create_upsert_search() {
     let create = client
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(create.status().is_success());
@@ -89,7 +88,7 @@ async fn vector_create_upsert_search() {
     let upsert = client
         .post(format!("{}/v1/vector/docs/upsert", base))
         .json(&serde_json::json!({"id":"a","vector":[1.0,0.0],"meta":{"tag":"x"}}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(upsert.status().is_success());
@@ -97,7 +96,7 @@ async fn vector_create_upsert_search() {
     let search = client
         .post(format!("{}/v1/vector/docs/search", base))
         .json(&serde_json::json!({"vector":[0.9,0.1],"k":1,"include_meta":true}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(search.status().is_success());
@@ -160,7 +159,7 @@ async fn vector_list_collections_endpoint() {
 
     let initial = client
         .get(format!("{}/v1/vector", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(initial.status().is_success());
@@ -170,14 +169,14 @@ async fn vector_list_collections_endpoint() {
     let create = client
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(create.status().is_success());
 
     let listed = client
         .get(format!("{}/v1/vector", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(listed.status().is_success());
@@ -197,7 +196,7 @@ async fn vector_collection_detail_endpoint() {
 
     let missing = client
         .get(format!("{}/v1/vector/none", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
@@ -207,14 +206,14 @@ async fn vector_collection_detail_endpoint() {
     let create = client
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(create.status().is_success());
 
     let detail = client
         .get(format!("{}/v1/vector/docs", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(detail.status().is_success());
@@ -236,14 +235,14 @@ async fn docstore_put_get_find() {
     let put = client
         .put(format!("{}/v1/doc/users/u1", base))
         .json(&serde_json::json!({"name":"Ada","role":"admin"}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(put.status().is_success());
 
     let get = client
         .get(format!("{}/v1/doc/users/u1", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(get.status().is_success());
@@ -253,7 +252,7 @@ async fn docstore_put_get_find() {
     let find = client
         .post(format!("{}/v1/doc/users/find", base))
         .json(&serde_json::json!({"filter":{"role":"admin"},"limit":10}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(find.status().is_success());
@@ -272,7 +271,7 @@ async fn vector_diskann_build_status_and_tune() {
     let create = client
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":3,"metric":"cosine"}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(create.status().is_success());
@@ -281,7 +280,7 @@ async fn vector_diskann_build_status_and_tune() {
         let upsert = client
             .post(format!("{}/v1/vector/docs/upsert", base))
             .json(&serde_json::json!({"id":id,"vector":vector}))
-            .send()
+            .bearer_auth("test").bearer_auth("test").send()
             .await
             .unwrap();
         assert!(upsert.status().is_success());
@@ -290,7 +289,7 @@ async fn vector_diskann_build_status_and_tune() {
     let build = client
         .post(format!("{}/v1/vector/docs/diskann/build", base))
         .json(&serde_json::json!({"max_degree":16,"search_list_size":48}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(build.status().is_success());
@@ -300,7 +299,7 @@ async fn vector_diskann_build_status_and_tune() {
 
     let status = client
         .get(format!("{}/v1/vector/docs/diskann/status", base))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(status.status().is_success());
@@ -310,12 +309,43 @@ async fn vector_diskann_build_status_and_tune() {
     let tune = client
         .post(format!("{}/v1/vector/docs/diskann/tune", base))
         .json(&serde_json::json!({"search_list_size":96}))
-        .send()
+        .bearer_auth("test").bearer_auth("test").send()
         .await
         .unwrap();
     assert!(tune.status().is_success());
     let tune_body: serde_json::Value = tune.json().await.unwrap();
     assert_eq!(tune_body["params"]["search_list_size"], 96);
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn meta_execute_endpoint() {
+    let (base, shutdown) = start().await;
+    let client = reqwest::Client::new();
+
+    // First create a collection
+    let create = client
+        .post(format!("{}/v1/vector/docs", base))
+        .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap();
+    assert!(create.status().is_success());
+
+    // Execute meta query
+    let meta_exec = client
+        .post(format!("{}/v1/meta/docs/execute", base))
+        .json(&serde_json::json!({"type":"vector","vector":[0.9,0.1],"k":1,"include_meta":true}))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap();
+    
+    assert!(meta_exec.status().is_success());
+    let v: serde_json::Value = meta_exec.json().await.unwrap();
+    assert!(v.as_array().is_some());
 
     let _ = shutdown.send(());
 }

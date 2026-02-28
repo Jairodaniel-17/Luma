@@ -5,6 +5,8 @@ pub mod routes_auth;
 pub mod routes_doc;
 pub mod routes_docs;
 pub mod routes_events;
+pub mod routes_hub;
+pub mod routes_meta;
 pub mod routes_search;
 pub mod routes_sql;
 pub mod routes_state;
@@ -32,6 +34,7 @@ pub struct AppState {
     pub sqlite: Option<SqliteService>,
     pub search_engine: Arc<SearchEngine>,
     pub auth_store: Option<Arc<AuthStore>>,
+    pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
 }
 
 pub fn router(
@@ -40,6 +43,7 @@ pub fn router(
     sqlite: Option<SqliteService>,
     search_engine: Arc<SearchEngine>,
     auth_store: Option<Arc<AuthStore>>,
+    embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
 ) -> Router {
     let state = AppState {
         engine,
@@ -47,6 +51,7 @@ pub fn router(
         sqlite,
         search_engine,
         auth_store,
+        embeddings,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -121,6 +126,9 @@ pub fn router(
         )
         .route("/v1/sql/query", post(routes_sql::query))
         .route("/v1/sql/exec", post(routes_sql::exec))
+        .route("/v1/db/:namespace/ingest", post(routes_hub::ingest))
+        .route("/v1/db/:namespace/search", post(routes_hub::search))
+        .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/search", post(routes_search::search))
         .route("/search/ingest", post(routes_search::ingest))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))

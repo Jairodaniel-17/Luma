@@ -66,6 +66,63 @@ Luma está construido sobre el ecosistema de **Rust**, priorizando la seguridad 
 
 ---
 
+
+---
+
+## 🧭 Paradigma de Uso: Dos Niveles (Nivel 1 y Nivel 2)
+
+Luma está diseñado bajo una arquitectura "A la Carta", lo que significa que puedes usarlo como una base de datos simple de bajo nivel, o como un poderoso motor orquestador para flujos RAG completos.
+
+### Nivel 1: Endpoints Primitivos (Modo "A la Carta")
+Ideales para máxima velocidad y bajo overhead. Cada motor funciona de forma aislada para que tú gestiones la lógica desde tu backend.
+*   **Vectorial:** `/v1/vector/...` (Búsquedas KNN/ANN. Solo arrays de floats).
+*   **Documentos:** `/v1/doc/...` (Almacenamiento de JSON, como un MongoDB ligero).
+*   **Clave-Valor:** `/v1/state/...` (Para locks, coordinación, configuración).
+*   **Relacional:** `/v1/sql/...` (Ejecución cruda de queries SQLite).
+
+### Nivel 2: LumaDatabase Hub (Modo Híbrido RAG)
+El orquestador interno (`LumaDatabase`) fusiona el poder de todos los motores para hacer el trabajo pesado por ti. Segmenta documentos grandes (Chunking), se conecta a modelos de Embeddings (Ollama/OpenAI) de forma automática, y hace **Pre-filtrado SQL estricto** a la velocidad de la luz antes de realizar la búsqueda vectorial, evitando los problemas clásicos del "Post-filtrado" vectorial.
+
+#### 1. Ingesta Automática (`POST /v1/db/{namespace}/ingest`)
+Luma procesa el texto, se conecta al modelo de IA configurado, crea la colección si no existe, divide el texto si es muy largo, guarda los vectores, y almacena tus metadatos en SQLite de forma transaccional (con *Rollback* automático si falla I/O).
+
+```json
+{
+  "id": "contrato_juan_perez", 
+  "text": "El arrendatario se compromete a pagar $500 mensuales...",
+  "metadata": {
+    "cliente": "Juan Perez",
+    "year": 2024,
+    "tipo": "alquiler",
+    "activo": true
+  }
+}
+```
+
+#### 2. Búsqueda Híbrida con Pre-filtrado Relacional (`POST /v1/db/{namespace}/search`)
+Busca semánticamente usando un modelo de embeddings y filtra rígidamente (Pre-filtro) usando SQLite para garantizar un 100% de precisión. Luma "colapsa" internamente los fragmentos (chunks) y te devuelve el documento padre hidratado con sus mejores *snippets*.
+
+```json
+{
+  "query": "cláusula sobre el precio del alquiler",
+  "limit": 5,
+  "sql_filter": "json_extract(metadata, '$.tipo') = 'alquiler' AND json_extract(metadata, '$.year') = 2024"
+}
+```
+
+*Incluso si existe un contrato de compra-venta de 2023 muy parecido semánticamente a la pregunta, Luma lo descartará instantáneamente en la fase SQLite (usando el canal de concurrencia MPSC en memoria) antes de desperdiciar CPU en el motor vectorial.*
+
+### 🔌 Configuración de Embeddings (BYOM - Bring Your Own Model)
+Para no engordar el binario con librerías pesadas de C++, Luma usa un cliente ligero HTTP integrado. Simplemente configúralo en tu código o entorno:
+
+```rust
+// Ejemplo para Ollama local
+luma::engine::embeddings::EmbeddingProvider::Ollama {
+    api_url: "http://localhost:11434".to_string(),
+    model: "granite-embedding:30m".to_string(),
+}
+```
+
 ## 💡 Flujos de Trabajo Híbridos
 
 Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con bases de datos aisladas:

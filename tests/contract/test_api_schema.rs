@@ -4,7 +4,6 @@ use luma::api::router;
 use luma::config::Config;
 use luma::engine::Engine;
 use luma::search::engine::SearchEngine;
-use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -22,7 +21,7 @@ async fn test_health_check_contract() {
     let engine = Engine::new(config.clone(), token).unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
-    let app = router(engine, config, None, search_engine, None);
+    let app = router(engine, config, None, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
 
     let response = app
         .oneshot(
@@ -58,7 +57,7 @@ async fn test_error_schema_contract() {
     let engine = Engine::new(config.clone(), token).unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
-    let app = router(engine, config, None, search_engine, None);
+    let app = router(engine, config, None, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
 
     // Request with missing auth
     let response = app

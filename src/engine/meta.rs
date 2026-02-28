@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub struct MetaEngine {
     core: Arc<Engine>,
     sqlite: Option<Arc<SqliteService>>,
+    #[allow(dead_code)]
     search: Arc<SearchEngine>,
 }
 
