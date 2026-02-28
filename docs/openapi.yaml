@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Luma API
-  version: 0.1.0
+  version: 1.2.0
   description: 'API documentation for **Luma**, a lightweight, high-performance vector
     database optimized for RAG (Retrieval-Augmented Generation).
 
@@ -14,7 +14,7 @@ info:
 
     - **Document Store**: Raw document storage linked to vectors.
 
-    - **RAG Search**: High-level semantic search with grouping.
+    - **RAG Search (Legacy)**: High-level semantic search with grouping.
 
     - **Real-time**: SSE streaming of database events.
 
@@ -694,7 +694,12 @@ paths:
       tags:
       - RAG Search
       summary: High-level Semantic Search
-      description: 'Performs a semantic search using a text query.
+      description: '**DEPRECATED**. Please use the new `LumaDatabase` Level 2 endpoints
+        (`/v1/db/{namespace}/search` and `/v1/db/{namespace}/ingest`) which offer
+        superior performance, SQL pre-filtering, and automatic chunking.
+
+
+        Performs a semantic search using a text query.
 
         Currently uses **mock embeddings** (random deterministic) for testing flows.
 
@@ -716,6 +721,7 @@ paths:
                 $ref: '#/components/schemas/HighLevelSearchResponse'
         '500':
           description: Internal Error
+      deprecated: true
   /v1/state:
     get:
       tags:
