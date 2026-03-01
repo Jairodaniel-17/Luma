@@ -47,7 +47,7 @@ impl SearchEngine {
         let group_field = req.group_by.as_deref();
 
         let mut iter = self.storage.scan_metadata()?;
-        while let Some(res) = iter.next() {
+        for res in iter {
             let (offset, _id, meta) = res?;
 
             // Filters

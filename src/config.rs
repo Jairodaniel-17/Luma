@@ -398,7 +398,7 @@ fn resolve_bind_addr() -> IpAddr {
 
 fn resolve_sqlite_enabled() -> bool {
     let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+    for arg in args {
         if arg == "--no-sqlite" {
             return false;
         }

@@ -119,7 +119,7 @@ impl DiskGraph {
         let mut visited = HashSet::new();
         let mut to_visit = BinaryHeap::new();
 
-        let entry_allowed = filter_candidates.map_or(true, |f| f.contains(&entry_node.id));
+        let entry_allowed = filter_candidates.is_none_or(|f| f.contains(&entry_node.id));
         if entry_allowed {
             let entry_score = q8::dot(&entry_node.vector, &q_query, simd_enabled);
             to_visit.push(VisitState {

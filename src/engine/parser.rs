@@ -7,7 +7,7 @@ pub struct DocumentParser;
 
 impl DocumentParser {
     pub fn extract_text(filename: &str, content: &[u8]) -> Result<String> {
-        let ext = filename.split('.').last().unwrap_or("").to_lowercase();
+        let ext = filename.split('.').next_back().unwrap_or("").to_lowercase();
         match ext.as_str() {
             "txt" | "md" | "json" | "csv" => Self::extract_text_plain(content),
             "pdf" => Self::extract_text_pdf(content),

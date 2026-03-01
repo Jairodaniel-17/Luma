@@ -21,8 +21,8 @@ impl SqliteService {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&db_path)?;
-        conn.pragma_update(None, "journal_mode", &"WAL")?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let (sender, receiver) = mpsc::channel(1000);
@@ -47,7 +47,7 @@ impl SqliteService {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.pragma_update(None, "journal_mode", &"WAL")?;
+            conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
             let mut stmt = conn.prepare(&sql)?;

@@ -22,7 +22,7 @@ pub async fn ingest(
         })?;
 
     let doc_id_val = payload.get("id").and_then(|v| v.as_str());
-    let doc_id = doc_id_val.unwrap_or_else(|| "");
+    let doc_id = doc_id_val.unwrap_or("");
     let generated_id = if doc_id.is_empty() {
         Uuid::new_v4().to_string()
     } else {
