@@ -695,7 +695,7 @@ fn apply_disk_record(
                 .unwrap_or_else(|| quantize_per_vector(&v));
             state
                 .items
-                .insert(record.id.clone(), VectorItem { vector: v, meta });
+                .insert(record.id.clone(), VectorItem { vector: v, meta, mmap_offset: None });
             state.quantized.insert(record.id.clone(), q);
             if let Some(run) = run_file {
                 state.item_runs.insert(record.id, run.to_string());
