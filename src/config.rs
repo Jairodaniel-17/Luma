@@ -46,6 +46,11 @@ pub struct Config {
     pub run_retention: usize,
     pub compaction_trigger_tombstone_ratio: f32,
     pub compaction_max_bytes_per_pass: u64,
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_url: String,
+    pub embedding_api_key: String,
+    pub embedding_dim: usize,
 }
 
 impl Default for Config {
@@ -92,6 +97,11 @@ impl Default for Config {
             run_retention: 8,
             compaction_trigger_tombstone_ratio: 0.2,
             compaction_max_bytes_per_pass: 1_073_741_824,
+            embedding_provider: "none".to_string(),
+            embedding_model: "".to_string(),
+            embedding_url: "".to_string(),
+            embedding_api_key: "".to_string(),
+            embedding_dim: 384,
         }
     }
 }
@@ -263,6 +273,16 @@ impl Config {
         let sqlite_enabled = resolve_sqlite_enabled();
         let sqlite_path = std::env::var("SQLITE_DB_PATH").ok();
 
+        let embedding_provider =
+            std::env::var("EMBEDDING_PROVIDER").unwrap_or_else(|_| "none".to_string());
+        let embedding_model = std::env::var("EMBEDDING_MODEL").unwrap_or_default();
+        let embedding_url = std::env::var("EMBEDDING_URL").unwrap_or_default();
+        let embedding_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_default();
+        let embedding_dim = std::env::var("EMBEDDING_DIM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(384);
+
         Ok(Self {
             port,
             bind_addr,
@@ -305,6 +325,11 @@ impl Config {
             run_retention,
             compaction_trigger_tombstone_ratio,
             compaction_max_bytes_per_pass,
+            embedding_provider,
+            embedding_model,
+            embedding_url,
+            embedding_api_key,
+            embedding_dim,
         })
     }
 }
