@@ -4,6 +4,7 @@ mod ivf;
 mod persist;
 pub mod q8;
 mod simd;
+pub mod mmap;
 
 pub use index::{DiskAnnIndex, DiskVectorIndex, VectorIndex};
 pub use ivf::IndexKind;
@@ -233,6 +234,7 @@ struct Collection {
     manifest: Manifest,
     items: HashMap<String, VectorItem>,
     q8_store: HashMap<String, QuantizedVec>,
+    mmap_store: Option<mmap::VectorMmap>,
     applied_offset: u64,
     segments: Vec<SegmentIndex>,
     item_segments: HashMap<String, usize>,
@@ -789,9 +791,10 @@ impl Collection {
             dim,
             metric,
             layout,
-            manifest,
+            manifest: manifest.clone(),
             items,
             q8_store: quantized,
+            mmap_store: None,
             item_runs,
             applied_offset,
             segments: Vec::new(),
@@ -804,6 +807,14 @@ impl Collection {
             item_clusters: HashMap::new(),
             disk_graph: None,
         };
+        if let Some(layout) = &c.layout {
+            let initial_capacity = (manifest.total_records as usize * 2).max(1024);
+            match mmap::VectorMmap::create_or_open(&layout.mmap_path, dim, initial_capacity) {
+                Ok(store) => c.mmap_store = Some(store),
+                Err(e) => tracing::warn!("Failed to initialize mmap store: {}", e),
+            }
+        }
+        
         c.load_ivf_from_disk()
             .map_err(|_| VectorError::Persistence)?;
         c.load_disk_graph().map_err(|_| VectorError::Persistence)?;
@@ -1249,7 +1260,17 @@ impl Collection {
             if mode.is_none() {
                 let _ = persist::append_record(layout, &mut self.manifest, &record)
                     .map_err(|_| VectorError::Persistence)?;
+                
+                // Also append to new mmap store if it's an upsert
                 if record.op == RecordOp::Upsert {
+                    if let Some(vec) = &normalized_vec {
+                        if let Some(mmap) = self.mmap_store.as_mut() {
+                            if let Err(e) = mmap.append(vec) {
+                                tracing::warn!("Failed to append to mmap store: {}", e);
+                            }
+                        }
+                    }
+                    
                     if let Some(run) = self.manifest.runs.last() {
                         self.item_runs.insert(record.id.clone(), run.file.clone());
                     }
