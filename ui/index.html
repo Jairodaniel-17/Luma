@@ -144,7 +144,11 @@
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
                     Events
                 </button>
-                <button @click="currentTab = 'access'" :class="currentTab === 'access' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg ml-auto">
+                <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg ml-auto">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                    Settings
+                </button>
+                <button @click="currentTab = 'access'" :class="currentTab === 'access' ? 'tab-active' : 'tab-inactive'" class="whitespace-nowrap py-3 px-5 border-b-2 font-medium text-sm flex items-center gap-2 transition-all rounded-t-lg">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
                     Access
                 </button>
@@ -476,6 +480,57 @@
             </div>
         </div>
 
+        <!-- TAB: SETTINGS -->
+        <div x-show="currentTab === 'settings'" x-transition.opacity.duration.300ms>
+            <div class="max-w-4xl mx-auto space-y-6">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="text-xl font-bold text-white">Luma Configuration</h2>
+                        <p class="text-sm text-gray-500 mt-1">Global engine parameters. Changes are saved to <code>luma.toml</code> and require a restart.</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button @click="fetchSettings()" class="text-xs bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded transition-colors border border-gray-700">Refresh</button>
+                        <button @click="saveSettings()" class="text-xs bg-accent hover:bg-accent/80 text-white px-4 py-2 rounded font-bold transition-colors shadow-lg shadow-accent/20">Save & Apply</button>
+                    </div>
+                </div>
+                
+                <div x-show="settingsMessage" x-transition class="bg-green-900/20 border border-green-500/50 text-green-400 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                    <span x-text="settingsMessage"></span>
+                </div>
+
+                <div x-show="settingsError" x-transition class="bg-red-900/20 border border-red-500/50 text-red-400 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    <span x-text="settingsError"></span>
+                </div>
+
+                <div class="glass-panel border border-gray-800 rounded-xl overflow-hidden" x-show="settingsObj">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-px bg-gray-800/50">
+                        <template x-for="(value, key) in settingsObj" :key="key">
+                            <div class="bg-[#050505] p-5 flex flex-col hover:bg-gray-900/40 transition-colors group">
+                                <label class="text-xs text-gray-400 uppercase tracking-wider font-semibold mb-2 group-hover:text-accent transition-colors" x-text="key"></label>
+                                <template x-if="typeof value === 'boolean'">
+                                    <select x-model="settingsObj[key]" class="w-full bg-gray-950/80 border border-gray-800 rounded-lg px-3 py-2 text-white focus:border-accent focus:outline-none text-sm font-mono appearance-none cursor-pointer">
+                                        <option :value="true" :selected="value === true">true</option>
+                                        <option :value="false" :selected="value === false">false</option>
+                                    </select>
+                                </template>
+                                <template x-if="typeof value === 'number'">
+                                    <input type="number" x-model.number="settingsObj[key]" class="w-full bg-gray-950/80 border border-gray-800 rounded-lg px-3 py-2 text-white focus:border-accent focus:outline-none text-sm font-mono">
+                                </template>
+                                <template x-if="typeof value === 'string'">
+                                    <input type="text" x-model="settingsObj[key]" class="w-full bg-gray-950/80 border border-gray-800 rounded-lg px-3 py-2 text-white focus:border-accent focus:outline-none text-sm font-mono">
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+                <div x-show="!settingsObj" class="text-center py-12 text-gray-500 glass-panel rounded-xl border border-gray-800">
+                     Loading configuration...
+                </div>
+            </div>
+        </div>
+
         <!-- TAB: ACCESS -->
         <div x-show="currentTab === 'access'" x-transition.opacity.duration.300ms>
             <div class="max-w-3xl mx-auto">
@@ -595,6 +650,11 @@
                 sseConnected: false,
                 sseSource: null,
 
+                // Settings
+                settingsObj: null,
+                settingsMessage: '',
+                settingsError: '',
+
                 // Access
                 accessKeys: [],
                 newKeyName: '',
@@ -642,6 +702,7 @@
 
                     this.$watch('currentTab', (val) => {
                         if(val === 'access') this.fetchKeys();
+                        if(val === 'settings') this.fetchSettings();
                     });
 
                     this.connectSSE();
@@ -710,6 +771,39 @@
                         alert('Connection error');
                     } finally {
                         this.ragLoading = false;
+                    }
+                },
+
+                // --- SETTINGS ---
+                async fetchSettings() {
+                    try {
+                        const res = await this.authenticatedFetch('/v1/config');
+                        if (res.ok) {
+                            this.settingsObj = await res.json();
+                            this.settingsError = '';
+                        }
+                    } catch(e) {
+                        this.settingsError = "Failed to load configuration.";
+                    }
+                },
+
+                async saveSettings() {
+                    this.settingsMessage = '';
+                    this.settingsError = '';
+                    try {
+                        const res = await this.authenticatedFetch('/v1/config', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.settingsObj)
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                            this.settingsMessage = data.message || "Configuration saved.";
+                        } else {
+                            this.settingsError = data.message || "Failed to save configuration.";
+                        }
+                    } catch(e) {
+                        this.settingsError = "Connection error while saving.";
                     }
                 },
 

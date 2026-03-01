@@ -97,6 +97,29 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn load() -> anyhow::Result<Self> {
+        let path = std::path::Path::new("luma.toml");
+        if path.exists() {
+            let content = std::fs::read_to_string(path)?;
+            let config: Config = toml::from_str(&content)?;
+            return Ok(config);
+        }
+        
+        let config = Self::from_env()?;
+        if let Err(e) = config.save() {
+            tracing::warn!("Could not automatically generate luma.toml: {}", e);
+        } else {
+            tracing::info!("Auto-generated default luma.toml configuration file.");
+        }
+        Ok(config)
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write("luma.toml", content)?;
+        Ok(())
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let port = resolve_port();
         let bind_addr = resolve_bind_addr();
