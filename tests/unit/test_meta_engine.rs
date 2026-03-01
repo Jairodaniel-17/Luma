@@ -37,6 +37,7 @@ async fn test_meta_engine_hybrid() {
         VectorItem {
             vector: vec![1.0, 0.0, 0.0, 0.0],
             meta: json!({"id": "doc1"}), // Metadata with ID for SQL match
+            mmap_offset: None,
         },
     )
     .unwrap();

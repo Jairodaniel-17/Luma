@@ -456,13 +456,16 @@ impl Eq for VisitState {}
 
 impl PartialOrd for VisitState {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.score.partial_cmp(&self.score)
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for VisitState {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        other
+            .score
+            .partial_cmp(&self.score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -523,7 +526,9 @@ mod tests {
         let path = dir.path().join("graph.bin");
         std::fs::write(&path, bytes).unwrap();
         let graph = DiskGraph::load_from_path(&path).expect("load graph");
-        let hits = graph.search(&[1.0, 0.0], true, 4, 2).expect("search hits");
+        let hits = graph
+            .search(&[1.0, 0.0], true, 4, 2, None)
+            .expect("search hits");
         assert!(!hits.is_empty());
         let id = graph.id_for(hits[0].0).unwrap().unwrap();
         assert_eq!(id, "a");

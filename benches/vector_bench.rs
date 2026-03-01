@@ -1,5 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use luma::vector::{IndexKind, Metric, SearchRequest, VectorItem, VectorSettings, VectorStore};
+use luma::vector::{
+    IndexKind, Metric, SearchOptions, SearchRequest, VectorItem, VectorSettings, VectorStore,
+};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -29,6 +31,7 @@ fn bench_vector_ops(c: &mut Criterion) {
     let item_template = VectorItem {
         vector: vector_128.clone(),
         meta: json!({}),
+        mmap_offset: None,
     };
 
     group.bench_function("add_vector", |b| {
@@ -47,10 +50,13 @@ fn bench_vector_ops(c: &mut Criterion) {
     }
 
     let req = SearchRequest {
-        vector: vector_128.clone(),
+        vector: vector_128,
         k: 10,
-        filters: None,
-        include_meta: None,
+        options: SearchOptions {
+            filters: None,
+            include_meta: false,
+            allowed_ids: None,
+        },
     };
 
     group.bench_function("search_vector", |b| {

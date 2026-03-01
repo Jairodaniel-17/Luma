@@ -157,7 +157,7 @@ async fn hub_search_endpoint() {
     let first_hit = &results[0];
     assert_eq!(first_hit["id"], "doc_123");
     assert!(first_hit["score"].as_f64().is_some());
-    assert!(first_hit["snippets"].as_array().unwrap().len() > 0);
+    assert!(!first_hit["snippets"].as_array().unwrap().is_empty());
     assert_eq!(first_hit["document"]["text"].as_str().unwrap(), "The quick brown fox jumps over the lazy dog. This is a very important test document for the search feature.");
 
     let _ = shutdown.send(());

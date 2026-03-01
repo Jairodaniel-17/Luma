@@ -685,7 +685,7 @@ pub async fn search(
             "vector too large",
         ));
     }
-    if let Some(filters) = &body.filters {
+    if let Some(filters) = &body.options.filters {
         let estimated = serde_json::to_vec(filters).map(|v| v.len()).unwrap_or(0);
         if estimated > state.config.max_json_bytes {
             return Err(ApiError::new(

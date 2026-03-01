@@ -1,7 +1,7 @@
 use luma::config::Config;
 use luma::engine::Engine;
 use luma::vector::index::DiskAnnBuildParams;
-use luma::vector::{Metric, SearchRequest, VectorItem};
+use luma::vector::{Metric, SearchOptions, SearchRequest, VectorItem};
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -122,6 +122,7 @@ async fn vector_persistence_restart_search() {
             VectorItem {
                 vector: vec![1.0, 0.0, 0.0],
                 meta: json!({"tag": "persist"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -134,8 +135,11 @@ async fn vector_persistence_restart_search() {
             SearchRequest {
                 vector: vec![1.0, 0.0, 0.0],
                 k: 1,
-                filters: None,
-                include_meta: Some(true),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: true,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -163,6 +167,7 @@ async fn vector_rebuild_handles_many_vectors() {
                 VectorItem {
                     vector: vec![weight, 1.0 - weight],
                     meta: json!({ "i": i }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -176,8 +181,11 @@ async fn vector_rebuild_handles_many_vectors() {
             SearchRequest {
                 vector: vec![0.72, 0.28],
                 k: 3,
-                filters: None,
-                include_meta: Some(false),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -202,6 +210,7 @@ async fn vector_delete_update_persisted() {
             VectorItem {
                 vector: vec![0.0, 1.0, 0.0],
                 meta: json!({"state": "keep"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -212,6 +221,7 @@ async fn vector_delete_update_persisted() {
             VectorItem {
                 vector: vec![1.0, 0.0, 0.0],
                 meta: json!({"state": "gone"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -229,8 +239,11 @@ async fn vector_delete_update_persisted() {
             SearchRequest {
                 vector: vec![0.0, 0.0, 1.0],
                 k: 1,
-                filters: None,
-                include_meta: Some(false),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -255,6 +268,7 @@ async fn vector_runs_tail_truncation_safe() {
                 VectorItem {
                     vector: vec![idx as f32, 1.0, 0.0, 0.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -278,8 +292,11 @@ async fn vector_runs_tail_truncation_safe() {
             SearchRequest {
                 vector: vec![1.0, 1.0, 0.0, 0.0],
                 k: 5,
-                filters: None,
-                include_meta: Some(false),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -307,6 +324,7 @@ async fn vector_runs_checksum_detection() {
                 VectorItem {
                     vector: vec![idx as f32, 0.0, 1.0, 0.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -360,6 +378,7 @@ async fn vector_q8_run_roundtrip() {
             VectorItem {
                 vector: vec![1.0, 0.0, 0.0],
                 meta: json!({"dir": "north"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -370,6 +389,7 @@ async fn vector_q8_run_roundtrip() {
             VectorItem {
                 vector: vec![0.0, 1.0, 0.0],
                 meta: json!({"dir": "east"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -380,6 +400,7 @@ async fn vector_q8_run_roundtrip() {
             VectorItem {
                 vector: vec![0.0, -1.0, 0.0],
                 meta: json!({"dir": "west"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -402,8 +423,11 @@ async fn vector_q8_run_roundtrip() {
             SearchRequest {
                 vector: vec![1.0, 0.0, 0.0],
                 k: 1,
-                filters: None,
-                include_meta: Some(true),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: true,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -439,6 +463,7 @@ async fn vector_run_retention_compacts_old_runs() {
                         1.0 - (idx as f32 / 200.0),
                     ],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -486,6 +511,7 @@ async fn vector_compaction_triggers_on_tombstones() {
                 VectorItem {
                     vector: vec![idx as f32, 1.0, 0.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -547,6 +573,7 @@ async fn vector_manifest_settings_persisted() {
                 VectorItem {
                     vector: vec![idx as f32, 0.0, 1.0, 0.5],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -579,6 +606,7 @@ async fn vector_manifest_settings_persisted() {
             VectorItem {
                 vector: vec![1.0, 1.0, 1.0, 1.0],
                 meta: json!({ "state": "extra" }),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -614,6 +642,7 @@ async fn vector_compaction_budget_multiple_passes() {
                 VectorItem {
                     vector: vec![idx as f32, 0.0, 1.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -653,8 +682,11 @@ async fn vector_compaction_budget_multiple_passes() {
             SearchRequest {
                 vector: vec![80.0, 0.0, 1.0],
                 k: 1,
-                filters: None,
-                include_meta: Some(false),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -681,6 +713,7 @@ async fn vector_disk_index_manifest_roundtrip() {
             VectorItem {
                 vector: vec![1.0, 0.0, 0.0],
                 meta: json!({"k": "a"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -691,6 +724,7 @@ async fn vector_disk_index_manifest_roundtrip() {
             VectorItem {
                 vector: vec![0.0, 1.0, 0.0],
                 meta: json!({"k": "b"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -758,6 +792,7 @@ async fn vector_diskann_search_roundtrip() {
             VectorItem {
                 vector: vec![1.0, 0.0, 0.0],
                 meta: json!({"dir": "north"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -768,6 +803,7 @@ async fn vector_diskann_search_roundtrip() {
             VectorItem {
                 vector: vec![0.0, 1.0, 0.0],
                 meta: json!({"dir": "east"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -778,6 +814,7 @@ async fn vector_diskann_search_roundtrip() {
             VectorItem {
                 vector: vec![0.0, -1.0, 0.0],
                 meta: json!({"dir": "west"}),
+                mmap_offset: None,
             },
         )
         .unwrap();
@@ -798,8 +835,11 @@ async fn vector_diskann_search_roundtrip() {
             SearchRequest {
                 vector: vec![1.0, 0.0, 0.0],
                 k: 1,
-                filters: None,
-                include_meta: Some(true),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: true,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();

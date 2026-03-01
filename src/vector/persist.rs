@@ -335,15 +335,15 @@ pub fn init_collection(
     Ok(())
 }
 
-pub fn load_collection(
-    layout: &CollectionLayout,
-) -> anyhow::Result<(
+pub type VectorCollectionData = (
     Manifest,
     HashMap<String, VectorItem>,
     HashMap<String, QuantizedVec>,
     HashMap<String, String>,
     u64,
-)> {
+);
+
+pub fn load_collection(layout: &CollectionLayout) -> anyhow::Result<VectorCollectionData> {
     let manifest = read_manifest(layout).map_err(|_| VectorError::Persistence)?;
     let data = read_records(layout, &manifest)?;
     let mut manifest2 = manifest.clone();

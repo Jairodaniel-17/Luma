@@ -1,6 +1,6 @@
 use luma::config::Config;
 use luma::engine::Engine;
-use luma::vector::{Metric, SearchRequest, VectorItem};
+use luma::vector::{Metric, SearchOptions, SearchRequest, VectorItem};
 use tokio_util::sync::CancellationToken;
 
 fn config_for(dir: &str) -> Config {
@@ -72,6 +72,7 @@ async fn vector_roundtrip_matrix_dims() {
                     VectorItem {
                         vector,
                         meta: serde_json::json!({ "dim": dim, "idx": idx }),
+                        mmap_offset: None,
                     },
                 )
                 .unwrap();
@@ -88,8 +89,11 @@ async fn vector_roundtrip_matrix_dims() {
                 SearchRequest {
                     vector: vec![1.0; dim],
                     k: 5,
-                    filters: None,
-                    include_meta: Some(true),
+                    options: SearchOptions {
+                        filters: None,
+                        include_meta: true,
+                        allowed_ids: None,
+                    },
                 },
             )
             .unwrap();
