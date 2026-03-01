@@ -166,7 +166,7 @@ pub struct CreateCollectionRequest {
 pub struct VectorItem {
     pub vector: Vec<f32>,
     pub meta: serde_json::Value,
-    pub mmap_offset: Option<usize>,
+    pub mmap_offset: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,13 +196,17 @@ pub enum VectorError {
     UnsupportedOperation,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub vector: Vec<f32>,
     pub k: usize,
+    pub options: SearchOptions,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SearchOptions {
     pub filters: Option<serde_json::Value>,
-    pub include_meta: Option<bool>,
-    pub allowed_ids: Option<std::collections::HashSet<String>>,
+    pub include_meta: bool,
+    pub allowed_ids: Option<HashSet<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

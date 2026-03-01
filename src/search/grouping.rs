@@ -62,7 +62,7 @@ impl GroupedResults {
     }
 
     pub fn push(&mut self, key: GroupKey, score: f32, offset: u64) {
-        let entry = self.groups.entry(key).or_insert_with(BinaryHeap::new);
+        let entry = self.groups.entry(key).or_default();
 
         entry.push(Reverse(ScoredOffset { score, offset }));
         if entry.len() > self.limit {
