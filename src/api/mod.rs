@@ -2,6 +2,7 @@ pub mod auth;
 pub mod auth_store;
 pub mod errors;
 pub mod routes_auth;
+pub mod routes_config;
 pub mod routes_doc;
 pub mod routes_docs;
 pub mod routes_events;
@@ -12,7 +13,6 @@ pub mod routes_sql;
 pub mod routes_state;
 pub mod routes_ui;
 pub mod routes_vector;
-pub mod routes_config;
 
 use crate::config::Config;
 use crate::engine::Engine;

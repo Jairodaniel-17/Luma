@@ -10,19 +10,19 @@ fn test_long_document_chunking() {
 
 ", i));
     }
-    
+
     let chunks = engine.split_text(&text);
-    
+
     // We expect multiple chunks, not just 1, and no chunk should be significantly larger than chunk_size
     assert!(chunks.len() > 1);
     for chunk in &chunks {
         assert!(chunk.len() <= 100 + 50); // slight buffer for word completion if needed
     }
-    
+
     // Check overlap: The end of chunk 0 should share some words with the beginning of chunk 1
     let last_words_0: Vec<&str> = chunks[0].split_whitespace().rev().take(5).collect();
     let first_words_1: Vec<&str> = chunks[1].split_whitespace().take(10).collect();
-    
+
     // We reverse last_words_0 back to normal order for comparison, or just check if any word intersects
     let mut intersection = false;
     for w in last_words_0 {
@@ -31,5 +31,8 @@ fn test_long_document_chunking() {
             break;
         }
     }
-    assert!(intersection, "There should be overlap between consecutive chunks");
+    assert!(
+        intersection,
+        "There should be overlap between consecutive chunks"
+    );
 }

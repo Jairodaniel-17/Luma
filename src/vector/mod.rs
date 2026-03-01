@@ -1,10 +1,10 @@
 mod diskann;
 pub mod index;
 mod ivf;
+pub mod mmap;
 mod persist;
 pub mod q8;
 mod simd;
-pub mod mmap;
 
 pub use index::{DiskAnnIndex, DiskVectorIndex, VectorIndex};
 pub use ivf::IndexKind;
@@ -383,37 +383,51 @@ impl VectorStore {
 
         Ok(Self(Arc::new(Inner {
             data_dir: Some(data_dir),
-            collections: collections.into_iter().map(|(k, v)| (k, Arc::new(RwLock::new(v)))).collect(),
+            collections: collections
+                .into_iter()
+                .map(|(k, v)| (k, Arc::new(RwLock::new(v))))
+                .collect(),
             settings,
         })))
     }
 
     pub fn applied_offset(&self) -> u64 {
-        self.0.collections.iter().map(|c| c.read().applied_offset).max().unwrap_or(0)
+        self.0
+            .collections
+            .iter()
+            .map(|c| c.read().applied_offset)
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn get_collection(&self, name: &str) -> Option<(usize, Metric)> {
-        self.0.collections.get(name).map(|c| { let c = c.read(); (c.dim, c.metric) })
+        self.0.collections.get(name).map(|c| {
+            let c = c.read();
+            (c.dim, c.metric)
+        })
     }
     pub fn get_collection_info(&self, name: &str) -> Option<VectorCollectionInfo> {
-        self.0.collections.get(name).map(|c| { let c = c.read(); VectorCollectionInfo {
-            collection: name.to_string(),
-            dim: c.dim,
-            metric: c.metric,
-            live_count: c.manifest.live_count,
-            total_records: c.manifest.total_records,
-            upsert_count: c.manifest.upsert_count,
-            file_len: c.manifest.file_len,
-            applied_offset: c.manifest.applied_offset,
-            created_at_ms: None,
-            updated_at_ms: None,
-            segments: Some(c.segments.len()),
-            deleted_count: Some(
-                c.manifest
-                    .total_records
-                    .saturating_sub(c.manifest.live_count as u64),
-            ),
-        } })
+        self.0.collections.get(name).map(|c| {
+            let c = c.read();
+            VectorCollectionInfo {
+                collection: name.to_string(),
+                dim: c.dim,
+                metric: c.metric,
+                live_count: c.manifest.live_count,
+                total_records: c.manifest.total_records,
+                upsert_count: c.manifest.upsert_count,
+                file_len: c.manifest.file_len,
+                applied_offset: c.manifest.applied_offset,
+                created_at_ms: None,
+                updated_at_ms: None,
+                segments: Some(c.segments.len()),
+                deleted_count: Some(
+                    c.manifest
+                        .total_records
+                        .saturating_sub(c.manifest.live_count as u64),
+                ),
+            }
+        })
     }
 
     pub fn create_collection(
@@ -450,33 +464,39 @@ impl VectorStore {
         )?;
         c.rebuild_index();
         c.sync_manifest_run_settings()?;
-        self.0.collections.insert(name.to_string(), Arc::new(parking_lot::RwLock::new(c)));
+        self.0
+            .collections
+            .insert(name.to_string(), Arc::new(parking_lot::RwLock::new(c)));
         Ok(())
     }
 
     pub fn list_collections(&self) -> Vec<VectorCollectionInfo> {
-        self.0.collections.iter().map(|entry| { 
-            let c = entry.value().read(); 
-            let name = entry.key(); 
-            VectorCollectionInfo {
-                collection: name.clone(),
-                dim: c.dim,
-                metric: c.metric,
-                live_count: c.manifest.live_count,
-                total_records: c.manifest.total_records,
-                upsert_count: c.manifest.upsert_count,
-                file_len: c.manifest.file_len,
-                applied_offset: c.manifest.applied_offset,
-                created_at_ms: None,
-                updated_at_ms: None,
-                segments: Some(c.segments.len()),
-                deleted_count: Some(
-                    c.manifest
-                        .total_records
-                        .saturating_sub(c.manifest.live_count as u64),
-                ),
-            }
-        }).collect()
+        self.0
+            .collections
+            .iter()
+            .map(|entry| {
+                let c = entry.value().read();
+                let name = entry.key();
+                VectorCollectionInfo {
+                    collection: name.clone(),
+                    dim: c.dim,
+                    metric: c.metric,
+                    live_count: c.manifest.live_count,
+                    total_records: c.manifest.total_records,
+                    upsert_count: c.manifest.upsert_count,
+                    file_len: c.manifest.file_len,
+                    applied_offset: c.manifest.applied_offset,
+                    created_at_ms: None,
+                    updated_at_ms: None,
+                    segments: Some(c.segments.len()),
+                    deleted_count: Some(
+                        c.manifest
+                            .total_records
+                            .saturating_sub(c.manifest.live_count as u64),
+                    ),
+                }
+            })
+            .collect()
     }
 
     pub fn compact_collection(&self, collection: &str) -> Result<bool, VectorError> {
@@ -488,13 +508,21 @@ impl VectorStore {
         collection: &str,
         force: bool,
     ) -> Result<bool, VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         c.force_compact(force)
     }
 
     pub fn retrain_ivf(&self, collection: &str, force: bool) -> Result<bool, VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         c.try_train_ivf(force)
     }
@@ -504,20 +532,32 @@ impl VectorStore {
         collection: &str,
         params: DiskAnnBuildParams,
     ) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         let _ = c.build_disk_index(params)?;
         Ok(())
     }
 
     pub fn drop_disk_index(&self, collection: &str) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         c.drop_disk_index()
     }
 
     pub fn disk_index_status(&self, collection: &str) -> Result<DiskIndexStatus, VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let c = c_arc.read();
         Ok(c.disk_index_status())
     }
@@ -527,13 +567,21 @@ impl VectorStore {
         collection: &str,
         params: DiskAnnBuildParams,
     ) -> Result<DiskAnnBuildParams, VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         c.update_diskann_params(params)
     }
 
     pub fn get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let c = c_arc.read();
         Ok(c.items.get(id).cloned())
     }
@@ -591,7 +639,9 @@ impl VectorStore {
                 c.mark_applied_offset(ev.offset)?;
                 c.rebuild_index();
                 c.sync_manifest_run_settings()?;
-                self.0.collections.insert(name.to_string(), Arc::new(parking_lot::RwLock::new(c)));
+                self.0
+                    .collections
+                    .insert(name.to_string(), Arc::new(parking_lot::RwLock::new(c)));
                 Ok(())
             }
             "vector_added" | "vector_upserted" | "vector_updated" | "vector_deleted" => {
@@ -606,8 +656,12 @@ impl VectorStore {
                     .and_then(|v| v.as_str())
                     .ok_or(VectorError::InvalidManifest)?;
 
-                let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
-        let mut c = c_arc.write();
+                let c_arc = self
+                    .0
+                    .collections
+                    .get(collection)
+                    .ok_or(VectorError::CollectionNotFound)?;
+                let mut c = c_arc.write();
                 if ev.offset <= c.applied_offset {
                     return Ok(());
                 }
@@ -655,7 +709,11 @@ impl VectorStore {
     }
 
     pub fn add(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         if c.items.contains_key(id) {
             return Err(VectorError::IdExists);
@@ -676,7 +734,11 @@ impl VectorStore {
     }
 
     pub fn upsert(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         if item.vector.len() != c.dim {
             return Err(VectorError::DimMismatch);
@@ -700,7 +762,11 @@ impl VectorStore {
         vector: Option<Vec<f32>>,
         meta: Option<serde_json::Value>,
     ) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         let current = c.items.get(id).cloned().ok_or(VectorError::IdNotFound)?;
         let new_vec = vector.unwrap_or(current.vector);
@@ -721,7 +787,11 @@ impl VectorStore {
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         if !c.items.contains_key(id) {
             return Err(VectorError::IdNotFound);
@@ -743,7 +813,11 @@ impl VectorStore {
         collection: &str,
         req: SearchRequest,
     ) -> Result<Vec<SearchHit>, VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let c = c_arc.read();
         c.search(req)
     }
@@ -754,7 +828,11 @@ impl VectorStore {
     }
 
     pub fn vacuum_collection(&self, collection: &str) -> Result<(), VectorError> {
-        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         let layout = c.layout.clone().ok_or(VectorError::Persistence)?;
         let result = persist::rewrite_collection(&layout, &c.manifest, &c.items, &c.q8_store)
@@ -817,7 +895,7 @@ impl Collection {
                     if store.header().count == 0 && !c.items.is_empty() {
                         // Migration: Append existing items to mmap in a deterministic order
                         let mut ids: Vec<String> = c.items.keys().cloned().collect();
-                        ids.sort(); 
+                        ids.sort();
                         for id in ids {
                             if let Some(item) = c.items.get_mut(&id) {
                                 if let Ok(idx) = store.append(&item.vector) {
@@ -828,8 +906,8 @@ impl Collection {
                         }
                         let _ = store.flush();
                     } else if store.header().count > 0 {
-                        // If mmap has data but we don't have offsets (e.g. restart), 
-                        // we need a way to recover. For now, we'll re-migrate to be safe if 
+                        // If mmap has data but we don't have offsets (e.g. restart),
+                        // we need a way to recover. For now, we'll re-migrate to be safe if
                         // offsets are missing, but this is a placeholder for a real mapping storage.
                         // For simplicity in this step, we just populate from whatever we have.
                     }
@@ -838,7 +916,7 @@ impl Collection {
                 Err(e) => tracing::warn!("Failed to initialize mmap store: {}", e),
             }
         }
-        
+
         c.load_ivf_from_disk()
             .map_err(|_| VectorError::Persistence)?;
         c.load_disk_graph().map_err(|_| VectorError::Persistence)?;
@@ -1285,7 +1363,7 @@ impl Collection {
             if mode.is_none() {
                 let _ = persist::append_record(layout, &mut self.manifest, &record)
                     .map_err(|_| VectorError::Persistence)?;
-                
+
                 // Also append to new mmap store if it's an upsert
                 if record.op == RecordOp::Upsert {
                     if let Some(vec) = &normalized_vec {
@@ -1299,7 +1377,7 @@ impl Collection {
                             }
                         }
                     }
-                    
+
                     if let Some(run) = self.manifest.runs.last() {
                         self.item_runs.insert(record.id.clone(), run.file.clone());
                     }
@@ -1661,7 +1739,12 @@ impl Collection {
             if !matches_filters(&item.meta, filters) {
                 continue;
             }
-            let score = exact_score(self.metric, self.get_vector_slice(id, item), query, self.settings.simd_enabled);
+            let score = exact_score(
+                self.metric,
+                self.get_vector_slice(id, item),
+                query,
+                self.settings.simd_enabled,
+            );
             scored.push((id.clone(), score));
         }
         scored.sort_by(compare_scores_desc);
@@ -1720,8 +1803,12 @@ impl Collection {
         let mut refined = Vec::new();
         for (id, _) in scored.into_iter().take(refine_topk) {
             if let Some(item) = self.items.get(&id) {
-                let exact =
-                    exact_score(self.metric, self.get_vector_slice(&id, item), query, self.settings.simd_enabled);
+                let exact = exact_score(
+                    self.metric,
+                    self.get_vector_slice(&id, item),
+                    query,
+                    self.settings.simd_enabled,
+                );
                 refined.push((id, exact));
             }
         }
@@ -1783,7 +1870,12 @@ impl Collection {
             if !matches_filters(&item.meta, filters) {
                 continue;
             }
-            let exact = exact_score(self.metric, self.get_vector_slice(&id, item), query, self.settings.simd_enabled);
+            let exact = exact_score(
+                self.metric,
+                self.get_vector_slice(&id, item),
+                query,
+                self.settings.simd_enabled,
+            );
             refined.push((id.to_string(), exact));
         }
         refined.sort_by(compare_scores_desc);

@@ -22,7 +22,11 @@ impl SqliteActor {
     pub fn run(mut self) {
         while let Some(msg) = self.receiver.blocking_recv() {
             match msg {
-                SqliteCommand::Execute { sql, params, respond_to } => {
+                SqliteCommand::Execute {
+                    sql,
+                    params,
+                    respond_to,
+                } => {
                     let result = self.handle_execute(sql, params);
                     let _ = respond_to.send(result);
                 }
@@ -35,7 +39,9 @@ impl SqliteActor {
         sql: String,
         params: Vec<rusqlite::types::Value>,
     ) -> anyhow::Result<u64> {
-        let affected = self.conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+        let affected = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(params.iter()))?;
         Ok(affected as u64)
     }
 }

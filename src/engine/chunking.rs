@@ -42,10 +42,14 @@ impl ChunkingEngine {
             // Fallback: Just cut strictly if no good separator is found.
             // But let's try to find a natural break (\n\n, \n, ., or space)
             let mut break_point = end;
-            
+
             // Look back for a natural break within the last 10% of the chunk
-            let search_start = if end > (self.chunk_size / 10) { end - (self.chunk_size / 10) } else { i };
-            
+            let search_start = if end > (self.chunk_size / 10) {
+                end - (self.chunk_size / 10)
+            } else {
+                i
+            };
+
             for j in (search_start..end).rev() {
                 if chars[j] == '\n' || chars[j] == '.' || chars[j] == ' ' {
                     break_point = j + 1; // Include the space/newline
@@ -55,19 +59,19 @@ impl ChunkingEngine {
 
             let chunk: String = chars[i..break_point].iter().collect();
             chunks.push(chunk.trim().to_string());
-            
+
             // Advance, but move back by overlap
             if break_point >= len {
                 break;
             }
-            
+
             // Overlap step
             let next_start = if break_point > self.chunk_overlap {
                 break_point - self.chunk_overlap
             } else {
                 break_point
             };
-            
+
             // Ensure we at least advance
             i = std::cmp::max(next_start, i + 1);
         }
@@ -85,7 +89,7 @@ mod tests {
         let engine = ChunkingEngine::new(20, 5);
         let text = "This is a long text that needs to be split into chunks.";
         let chunks = engine.split_text(text);
-        
+
         assert_eq!(chunks.len(), 4);
     }
 }

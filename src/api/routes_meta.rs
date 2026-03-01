@@ -15,9 +15,12 @@ pub async fn execute(
         state.sqlite.clone().map(Arc::new),
         state.search_engine.clone(),
     );
-    let results = meta_engine
-        .execute(&collection, query)
-        .await
-        .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e.to_string()))?;
+    let results = meta_engine.execute(&collection, query).await.map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
+    })?;
     Ok(Json(results))
 }

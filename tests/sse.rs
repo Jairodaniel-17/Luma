@@ -2,11 +2,11 @@ use futures_util::StreamExt;
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start() -> (String, oneshot::Sender<()>) {
     let config = Config {
@@ -57,7 +57,14 @@ async fn start() -> (String, oneshot::Sender<()>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
 
-    let app = api::router(engine, config, None, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
+    let app = api::router(
+        engine,
+        config,
+        None,
+        search_engine,
+        None,
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+    );
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -83,7 +90,9 @@ async fn sse_receives_state_updated() {
 
     let resp = client
         .get(format!("{}/v1/events?types=state_updated&since=0", base))
-        .bearer_auth("test").bearer_auth("test").send()
+        .bearer_auth("test")
+        .bearer_auth("test")
+        .send()
         .await
         .unwrap();
     assert!(resp.status().is_success());
@@ -91,7 +100,8 @@ async fn sse_receives_state_updated() {
     let put_fut = client
         .put(format!("{}/v1/state/job:sse", base))
         .json(&serde_json::json!({"value":{"progress":1}}))
-        .bearer_auth("test").send();
+        .bearer_auth("test")
+        .send();
 
     let mut stream = resp.bytes_stream();
     let _put = put_fut.await.unwrap();

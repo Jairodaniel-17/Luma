@@ -24,7 +24,14 @@ async fn test_api_vector_flow() {
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
     // Minimal app setup without SQLite/Auth for vector test
-    let app = router(engine, config.clone(), None, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
+    let app = router(
+        engine,
+        config.clone(),
+        None,
+        search_engine,
+        None,
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+    );
 
     // 1. Create Collection
     let response = app
@@ -119,7 +126,14 @@ async fn test_api_sql_flow() {
     let sqlite = SqliteService::new(&db_path).unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
-    let app = router(engine, config.clone(), Some(sqlite), search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
+    let app = router(
+        engine,
+        config.clone(),
+        Some(sqlite),
+        search_engine,
+        None,
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+    );
 
     // 1. Create Table (Exec)
     let response = app

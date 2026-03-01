@@ -1,12 +1,12 @@
 use axum::http::StatusCode;
-use tokio::sync::oneshot;
-use std::net::SocketAddr;
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
 use luma::search::engine::SearchEngine;
-use tokio_util::sync::CancellationToken;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start() -> (String, oneshot::Sender<()>) {
     let config = Config {
@@ -52,7 +52,7 @@ async fn start() -> (String, oneshot::Sender<()>) {
         compaction_trigger_tombstone_ratio: 0.2,
         compaction_max_bytes_per_pass: 10 * 1024 * 1024,
     };
-    
+
     let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
@@ -61,7 +61,7 @@ async fn start() -> (String, oneshot::Sender<()>) {
         luma::engine::embeddings::EmbeddingProvider::Ollama {
             api_url: "http://localhost:11434".to_string(),
             model: "granite-embedding:30m".to_string(),
-        }
+        },
     ));
     let app = api::router(engine, config, None, search_engine, None, embeddings);
 
@@ -98,13 +98,13 @@ async fn hub_ingest_endpoint() {
         .send()
         .await
         .unwrap();
-    
+
     // We expect success because Ollama with granite-embedding:30m is configured
     if ingest.status() != StatusCode::OK {
         let body: serde_json::Value = ingest.json().await.unwrap();
         panic!("Expected 200 OK, got: {:?}", body);
     }
-    
+
     let body: serde_json::Value = ingest.json().await.unwrap();
     assert_eq!(body["status"], "success");
     assert_eq!(body["namespace"], "my_namespace");
@@ -130,7 +130,7 @@ async fn hub_search_endpoint() {
         .send()
         .await
         .unwrap();
-    
+
     assert_eq!(ingest.status(), StatusCode::OK);
 
     // 2. Search document
@@ -147,11 +147,13 @@ async fn hub_search_endpoint() {
 
     assert_eq!(search.status(), StatusCode::OK);
     let search_body: serde_json::Value = search.json().await.unwrap();
-    
+
     // Validate response structure
-    let results = search_body["results"].as_array().expect("Results should be an array");
+    let results = search_body["results"]
+        .as_array()
+        .expect("Results should be an array");
     assert!(!results.is_empty(), "Should find the ingested document");
-    
+
     let first_hit = &results[0];
     assert_eq!(first_hit["id"], "doc_123");
     assert!(first_hit["score"].as_f64().is_some());

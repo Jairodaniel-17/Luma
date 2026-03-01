@@ -1,8 +1,8 @@
-use crate::engine::Engine;
-use crate::sqlite::SqliteService;
-use crate::search::engine::SearchEngine;
-use crate::engine::embeddings::EmbeddingClient;
 use crate::engine::chunking::ChunkingEngine;
+use crate::engine::embeddings::EmbeddingClient;
+use crate::engine::Engine;
+use crate::search::engine::SearchEngine;
+use crate::sqlite::SqliteService;
 use std::sync::Arc;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -42,11 +42,16 @@ impl LumaDatabase {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(10000);
         let sql_opt = sqlite.clone();
         tokio::spawn(async move {
-            let Some(sql) = sql_opt else { return; };
+            let Some(sql) = sql_opt else {
+                return;
+            };
             while let Some((ns, key)) = rx.recv().await {
                 if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     let index_name = format!("idx_{}_{}", ns, key);
-                    let index_sql = format!("CREATE INDEX IF NOT EXISTS {} ON {}_docs(json_extract(metadata, '$.{}'))", index_name, ns, key);
+                    let index_sql = format!(
+                        "CREATE INDEX IF NOT EXISTS {} ON {}_docs(json_extract(metadata, '$.{}'))",
+                        index_name, ns, key
+                    );
                     let _ = sql.execute(index_sql, vec![]).await;
                 }
             }
@@ -72,11 +77,12 @@ impl LumaDatabase {
     ) -> anyhow::Result<()> {
         // 1. Save original document to DocStore (state store for now)
         let doc_key = format!("doc:{}:{}", namespace, doc_id);
-        self.engine.put_state(doc_key.clone(), raw_json, None, None)?;
+        self.engine
+            .put_state(doc_key.clone(), raw_json, None, None)?;
 
         // 2. Chunking
         let chunks = self.chunking.split_text(text);
-        
+
         if chunks.is_empty() {
             return Ok(()); // Nothing to embed
         }
@@ -84,7 +90,7 @@ impl LumaDatabase {
         // 3. Embeddings & Vector Insert
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
         let mut tasks = Vec::new();
-        
+
         for chunk in chunks.iter() {
             let chunk_str = chunk.to_string();
             let embeddings = self.embeddings.clone();
@@ -109,10 +115,14 @@ impl LumaDatabase {
         // Auto-create or validate collection
         let collections = self.engine.list_vector_collections();
         let collection_exists = collections.iter().any(|c| c.collection == namespace);
-        
+
         if !collection_exists {
             // Auto create collection with detected dimension
-            self.engine.create_vector_collection(namespace, detected_dim, crate::vector::Metric::Cosine)?;
+            self.engine.create_vector_collection(
+                namespace,
+                detected_dim,
+                crate::vector::Metric::Cosine,
+            )?;
         }
 
         // Explicit Consistency Model: Strategy C - Compensating Actions.
@@ -141,31 +151,56 @@ impl LumaDatabase {
                     let rollback_id = format!("{}#{}", doc_id, j);
                     let _ = self.engine.vector_delete(namespace, &rollback_id);
                 }
-                return Err(anyhow::anyhow!("Vector insertion failed, rolled back: {}", e));
+                return Err(anyhow::anyhow!(
+                    "Vector insertion failed, rolled back: {}",
+                    e
+                ));
             }
         }
 
         // 4. Relational Data (SQLite)
         if let Some(sql) = &self.sqlite {
-            let create_table = format!("CREATE TABLE IF NOT EXISTS {}_docs (id TEXT PRIMARY KEY, metadata JSON)", namespace);
+            let create_table = format!(
+                "CREATE TABLE IF NOT EXISTS {}_docs (id TEXT PRIMARY KEY, metadata JSON)",
+                namespace
+            );
             if let Err(e) = sql.execute(create_table, vec![]).await {
                 let _ = self.engine.delete_state(&doc_key);
                 for i in 0..chunks.len() {
-                    let _ = self.engine.vector_delete(namespace, &format!("{}#{}", doc_id, i));
+                    let _ = self
+                        .engine
+                        .vector_delete(namespace, &format!("{}#{}", doc_id, i));
                 }
-                return Err(anyhow::anyhow!("SQLite create table failed, rolled back: {}", e));
+                return Err(anyhow::anyhow!(
+                    "SQLite create table failed, rolled back: {}",
+                    e
+                ));
             }
 
-            let meta_json_str = metadata.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "{}".to_string());
-            let insert_sql = format!("INSERT OR REPLACE INTO {}_docs (id, metadata) VALUES (?, ?)", namespace);
-            if let Err(e) = sql.execute(insert_sql, vec![
-                serde_json::Value::String(doc_id.to_string()),
-                serde_json::Value::String(meta_json_str)
-            ]).await {
+            let meta_json_str = metadata
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".to_string());
+            let insert_sql = format!(
+                "INSERT OR REPLACE INTO {}_docs (id, metadata) VALUES (?, ?)",
+                namespace
+            );
+            if let Err(e) = sql
+                .execute(
+                    insert_sql,
+                    vec![
+                        serde_json::Value::String(doc_id.to_string()),
+                        serde_json::Value::String(meta_json_str),
+                    ],
+                )
+                .await
+            {
                 // Compensation
                 let _ = self.engine.delete_state(&doc_key);
                 for i in 0..chunks.len() {
-                    let _ = self.engine.vector_delete(namespace, &format!("{}#{}", doc_id, i));
+                    let _ = self
+                        .engine
+                        .vector_delete(namespace, &format!("{}#{}", doc_id, i));
                 }
                 return Err(anyhow::anyhow!("SQLite insert failed, rolled back: {}", e));
             }
@@ -190,10 +225,10 @@ impl LumaDatabase {
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         // 1. Relational Pre-filtering (Hard Filter)
         let mut allowed_ids: Option<std::collections::HashSet<String>> = None;
-        
+
         if let (Some(filter_str), Some(sql)) = (sql_filter, &self.sqlite) {
             let query_sql = format!("SELECT id FROM {}_docs WHERE {}", namespace, filter_str);
-            
+
             match sql.query(query_sql, vec![]).await {
                 Ok(rows) => {
                     let mut ids = std::collections::HashSet::new();
@@ -219,7 +254,7 @@ impl LumaDatabase {
         // 3. Vector Search
         let req = crate::vector::SearchRequest {
             vector: query_vector,
-            k: limit, // Only fetch limit, pre-filtering handles exact matches
+            k: limit,      // Only fetch limit, pre-filtering handles exact matches
             filters: None, // We do pre-filtering via SQL instead of vector metadata
             include_meta: Some(true),
             allowed_ids: allowed_ids.clone(),
@@ -228,13 +263,14 @@ impl LumaDatabase {
         let hits = self.engine.vector_search(namespace, req)?;
 
         // 4. Grouping & Collation
-        let mut collapsed_results: std::collections::HashMap<String, HydratedResult> = std::collections::HashMap::new();
+        let mut collapsed_results: std::collections::HashMap<String, HydratedResult> =
+            std::collections::HashMap::new();
 
         for hit in hits {
             if let Some(meta) = hit.meta {
                 if let Ok(chunk_meta) = serde_json::from_value::<ChunkMetadata>(meta) {
                     let parent_id = chunk_meta.parent_id;
-                    
+
                     // Check if it passes our SQL pre-filter
                     if let Some(ref allowed) = allowed_ids {
                         if !allowed.contains(&parent_id) {
@@ -242,22 +278,23 @@ impl LumaDatabase {
                         }
                     }
 
-                    let entry = collapsed_results.entry(parent_id.clone()).or_insert_with(|| {
-                        HydratedResult {
+                    let entry = collapsed_results
+                        .entry(parent_id.clone())
+                        .or_insert_with(|| HydratedResult {
                             id: parent_id,
                             score: hit.score,
                             snippets: Vec::new(),
                             document: None,
-                        }
-                    });
-                    
+                        });
+
                     // Update score if higher
                     if hit.score > entry.score {
                         entry.score = hit.score;
                     }
 
                     // Add snippet
-                    if entry.snippets.len() < 3 { // Limit to top 3 snippets per doc
+                    if entry.snippets.len() < 3 {
+                        // Limit to top 3 snippets per doc
                         entry.snippets.push(chunk_meta.text_snippet);
                     }
                 }
@@ -266,7 +303,11 @@ impl LumaDatabase {
 
         // Sort by score descending
         let mut final_results: Vec<HydratedResult> = collapsed_results.into_values().collect();
-        final_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        final_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // 5. Fetch Full Documents (Hydration)
         final_results.truncate(limit);
@@ -278,6 +319,9 @@ impl LumaDatabase {
         }
 
         // Convert to JSON at the very end
-        Ok(final_results.into_iter().map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null)).collect())
+        Ok(final_results
+            .into_iter()
+            .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+            .collect())
     }
 }
