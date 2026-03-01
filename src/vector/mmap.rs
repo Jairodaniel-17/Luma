@@ -39,6 +39,7 @@ impl VectorMmap {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
 
         let header_size = std::mem::size_of::<MmapHeader>();

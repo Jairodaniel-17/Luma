@@ -1,4 +1,4 @@
-use luma::vector::{Metric, SearchRequest, VectorItem, VectorSettings, VectorStore};
+use luma::vector::{Metric, SearchOptions, SearchRequest, VectorItem, VectorSettings, VectorStore};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -26,6 +26,7 @@ fn test_vector_collection_ops() {
     let item = VectorItem {
         vector: vector.clone(),
         meta: meta.clone(),
+        mmap_offset: None,
     };
     store.add(collection_name, id, item).unwrap();
 
@@ -33,8 +34,11 @@ fn test_vector_collection_ops() {
     let req = SearchRequest {
         vector: vec![1.0, 0.0, 0.0, 0.0],
         k: 1,
-        filters: None,
-        include_meta: Some(true),
+        options: SearchOptions {
+            filters: None,
+            include_meta: true,
+            allowed_ids: None,
+        },
     };
     let hits = store.search(collection_name, req).unwrap();
     assert_eq!(hits.len(), 1);
@@ -47,10 +51,13 @@ fn test_vector_collection_ops() {
         .search(
             collection_name,
             SearchRequest {
-                vector: vector,
+                vector,
                 k: 1,
-                filters: None,
-                include_meta: None,
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();

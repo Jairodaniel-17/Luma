@@ -20,7 +20,6 @@ async fn start_with_diskann() -> (String, oneshot::Sender<()>, tempfile::TempDir
 }
 
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
-    let config = config;
     let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
 
     // For tests not using search, a temporary dropped dir is fine.
@@ -62,7 +61,6 @@ async fn state_put_get() {
         .put(format!("{}/v1/state/job:1", base))
         .json(&serde_json::json!({"value":{"progress":1}}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -70,7 +68,6 @@ async fn state_put_get() {
 
     let got = client
         .get(format!("{}/v1/state/job:1", base))
-        .bearer_auth("test")
         .bearer_auth("test")
         .send()
         .await
@@ -92,7 +89,6 @@ async fn vector_create_upsert_search() {
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -102,7 +98,6 @@ async fn vector_create_upsert_search() {
         .post(format!("{}/v1/vector/docs/upsert", base))
         .json(&serde_json::json!({"id":"a","vector":[1.0,0.0],"meta":{"tag":"x"}}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -110,8 +105,7 @@ async fn vector_create_upsert_search() {
 
     let search = client
         .post(format!("{}/v1/vector/docs/search", base))
-        .json(&serde_json::json!({"vector":[0.9,0.1],"k":1,"include_meta":true}))
-        .bearer_auth("test")
+        .json(&serde_json::json!({"vector":[0.9,0.1],"k":1,"options":{"include_meta":true}}))
         .bearer_auth("test")
         .send()
         .await
@@ -177,7 +171,6 @@ async fn vector_list_collections_endpoint() {
     let initial = client
         .get(format!("{}/v1/vector", base))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -189,7 +182,6 @@ async fn vector_list_collections_endpoint() {
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -197,7 +189,6 @@ async fn vector_list_collections_endpoint() {
 
     let listed = client
         .get(format!("{}/v1/vector", base))
-        .bearer_auth("test")
         .bearer_auth("test")
         .send()
         .await
@@ -220,7 +211,6 @@ async fn vector_collection_detail_endpoint() {
     let missing = client
         .get(format!("{}/v1/vector/none", base))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -232,7 +222,6 @@ async fn vector_collection_detail_endpoint() {
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -240,7 +229,6 @@ async fn vector_collection_detail_endpoint() {
 
     let detail = client
         .get(format!("{}/v1/vector/docs", base))
-        .bearer_auth("test")
         .bearer_auth("test")
         .send()
         .await
@@ -265,7 +253,6 @@ async fn docstore_put_get_find() {
         .put(format!("{}/v1/doc/users/u1", base))
         .json(&serde_json::json!({"name":"Ada","role":"admin"}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -273,7 +260,6 @@ async fn docstore_put_get_find() {
 
     let get = client
         .get(format!("{}/v1/doc/users/u1", base))
-        .bearer_auth("test")
         .bearer_auth("test")
         .send()
         .await
@@ -286,13 +272,12 @@ async fn docstore_put_get_find() {
         .post(format!("{}/v1/doc/users/find", base))
         .json(&serde_json::json!({"filter":{"role":"admin"},"limit":10}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
     assert!(find.status().is_success());
     let v: serde_json::Value = find.json().await.unwrap();
-    assert!(v["documents"].as_array().unwrap().len() >= 1);
+    assert!(!v["documents"].as_array().unwrap().is_empty());
     assert_eq!(v["documents"][0]["doc"]["role"], "admin");
 
     let _ = shutdown.send(());
@@ -307,7 +292,6 @@ async fn vector_diskann_build_status_and_tune() {
         .post(format!("{}/v1/vector/docs", base))
         .json(&serde_json::json!({"dim":3,"metric":"cosine"}))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -318,7 +302,6 @@ async fn vector_diskann_build_status_and_tune() {
             .post(format!("{}/v1/vector/docs/upsert", base))
             .json(&serde_json::json!({"id":id,"vector":vector}))
             .bearer_auth("test")
-            .bearer_auth("test")
             .send()
             .await
             .unwrap();
@@ -328,7 +311,6 @@ async fn vector_diskann_build_status_and_tune() {
     let build = client
         .post(format!("{}/v1/vector/docs/diskann/build", base))
         .json(&serde_json::json!({"max_degree":16,"search_list_size":48}))
-        .bearer_auth("test")
         .bearer_auth("test")
         .send()
         .await
@@ -341,7 +323,6 @@ async fn vector_diskann_build_status_and_tune() {
     let status = client
         .get(format!("{}/v1/vector/docs/diskann/status", base))
         .bearer_auth("test")
-        .bearer_auth("test")
         .send()
         .await
         .unwrap();
@@ -352,7 +333,6 @@ async fn vector_diskann_build_status_and_tune() {
     let tune = client
         .post(format!("{}/v1/vector/docs/diskann/tune", base))
         .json(&serde_json::json!({"search_list_size":96}))
-        .bearer_auth("test")
         .bearer_auth("test")
         .send()
         .await
@@ -382,7 +362,7 @@ async fn meta_execute_endpoint() {
     // Execute meta query
     let meta_exec = client
         .post(format!("{}/v1/meta/docs/execute", base))
-        .json(&serde_json::json!({"type":"vector","vector":[0.9,0.1],"k":1,"include_meta":true}))
+        .json(&serde_json::json!({"type":"vector","vector":[0.9,0.1],"k":1,"options":{"include_meta":true}}))
         .bearer_auth("test")
         .send()
         .await

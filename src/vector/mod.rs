@@ -196,9 +196,11 @@ pub enum VectorError {
     UnsupportedOperation,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub vector: Vec<f32>,
     pub k: usize,
+    #[serde(default)]
     pub options: SearchOptions,
 }
 
@@ -903,7 +905,7 @@ impl Collection {
                         for id in ids {
                             if let Some(item) = c.items.get_mut(&id) {
                                 if let Ok(idx) = store.append(&item.vector) {
-                                    item.mmap_offset = Some(idx);
+                                    item.mmap_offset = Some(idx as u64);
                                     c.item_mmap_offsets.insert(id, idx);
                                 }
                             }
@@ -1305,9 +1307,7 @@ impl Collection {
         let obj = filters.as_object()?;
         let mut current: Option<HashSet<String>> = None;
         for (k, v) in obj {
-            let Some(value) = v.as_str() else {
-                return None;
-            };
+            let value = v.as_str()?;
             let Some(by_value) = self.keyword_index.get(k) else {
                 return Some(HashSet::new());
             };
@@ -1362,7 +1362,7 @@ impl Collection {
             None
         };
 
-        let mut mmap_idx = None;
+        let mut mmap_idx: Option<u64> = None;
         if let Some(layout) = &self.layout {
             if mode.is_none() {
                 let _ = persist::append_record(layout, &mut self.manifest, &record)
@@ -1374,7 +1374,7 @@ impl Collection {
                         if let Some(mmap) = self.mmap_store.as_mut() {
                             match mmap.append(vec) {
                                 Ok(idx) => {
-                                    mmap_idx = Some(idx);
+                                    mmap_idx = Some(idx as u64);
                                     self.item_mmap_offsets.insert(record.id.clone(), idx);
                                 }
                                 Err(e) => tracing::warn!("Failed to append to mmap store: {}", e),
@@ -1569,18 +1569,33 @@ impl Collection {
         if req.vector.len() != self.dim {
             return Err(VectorError::DimMismatch);
         }
-        let include_meta = req.include_meta.unwrap_or(false);
+        let include_meta = req.options.include_meta;
         let k = req.k.max(1);
         let query = normalize_if_needed(self.metric, req.vector);
         if self.items.is_empty() {
             return Ok(Vec::new());
         }
+        if self.items.len() < 100 && req.options.filters.is_none() && req.options.allowed_ids.is_none() {
+            let mut scored = Vec::new();
+            for (id, item) in self.items.iter() {
+                let score = exact_score(self.metric, &item.vector, &query, self.settings.simd_enabled);
+                scored.push(SearchHit {
+                    id: id.clone(),
+                    score,
+                    meta: include_meta.then(|| item.meta.clone()),
+                });
+            }
+            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+            scored.truncate(k);
+            return Ok(scored);
+        }
         let mut filter_candidates = req
+            .options
             .filters
             .as_ref()
             .and_then(|f| self.keyword_candidates(f));
 
-        if let Some(ref allowed) = req.allowed_ids {
+        if let Some(ref allowed) = req.options.allowed_ids {
             let mut resolved_allowed = HashSet::new();
             if let Some(by_value) = self.keyword_index.get("parent_id") {
                 for doc_id in allowed {
@@ -1601,14 +1616,16 @@ impl Collection {
             }
 
             if let Some(ref mut current) = filter_candidates {
-                current.retain(|id| resolved_allowed.contains(id));
+                let current_set: &mut HashSet<String> = current;
+                current_set.retain(|id| resolved_allowed.contains(id));
             } else {
                 filter_candidates = Some(resolved_allowed);
             }
         }
 
         if let Some(ref set) = filter_candidates {
-            if set.is_empty() {
+            let set_ref: &HashSet<String> = set;
+            if set_ref.is_empty() {
                 return Ok(Vec::new());
             }
         }
@@ -1616,7 +1633,7 @@ impl Collection {
             if let Some(hits) = self.search_diskann(
                 query.as_slice(),
                 include_meta,
-                req.filters.as_ref(),
+                req.options.filters.as_ref(),
                 filter_candidates.as_ref(),
                 k,
             )? {
@@ -1625,15 +1642,16 @@ impl Collection {
         }
         let ivf_probes = self.ivf_probe_set(query.as_slice());
         if let Some(ref set) = filter_candidates {
-            if set.is_empty() {
+            let set_ref: &HashSet<String> = set;
+            if set_ref.is_empty() {
                 return Ok(Vec::new());
             }
-            if set.len() <= 512 {
+            if set_ref.len() <= 512 {
                 return Ok(self.search_subset_bruteforce(
                     query.as_slice(),
                     include_meta,
-                    set,
-                    req.filters.as_ref(),
+                    set_ref,
+                    req.options.filters.as_ref(),
                     k,
                     ivf_probes.as_ref(),
                 ));
@@ -1643,7 +1661,7 @@ impl Collection {
             return Ok(self.search_ivf_flat(
                 query.as_slice(),
                 include_meta,
-                req.filters.as_ref(),
+                req.options.filters.as_ref(),
                 filter_candidates.as_ref(),
                 k,
                 probes,
@@ -1683,14 +1701,15 @@ impl Collection {
                 }
             }
             if let Some(ref set) = filter_candidates {
-                if !set.contains(&id) {
+                let set_ref: &HashSet<String> = set;
+                if !set_ref.contains(&id) {
                     continue;
                 }
             }
             let Some(item) = self.items.get(&id) else {
                 continue;
             };
-            if !matches_filters(&item.meta, req.filters.as_ref()) {
+            if !matches_filters(&item.meta, req.options.filters.as_ref()) {
                 continue;
             }
             hits.push(SearchHit {

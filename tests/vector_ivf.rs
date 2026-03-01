@@ -1,6 +1,8 @@
 use luma::config::Config;
 use luma::engine::Engine;
-use luma::vector::{IndexKind, Metric, SearchRequest, VectorItem, VectorSettings, VectorStore};
+use luma::vector::{
+    IndexKind, Metric, SearchOptions, SearchRequest, VectorItem, VectorSettings, VectorStore,
+};
 use serde_json::json;
 use std::fs;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +76,7 @@ async fn ivf_centroids_persist_and_filter() {
                 VectorItem {
                     vector: vec,
                     meta: json!({ "cluster": if i % 2 == 0 { "a" } else { "b" } }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -95,8 +98,11 @@ async fn ivf_centroids_persist_and_filter() {
             SearchRequest {
                 vector: vec![1.0, 0.0],
                 k: 4,
-                filters: None,
-                include_meta: Some(true),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: true,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -111,8 +117,11 @@ async fn ivf_centroids_persist_and_filter() {
             SearchRequest {
                 vector: vec![0.0, 1.0],
                 k: 4,
-                filters: None,
-                include_meta: Some(true),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: true,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -145,6 +154,7 @@ async fn ivf_config_clamps_values() {
                 VectorItem {
                     vector: vec![idx as f32, 0.0, 1.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -183,6 +193,7 @@ async fn ivf_retrain_updates_manifest_and_results() {
                 VectorItem {
                     vector: vec![idx as f32, 1.0, 0.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -193,8 +204,11 @@ async fn ivf_retrain_updates_manifest_and_results() {
             SearchRequest {
                 vector: vec![8.0, 1.0, 0.0],
                 k: 2,
-                filters: None,
-                include_meta: Some(false),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -205,8 +219,11 @@ async fn ivf_retrain_updates_manifest_and_results() {
             SearchRequest {
                 vector: vec![8.0, 1.0, 0.0],
                 k: 2,
-                filters: None,
-                include_meta: Some(false),
+                options: SearchOptions {
+                    filters: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
             },
         )
         .unwrap();
@@ -227,6 +244,7 @@ async fn ivf_retrain_updates_manifest_and_results() {
                 VectorItem {
                     vector: vec![idx as f32, 1.0, 0.0],
                     meta: json!({ "idx": idx }),
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -247,8 +265,10 @@ async fn ivf_retrain_updates_manifest_and_results() {
 )]
 #[test]
 fn ivf_large_dataset_retrain_consistent() {
-    let mut settings = VectorSettings::default();
-    settings.index_kind = IndexKind::IvfFlatQ8;
+    let mut settings = VectorSettings {
+        index_kind: IndexKind::IvfFlatQ8,
+        ..VectorSettings::default()
+    };
     settings.ivf.clusters = 128;
     settings.ivf.nprobe = 8;
     settings.ivf.min_train_vectors = 512;
@@ -268,6 +288,7 @@ fn ivf_large_dataset_retrain_consistent() {
                 VectorItem {
                     vector: vec![v0, v1],
                     meta: serde_json::Value::Null,
+                    mmap_offset: None,
                 },
             )
             .unwrap();
@@ -275,8 +296,11 @@ fn ivf_large_dataset_retrain_consistent() {
     let query = SearchRequest {
         vector: vec![0.123, 0.456],
         k: 5,
-        filters: None,
-        include_meta: Some(false),
+        options: SearchOptions {
+            filters: None,
+            include_meta: false,
+            allowed_ids: None,
+        },
     };
     let before = store.search("big", query.clone()).unwrap();
     assert!(!before.is_empty());

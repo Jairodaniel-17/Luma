@@ -397,7 +397,7 @@ fn resolve_bind_addr() -> IpAddr {
 }
 
 fn resolve_sqlite_enabled() -> bool {
-    let mut args = std::env::args().skip(1);
+    let args = std::env::args().skip(1);
     for arg in args {
         if arg == "--no-sqlite" {
             return false;
@@ -407,10 +407,10 @@ fn resolve_sqlite_enabled() -> bool {
         }
     }
     match std::env::var("SQLITE_ENABLED").ok().as_deref() {
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "0" | "false" | "off" | "no" => false,
-            _ => true,
-        },
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         None => true,
     }
 }

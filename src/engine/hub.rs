@@ -254,10 +254,12 @@ impl LumaDatabase {
         // 3. Vector Search
         let req = crate::vector::SearchRequest {
             vector: query_vector,
-            k: limit,      // Only fetch limit, pre-filtering handles exact matches
-            filters: None, // We do pre-filtering via SQL instead of vector metadata
-            include_meta: Some(true),
-            allowed_ids: allowed_ids.clone(),
+            k: limit, // Only fetch limit, pre-filtering handles exact matches
+            options: crate::vector::SearchOptions {
+                filters: None, // We do pre-filtering via SQL instead of vector metadata
+                include_meta: true,
+                allowed_ids: allowed_ids.clone(),
+            },
         };
 
         let hits = self.engine.vector_search(namespace, req)?;
