@@ -104,7 +104,7 @@ impl Config {
             let config: Config = toml::from_str(&content)?;
             return Ok(config);
         }
-        
+
         let config = Self::from_env()?;
         if let Err(e) = config.save() {
             tracing::warn!("Could not automatically generate luma.toml: {}", e);

@@ -27,7 +27,7 @@ impl SqliteService {
 
         let (sender, receiver) = mpsc::channel(1000);
         let actor = SqliteActor::new(conn, receiver);
-        
+
         std::thread::spawn(move || {
             actor.run();
         });
@@ -75,7 +75,7 @@ impl SqliteService {
     ) -> anyhow::Result<u64> {
         let (respond_to, receiver) = oneshot::channel();
         let values = json_params_to_values(params)?;
-        
+
         let msg = SqliteCommand::Execute {
             sql,
             params: values,
@@ -86,7 +86,9 @@ impl SqliteService {
             return Err(anyhow::anyhow!("sqlite actor channel closed"));
         }
 
-        receiver.await.map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
+        receiver
+            .await
+            .map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
     }
 
     pub fn path(&self) -> &Path {

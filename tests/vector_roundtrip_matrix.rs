@@ -1,7 +1,7 @@
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::vector::{Metric, SearchRequest, VectorItem};
+use tokio_util::sync::CancellationToken;
 
 fn config_for(dir: &str) -> Config {
     Config {

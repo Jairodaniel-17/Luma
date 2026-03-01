@@ -4,8 +4,8 @@ pub mod embeddings;
 mod events;
 pub mod hub;
 pub mod meta;
-pub mod parser;
 mod metrics;
+pub mod parser;
 mod persist;
 mod state;
 mod state_db;
@@ -47,7 +47,7 @@ struct Inner {
     events: events::EventBus,
     metrics: Arc<metrics::Metrics>,
     persist: Option<persist::Persist>,
-    
+
     shutdown: CancellationToken,
 }
 
@@ -93,7 +93,7 @@ impl Engine {
             events,
             metrics,
             persist,
-            
+
             shutdown,
         }));
 
@@ -219,7 +219,7 @@ impl Engine {
         let Some(persist) = &self.0.persist else {
             return Ok(());
         };
-                loop {
+        loop {
             match self.expire_due_keys_locked(now_ms(), 10_000) {
                 Ok(0) => break,
                 Ok(_) => continue,
@@ -291,7 +291,6 @@ impl Engine {
         ttl_ms: Option<u64>,
         if_revision: Option<u64>,
     ) -> Result<state::StateItem, EngineError> {
-        
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
         let revision = if let Some(db) = &self.0.state_db {
@@ -339,7 +338,6 @@ impl Engine {
         key: &str,
         reason: &'static str,
     ) -> Result<bool, EngineError> {
-        
         let exists = if let Some(db) = &self.0.state_db {
             db.exists_live(key)?
         } else {
@@ -475,7 +473,7 @@ impl Engine {
         dim: usize,
         metric: Metric,
     ) -> Result<(), EngineError> {
-                if self.0.vectors.get_collection(collection).is_some() {
+        if self.0.vectors.get_collection(collection).is_some() {
             return Err(VectorError::CollectionExists.into());
         }
         let data = serde_json::json!({
@@ -509,7 +507,7 @@ impl Engine {
         id: &str,
         item: VectorItem,
     ) -> Result<(), EngineError> {
-                let _ = self
+        let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -540,7 +538,7 @@ impl Engine {
         id: &str,
         item: VectorItem,
     ) -> Result<(), EngineError> {
-                let _ = self
+        let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -569,7 +567,7 @@ impl Engine {
         vector: Option<Vec<f32>>,
         meta: Option<serde_json::Value>,
     ) -> Result<(), EngineError> {
-                let _ = self
+        let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -599,7 +597,7 @@ impl Engine {
     }
 
     pub fn vector_delete(&self, collection: &str, id: &str) -> Result<(), EngineError> {
-                let _ = self
+        let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -718,7 +716,7 @@ impl Engine {
     }
 
     fn expire_due_keys(&self, limit: usize) -> Result<usize, EngineError> {
-                self.expire_due_keys_locked(now_ms(), limit)
+        self.expire_due_keys_locked(now_ms(), limit)
     }
 
     fn expire_due_keys_locked(&self, now: u64, limit: usize) -> Result<usize, EngineError> {

@@ -59,7 +59,7 @@ fn default_ivf_retrain_min_vectors() -> usize {
 pub struct CollectionLayout {
     pub dir: PathBuf,
     pub manifest_path: PathBuf,
-    pub bin_path: PathBuf, // legacy WAL
+    pub bin_path: PathBuf,  // legacy WAL
     pub mmap_path: PathBuf, // new mmap
     pub centroids_meta_path: PathBuf,
     pub centroids_bin_path: PathBuf,
@@ -693,9 +693,14 @@ fn apply_disk_record(
                 .quantized
                 .clone()
                 .unwrap_or_else(|| quantize_per_vector(&v));
-            state
-                .items
-                .insert(record.id.clone(), VectorItem { vector: v, meta, mmap_offset: None });
+            state.items.insert(
+                record.id.clone(),
+                VectorItem {
+                    vector: v,
+                    meta,
+                    mmap_offset: None,
+                },
+            );
             state.quantized.insert(record.id.clone(), q);
             if let Some(run) = run_file {
                 state.item_runs.insert(record.id, run.to_string());

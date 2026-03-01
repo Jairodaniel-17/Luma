@@ -13,7 +13,13 @@ pub async fn ingest(
     let text = payload
         .get("text")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ApiError::new(axum::http::StatusCode::BAD_REQUEST, "invalid_request", "Missing 'text' field"))?;
+        .ok_or_else(|| {
+            ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Missing 'text' field",
+            )
+        })?;
 
     let doc_id_val = payload.get("id").and_then(|v| v.as_str());
     let doc_id = doc_id_val.unwrap_or_else(|| "");
@@ -56,15 +62,28 @@ pub async fn search(
     let query = payload
         .get("query")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ApiError::new(axum::http::StatusCode::BAD_REQUEST, "invalid_request", "Missing 'query' field"))?;
+        .ok_or_else(|| {
+            ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Missing 'query' field",
+            )
+        })?;
 
     let sql_filter = payload.get("sql_filter").and_then(|v| v.as_str());
     let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-    let results = state.hub
+    let results = state
+        .hub
         .search(&namespace, query, sql_filter, limit)
         .await
-        .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "search_error", e.to_string()))?;
+        .map_err(|e| {
+            ApiError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "search_error",
+                e.to_string(),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "results": results

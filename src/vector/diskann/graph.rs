@@ -115,10 +115,10 @@ impl DiskGraph {
         let q_query = q8::quantize_per_vector(query);
         let entry = self.entry_point(&q_query, simd_enabled)?;
         let entry_node = self.load_node(entry)?;
-        
+
         let mut visited = HashSet::new();
         let mut to_visit = BinaryHeap::new();
-        
+
         let entry_allowed = filter_candidates.map_or(true, |f| f.contains(&entry_node.id));
         if entry_allowed {
             let entry_score = q8::dot(&entry_node.vector, &q_query, simd_enabled);
@@ -128,7 +128,7 @@ impl DiskGraph {
             });
         } else {
             // If entry is not allowed, we need a fallback entry point from the allowed set.
-            // For simplicity, scan a few nodes to find an allowed one to start, 
+            // For simplicity, scan a few nodes to find an allowed one to start,
             // or just rely on the fallback below.
             if let Some(f) = filter_candidates {
                 for i in 0..self.len() {
@@ -158,7 +158,7 @@ impl DiskGraph {
                     continue;
                 }
                 let neighbor_node = self.load_node(neighbor)?;
-                
+
                 // Push-down filter: don't expand or compute distance if not allowed
                 if let Some(f) = filter_candidates {
                     if !f.contains(&neighbor_node.id) {
@@ -166,7 +166,7 @@ impl DiskGraph {
                         continue;
                     }
                 }
-                
+
                 let score = q8::dot(&neighbor_node.vector, &q_query, simd_enabled);
                 to_visit.push(VisitState {
                     idx: neighbor,

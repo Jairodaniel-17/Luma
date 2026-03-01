@@ -1,12 +1,12 @@
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
     let config = Config {
@@ -61,7 +61,14 @@ async fn start_with_sqlite(data_dir: String) -> (String, oneshot::Sender<()>) {
     );
     let search_dir = PathBuf::from(&data_dir);
     let search_engine = Arc::new(SearchEngine::new(search_dir).unwrap());
-    let app = api::router(engine, config, sqlite, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
+    let app = api::router(
+        engine,
+        config,
+        sqlite,
+        search_engine,
+        None,
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+    );
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -98,7 +105,9 @@ async fn sqlite_exec_and_query() {
     let insert = client
         .post(format!("{}/v1/sql/exec", base))
         .json(&serde_json::json!({"sql":"INSERT INTO notes(body) VALUES (?)","params":["hola"]}))
-        .bearer_auth("test").bearer_auth("test").send()
+        .bearer_auth("test")
+        .bearer_auth("test")
+        .send()
         .await
         .unwrap();
     assert!(insert.status().is_success());
@@ -106,7 +115,9 @@ async fn sqlite_exec_and_query() {
     let query = client
         .post(format!("{}/v1/sql/query", base))
         .json(&serde_json::json!({"sql":"SELECT body FROM notes","params":[]}))
-        .bearer_auth("test").bearer_auth("test").send()
+        .bearer_auth("test")
+        .bearer_auth("test")
+        .send()
         .await
         .unwrap();
     assert!(query.status().is_success());

@@ -2,11 +2,11 @@ use futures_util::StreamExt;
 use luma::api;
 use luma::config::Config;
 use luma::engine::Engine;
-use tokio_util::sync::CancellationToken;
 use luma::search::engine::SearchEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
@@ -14,7 +14,14 @@ async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
 
-    let app = api::router(engine, config, None, search_engine, None, std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()));
+    let app = api::router(
+        engine,
+        config,
+        None,
+        search_engine,
+        None,
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+    );
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -89,7 +96,9 @@ async fn ttl_emits_event() {
             "{}/v1/stream?types=state_deleted&key_prefix=ttl:",
             base
         ))
-        .bearer_auth("test").bearer_auth("test").send()
+        .bearer_auth("test")
+        .bearer_auth("test")
+        .send()
         .await
         .unwrap();
     assert!(resp.status().is_success());
@@ -97,7 +106,9 @@ async fn ttl_emits_event() {
     let put = client
         .put(format!("{}/v1/state/ttl:1", base))
         .json(&serde_json::json!({"value":{"v":1},"ttl_ms":50}))
-        .bearer_auth("test").bearer_auth("test").send()
+        .bearer_auth("test")
+        .bearer_auth("test")
+        .send()
         .await
         .unwrap();
     assert!(put.status().is_success());
@@ -131,7 +142,9 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
 
     let resp = client
         .get(format!("{}/v1/stream?types=state_updated&since=0", base))
-        .bearer_auth("test").bearer_auth("test").send()
+        .bearer_auth("test")
+        .bearer_auth("test")
+        .send()
         .await
         .unwrap();
     assert!(resp.status().is_success());
@@ -143,7 +156,9 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
         let _ = client
             .put(format!("{}/v1/state/lag:{}", base, i))
             .json(&serde_json::json!({"value":{"i":i}}))
-            .bearer_auth("test").bearer_auth("test").send()
+            .bearer_auth("test")
+            .bearer_auth("test")
+            .send()
             .await
             .unwrap();
     }

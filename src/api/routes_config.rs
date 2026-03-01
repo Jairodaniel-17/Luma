@@ -1,12 +1,10 @@
 use crate::api::errors::ApiError;
 use crate::api::AppState;
+use crate::config::Config;
 use axum::extract::State;
 use axum::Json;
-use crate::config::Config;
 
-pub async fn get_config(
-    State(state): State<AppState>,
-) -> Result<Json<Config>, ApiError> {
+pub async fn get_config(State(state): State<AppState>) -> Result<Json<Config>, ApiError> {
     // Return the currently running configuration
     Ok(Json(state.config.clone()))
 }
