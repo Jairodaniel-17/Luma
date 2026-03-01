@@ -18,7 +18,6 @@ use crate::vector::{
     VectorSettings, VectorStore,
 };
 use anyhow::Context;
-use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
