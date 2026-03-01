@@ -12,6 +12,7 @@ pub mod routes_sql;
 pub mod routes_state;
 pub mod routes_ui;
 pub mod routes_vector;
+pub mod routes_config;
 
 use crate::config::Config;
 use crate::engine::Engine;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub search_engine: Arc<SearchEngine>,
     pub auth_store: Option<Arc<AuthStore>>,
     pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
+    pub hub: Arc<crate::engine::hub::LumaDatabase>,
 }
 
 pub fn router(
@@ -45,6 +47,14 @@ pub fn router(
     auth_store: Option<Arc<AuthStore>>,
     embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
 ) -> Router {
+    let hub = Arc::new(crate::engine::hub::LumaDatabase::new(
+        Arc::new(engine.clone()),
+        sqlite.clone().map(Arc::new),
+        search_engine.clone(),
+        (*embeddings).clone(),
+        crate::engine::chunking::ChunkingEngine::default(),
+    ));
+
     let state = AppState {
         engine,
         config,
@@ -52,6 +62,7 @@ pub fn router(
         search_engine,
         auth_store,
         embeddings,
+        hub,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -129,6 +140,8 @@ pub fn router(
         .route("/v1/db/:namespace/ingest", post(routes_hub::ingest))
         .route("/v1/db/:namespace/search", post(routes_hub::search))
         .route("/v1/meta/:collection/execute", post(routes_meta::execute))
+        .route("/v1/config", get(routes_config::get_config))
+        .route("/v1/config", put(routes_config::update_config))
         .route("/search", post(routes_search::search))
         .route("/search/ingest", post(routes_search::ingest))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))

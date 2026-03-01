@@ -34,7 +34,7 @@ pub struct VectorStore(Arc<Inner>);
 
 struct Inner {
     data_dir: Option<PathBuf>,
-    collections: RwLock<HashMap<String, Collection>>,
+    collections: dashmap::DashMap<String, Arc<RwLock<Collection>>>,
     settings: VectorSettings,
 }
 
@@ -200,6 +200,7 @@ pub struct SearchRequest {
     pub k: usize,
     pub filters: Option<serde_json::Value>,
     pub include_meta: Option<bool>,
+    pub allowed_ids: Option<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -334,7 +335,7 @@ impl VectorStore {
         settings.init_rayon();
         Self(Arc::new(Inner {
             data_dir: None,
-            collections: RwLock::new(HashMap::new()),
+            collections: dashmap::DashMap::new(),
             settings,
         }))
     }
@@ -378,23 +379,20 @@ impl VectorStore {
 
         Ok(Self(Arc::new(Inner {
             data_dir: Some(data_dir),
-            collections: RwLock::new(collections),
+            collections: collections.into_iter().map(|(k, v)| (k, Arc::new(RwLock::new(v)))).collect(),
             settings,
         })))
     }
 
     pub fn applied_offset(&self) -> u64 {
-        let cols = self.0.collections.read();
-        cols.values().map(|c| c.applied_offset).max().unwrap_or(0)
+        self.0.collections.iter().map(|c| c.read().applied_offset).max().unwrap_or(0)
     }
 
     pub fn get_collection(&self, name: &str) -> Option<(usize, Metric)> {
-        let cols = self.0.collections.read();
-        cols.get(name).map(|c| (c.dim, c.metric))
+        self.0.collections.get(name).map(|c| { let c = c.read(); (c.dim, c.metric) })
     }
     pub fn get_collection_info(&self, name: &str) -> Option<VectorCollectionInfo> {
-        let cols = self.0.collections.read();
-        cols.get(name).map(|c| VectorCollectionInfo {
+        self.0.collections.get(name).map(|c| { let c = c.read(); VectorCollectionInfo {
             collection: name.to_string(),
             dim: c.dim,
             metric: c.metric,
@@ -411,7 +409,7 @@ impl VectorStore {
                     .total_records
                     .saturating_sub(c.manifest.live_count as u64),
             ),
-        })
+        } })
     }
 
     pub fn create_collection(
@@ -420,8 +418,7 @@ impl VectorStore {
         dim: usize,
         metric: Metric,
     ) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        if cols.contains_key(name) {
+        if self.0.collections.contains_key(name) {
             return Err(VectorError::CollectionExists);
         }
         let layout = self.layout_for(name);
@@ -449,14 +446,15 @@ impl VectorStore {
         )?;
         c.rebuild_index();
         c.sync_manifest_run_settings()?;
-        cols.insert(name.to_string(), c);
+        self.0.collections.insert(name.to_string(), Arc::new(parking_lot::RwLock::new(c)));
         Ok(())
     }
 
     pub fn list_collections(&self) -> Vec<VectorCollectionInfo> {
-        let cols = self.0.collections.read();
-        cols.iter()
-            .map(|(name, c)| VectorCollectionInfo {
+        self.0.collections.iter().map(|entry| { 
+            let c = entry.value().read(); 
+            let name = entry.key(); 
+            VectorCollectionInfo {
                 collection: name.clone(),
                 dim: c.dim,
                 metric: c.metric,
@@ -473,8 +471,8 @@ impl VectorStore {
                         .total_records
                         .saturating_sub(c.manifest.live_count as u64),
                 ),
-            })
-            .collect()
+            }
+        }).collect()
     }
 
     pub fn compact_collection(&self, collection: &str) -> Result<bool, VectorError> {
@@ -486,18 +484,14 @@ impl VectorStore {
         collection: &str,
         force: bool,
     ) -> Result<bool, VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         c.force_compact(force)
     }
 
     pub fn retrain_ivf(&self, collection: &str, force: bool) -> Result<bool, VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         c.try_train_ivf(force)
     }
 
@@ -506,27 +500,21 @@ impl VectorStore {
         collection: &str,
         params: DiskAnnBuildParams,
     ) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         let _ = c.build_disk_index(params)?;
         Ok(())
     }
 
     pub fn drop_disk_index(&self, collection: &str) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         c.drop_disk_index()
     }
 
     pub fn disk_index_status(&self, collection: &str) -> Result<DiskIndexStatus, VectorError> {
-        let cols = self.0.collections.read();
-        let c = cols
-            .get(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c = c_arc.read();
         Ok(c.disk_index_status())
     }
 
@@ -535,18 +523,14 @@ impl VectorStore {
         collection: &str,
         params: DiskAnnBuildParams,
     ) -> Result<DiskAnnBuildParams, VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         c.update_diskann_params(params)
     }
 
     pub fn get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {
-        let cols = self.0.collections.read();
-        let c = cols
-            .get(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c = c_arc.read();
         Ok(c.items.get(id).cloned())
     }
 
@@ -567,8 +551,8 @@ impl VectorStore {
                 )
                 .map_err(|_| VectorError::InvalidManifest)?;
 
-                let mut cols = self.0.collections.write();
-                if let Some(existing) = cols.get_mut(name) {
+                if let Some(existing_arc) = self.0.collections.get(name) {
+                    let mut existing = existing_arc.write();
                     if existing.dim != dim || existing.metric != metric {
                         return Err(VectorError::InvalidManifest);
                     }
@@ -603,7 +587,7 @@ impl VectorStore {
                 c.mark_applied_offset(ev.offset)?;
                 c.rebuild_index();
                 c.sync_manifest_run_settings()?;
-                cols.insert(name.to_string(), c);
+                self.0.collections.insert(name.to_string(), Arc::new(parking_lot::RwLock::new(c)));
                 Ok(())
             }
             "vector_added" | "vector_upserted" | "vector_updated" | "vector_deleted" => {
@@ -618,10 +602,8 @@ impl VectorStore {
                     .and_then(|v| v.as_str())
                     .ok_or(VectorError::InvalidManifest)?;
 
-                let mut cols = self.0.collections.write();
-                let c = cols
-                    .get_mut(collection)
-                    .ok_or(VectorError::CollectionNotFound)?;
+                let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
                 if ev.offset <= c.applied_offset {
                     return Ok(());
                 }
@@ -669,10 +651,8 @@ impl VectorStore {
     }
 
     pub fn add(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         if c.items.contains_key(id) {
             return Err(VectorError::IdExists);
         }
@@ -692,10 +672,8 @@ impl VectorStore {
     }
 
     pub fn upsert(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         if item.vector.len() != c.dim {
             return Err(VectorError::DimMismatch);
         }
@@ -718,10 +696,8 @@ impl VectorStore {
         vector: Option<Vec<f32>>,
         meta: Option<serde_json::Value>,
     ) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         let current = c.items.get(id).cloned().ok_or(VectorError::IdNotFound)?;
         let new_vec = vector.unwrap_or(current.vector);
         if new_vec.len() != c.dim {
@@ -741,10 +717,8 @@ impl VectorStore {
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         if !c.items.contains_key(id) {
             return Err(VectorError::IdNotFound);
         }
@@ -765,10 +739,8 @@ impl VectorStore {
         collection: &str,
         req: SearchRequest,
     ) -> Result<Vec<SearchHit>, VectorError> {
-        let cols = self.0.collections.read();
-        let c = cols
-            .get(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let c = c_arc.read();
         c.search(req)
     }
 
@@ -778,10 +750,8 @@ impl VectorStore {
     }
 
     pub fn vacuum_collection(&self, collection: &str) -> Result<(), VectorError> {
-        let mut cols = self.0.collections.write();
-        let c = cols
-            .get_mut(collection)
-            .ok_or(VectorError::CollectionNotFound)?;
+        let c_arc = self.0.collections.get(collection).ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
         let layout = c.layout.clone().ok_or(VectorError::Persistence)?;
         let result = persist::rewrite_collection(&layout, &c.manifest, &c.items, &c.q8_store)
             .map_err(|_| VectorError::Persistence)?;
@@ -1472,10 +1442,38 @@ impl Collection {
         if self.items.is_empty() {
             return Ok(Vec::new());
         }
-        let filter_candidates = req
+        let mut filter_candidates = req
             .filters
             .as_ref()
             .and_then(|f| self.keyword_candidates(f));
+
+        if let Some(ref allowed) = req.allowed_ids {
+            let mut resolved_allowed = HashSet::new();
+            if let Some(by_value) = self.keyword_index.get("parent_id") {
+                for doc_id in allowed {
+                    if let Some(chunk_ids) = by_value.get(doc_id) {
+                        resolved_allowed.extend(chunk_ids.iter().cloned());
+                    }
+                }
+            } else {
+                // Fallback: If no parent_id index exists, we assume id prefixes
+                for doc_id in allowed {
+                    // This is inefficient but acts as fallback
+                    for item_id in self.items.keys() {
+                        if item_id.starts_with(doc_id) {
+                            resolved_allowed.insert(item_id.clone());
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref mut current) = filter_candidates {
+                current.retain(|id| resolved_allowed.contains(id));
+            } else {
+                filter_candidates = Some(resolved_allowed);
+            }
+        }
+
         if let Some(ref set) = filter_candidates {
             if set.is_empty() {
                 return Ok(Vec::new());
@@ -1700,6 +1698,7 @@ impl Collection {
                 self.settings.simd_enabled,
                 search_list,
                 (k * 5).max(k),
+                filter_candidates,
             )
             .map_err(|_| VectorError::Persistence)?;
         if approx.is_empty() {
