@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let command = cli::parse_command()?;
-    let config = Config::from_env()?;
+    let config = Config::load()?;
 
     match command {
         cli::Command::Serve => {
