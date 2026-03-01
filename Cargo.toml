@@ -52,6 +52,8 @@ quick-xml = { version = "0.31.0", features = ["escape-html"] }
 zip = { version = "8.1.0", features = ["default"] }
 toml = "1.0.3"
 dashmap = "6.1.0"
+memmap2 = "0.9.10"
+bytemuck = "1.25.0"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -72,3 +74,8 @@ harness = false
 [features]
 default = []
 ivf_stress_tests = []
+
+[[bench]]
+name = "vector_mmap_bench"
+harness = false
+

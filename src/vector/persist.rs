@@ -59,7 +59,8 @@ fn default_ivf_retrain_min_vectors() -> usize {
 pub struct CollectionLayout {
     pub dir: PathBuf,
     pub manifest_path: PathBuf,
-    pub bin_path: PathBuf,
+    pub bin_path: PathBuf, // legacy WAL
+    pub mmap_path: PathBuf, // new mmap
     pub centroids_meta_path: PathBuf,
     pub centroids_bin_path: PathBuf,
     pub runs_dir: PathBuf,
@@ -71,6 +72,7 @@ impl CollectionLayout {
         Self {
             manifest_path: dir.join("manifest.json"),
             bin_path: dir.join("vectors.bin"),
+            mmap_path: dir.join("vectors.mmap"),
             centroids_meta_path: dir.join("centroids.json"),
             centroids_bin_path: dir.join("centroids.bin"),
             runs_dir: dir.join("runs"),
