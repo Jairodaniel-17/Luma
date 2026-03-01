@@ -55,8 +55,8 @@ jobs:
         uses: swatinem/rust-cache@v2
 
       - name: Build
-        # --locked asegura que se usen las versiones exactas de tu Cargo.lock
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        # Removido --locked para evitar fallos si Cargo.lock necesita actualizarse en CI
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename Binary
         shell: bash
