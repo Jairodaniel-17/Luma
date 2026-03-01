@@ -1,6 +1,6 @@
 [package]
 name = "luma"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2021"
 description = "Luma: High-performance Vector DB powered by RustKissVDB"
 default-run = "luma"
