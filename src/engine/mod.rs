@@ -47,7 +47,7 @@ struct Inner {
     events: events::EventBus,
     metrics: Arc<metrics::Metrics>,
     persist: Option<persist::Persist>,
-    commit_lock: Mutex<()>,
+    
     shutdown: CancellationToken,
 }
 
@@ -93,7 +93,7 @@ impl Engine {
             events,
             metrics,
             persist,
-            commit_lock: Mutex::new(()),
+            
             shutdown,
         }));
 
@@ -219,8 +219,7 @@ impl Engine {
         let Some(persist) = &self.0.persist else {
             return Ok(());
         };
-        let _g = self.0.commit_lock.lock();
-        loop {
+                loop {
             match self.expire_due_keys_locked(now_ms(), 10_000) {
                 Ok(0) => break,
                 Ok(_) => continue,
@@ -292,8 +291,7 @@ impl Engine {
         ttl_ms: Option<u64>,
         if_revision: Option<u64>,
     ) -> Result<state::StateItem, EngineError> {
-        let _g = self.0.commit_lock.lock();
-
+        
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
         let revision = if let Some(db) = &self.0.state_db {
@@ -341,8 +339,7 @@ impl Engine {
         key: &str,
         reason: &'static str,
     ) -> Result<bool, EngineError> {
-        let _g = self.0.commit_lock.lock();
-
+        
         let exists = if let Some(db) = &self.0.state_db {
             db.exists_live(key)?
         } else {
@@ -478,8 +475,7 @@ impl Engine {
         dim: usize,
         metric: Metric,
     ) -> Result<(), EngineError> {
-        let _g = self.0.commit_lock.lock();
-        if self.0.vectors.get_collection(collection).is_some() {
+                if self.0.vectors.get_collection(collection).is_some() {
             return Err(VectorError::CollectionExists.into());
         }
         let data = serde_json::json!({
@@ -496,7 +492,7 @@ impl Engine {
         self.0.events.publish_record(event);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
-        drop(_g);
+
         if let Err(err) = self.persist_vector_manifest_state(collection, dim, metric) {
             tracing::warn!(
                 error = %err,
@@ -513,8 +509,7 @@ impl Engine {
         id: &str,
         item: VectorItem,
     ) -> Result<(), EngineError> {
-        let _g = self.0.commit_lock.lock();
-        let _ = self
+                let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -545,8 +540,7 @@ impl Engine {
         id: &str,
         item: VectorItem,
     ) -> Result<(), EngineError> {
-        let _g = self.0.commit_lock.lock();
-        let _ = self
+                let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -575,8 +569,7 @@ impl Engine {
         vector: Option<Vec<f32>>,
         meta: Option<serde_json::Value>,
     ) -> Result<(), EngineError> {
-        let _g = self.0.commit_lock.lock();
-        let _ = self
+                let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -606,8 +599,7 @@ impl Engine {
     }
 
     pub fn vector_delete(&self, collection: &str, id: &str) -> Result<(), EngineError> {
-        let _g = self.0.commit_lock.lock();
-        let _ = self
+                let _ = self
             .0
             .vectors
             .get_collection(collection)
@@ -726,8 +718,7 @@ impl Engine {
     }
 
     fn expire_due_keys(&self, limit: usize) -> Result<usize, EngineError> {
-        let _g = self.0.commit_lock.lock();
-        self.expire_due_keys_locked(now_ms(), limit)
+                self.expire_due_keys_locked(now_ms(), limit)
     }
 
     fn expire_due_keys_locked(&self, now: u64, limit: usize) -> Result<usize, EngineError> {

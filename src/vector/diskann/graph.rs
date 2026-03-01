@@ -107,6 +107,7 @@ impl DiskGraph {
         simd_enabled: bool,
         search_list: usize,
         max_candidates: usize,
+        filter_candidates: Option<&HashSet<String>>,
     ) -> io::Result<Vec<(usize, f32)>> {
         if self.len() == 0 || search_list == 0 || query.len() != self.dim {
             return Ok(Vec::new());
@@ -114,13 +115,34 @@ impl DiskGraph {
         let q_query = q8::quantize_per_vector(query);
         let entry = self.entry_point(&q_query, simd_enabled)?;
         let entry_node = self.load_node(entry)?;
-        let entry_score = q8::dot(&entry_node.vector, &q_query, simd_enabled);
+        
         let mut visited = HashSet::new();
         let mut to_visit = BinaryHeap::new();
-        to_visit.push(VisitState {
-            idx: entry,
-            score: entry_score,
-        });
+        
+        let entry_allowed = filter_candidates.map_or(true, |f| f.contains(&entry_node.id));
+        if entry_allowed {
+            let entry_score = q8::dot(&entry_node.vector, &q_query, simd_enabled);
+            to_visit.push(VisitState {
+                idx: entry,
+                score: entry_score,
+            });
+        } else {
+            // If entry is not allowed, we need a fallback entry point from the allowed set.
+            // For simplicity, scan a few nodes to find an allowed one to start, 
+            // or just rely on the fallback below.
+            if let Some(f) = filter_candidates {
+                for i in 0..self.len() {
+                    if let Ok(node) = self.load_node(i) {
+                        if f.contains(&node.id) {
+                            let score = q8::dot(&node.vector, &q_query, simd_enabled);
+                            to_visit.push(VisitState { idx: i, score });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         let mut approx_hits = Vec::new();
         while let Some(state) = to_visit.pop() {
             if !visited.insert(state.idx) {
@@ -136,6 +158,15 @@ impl DiskGraph {
                     continue;
                 }
                 let neighbor_node = self.load_node(neighbor)?;
+                
+                // Push-down filter: don't expand or compute distance if not allowed
+                if let Some(f) = filter_candidates {
+                    if !f.contains(&neighbor_node.id) {
+                        visited.insert(neighbor);
+                        continue;
+                    }
+                }
+                
                 let score = q8::dot(&neighbor_node.vector, &q_query, simd_enabled);
                 to_visit.push(VisitState {
                     idx: neighbor,

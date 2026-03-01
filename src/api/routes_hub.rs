@@ -25,16 +25,7 @@ pub async fn ingest(
 
     let metadata = payload.get("metadata").cloned();
 
-    // Create LumaDatabase wrapper
-    let hub = crate::engine::hub::LumaDatabase::new(
-        std::sync::Arc::new(state.engine.clone()),
-        state.sqlite.clone().map(std::sync::Arc::new),
-        state.search_engine.clone(),
-        (*state.embeddings).clone(),
-        crate::engine::chunking::ChunkingEngine::default(),
-    );
-
-    hub.ingest_document(&namespace, &generated_id, text, payload.clone(), metadata)
+    state.hub.ingest_document(&namespace, &generated_id, text, payload.clone(), metadata)
         .await
         .map_err(|e| {
             if e.to_string().contains("I/O") || e.to_string().contains("disk") {
@@ -70,15 +61,7 @@ pub async fn search(
     let sql_filter = payload.get("sql_filter").and_then(|v| v.as_str());
     let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-    let hub = crate::engine::hub::LumaDatabase::new(
-        std::sync::Arc::new(state.engine.clone()),
-        state.sqlite.clone().map(std::sync::Arc::new),
-        state.search_engine.clone(),
-        (*state.embeddings).clone(),
-        crate::engine::chunking::ChunkingEngine::default(),
-    );
-
-    let results = hub
+    let results = state.hub
         .search(&namespace, query, sql_filter, limit)
         .await
         .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "search_error", e.to_string()))?;

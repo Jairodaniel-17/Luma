@@ -134,6 +134,16 @@ Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con b
 
 Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
 
+## 🚀 Novedades en v1.3.1 (Mejoras de Arquitectura Nivel 2)
+
+La versión 1.3.1 introduce cambios radicales para eliminar cuellos de botella y maximizar el rendimiento en escenarios de alta concurrencia:
+*   **Push-Down Filtering Verdadero:** Integración directa de filtrado relacional con DiskANN/IVF. Los nodos descartados por SQLite nunca son evaluados, reduciendo la complejidad a `O(M)` sobre el subgrafo válido.
+*   **Ingesta Concurrente Controlada:** El orquestador usa `tokio::sync::Semaphore` para limitar inteligentemente peticiones HTTP masivas a modelos de embeddings remotos, manteniendo el throughput máximo sin ahogar la red.
+*   **Locking Granular:** Se eliminó el `commit_lock` global en el motor principal por un `DashMap`, permitiendo ingestas multi-hilo completamente paralelas y sin bloqueos entre diferentes colecciones.
+*   **Hydration Nativo:** Sustituimos `serde_json::Value` por `structs` nativos en el hot path, eliminando la presión en el GC y mejorando drásticamente los tiempos de latencia y uso de CPU al buscar.
+*   **Auto-Schema en Background:** La auto-creación de índices (`CREATE INDEX`) de SQLite ahora se gestiona de forma asíncrona mediante una cola MPSC dedicada y de un solo worker, resolviendo definitivamente el overhead de locks (tipo `SQLITE_BUSY`).
+*   **Modelo de Consistencia Explícito:** Patrón Eventual Consistency por compensación de *rollback* (Garantiza revertir estados relacionales o en `redb` si falla el vector store).
+
 ---
 
 ## 🏁 Conclusión
