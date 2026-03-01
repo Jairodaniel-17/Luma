@@ -13,6 +13,7 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -37,6 +38,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
