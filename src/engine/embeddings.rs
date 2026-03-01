@@ -12,6 +12,9 @@ pub enum EmbeddingProvider {
         api_url: String,
         model: String,
     },
+    Mock {
+        dim: usize,
+    },
     None,
 }
 
@@ -49,7 +52,18 @@ impl EmbeddingClient {
             EmbeddingProvider::Ollama { api_url, model } => {
                 self.embed_ollama(api_url, model, text).await
             }
+            EmbeddingProvider::Mock { dim } => Ok(self.embed_mock(*dim, text)),
         }
+    }
+
+    fn embed_mock(&self, dim: usize, text: &str) -> Vec<f32> {
+        // Simple deterministic vector for tests
+        let mut vec = vec![0.0; dim];
+        if dim > 0 {
+            let sum: u32 = text.bytes().map(|b| b as u32).sum();
+            vec[0] = (sum % 100) as f32 / 100.0;
+        }
+        vec
     }
 
     async fn embed_openai(

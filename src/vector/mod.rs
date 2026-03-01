@@ -1575,10 +1575,18 @@ impl Collection {
         if self.items.is_empty() {
             return Ok(Vec::new());
         }
-        if self.items.len() < 100 && req.options.filters.is_none() && req.options.allowed_ids.is_none() {
+        if self.items.len() < 100
+            && req.options.filters.is_none()
+            && req.options.allowed_ids.is_none()
+        {
             let mut scored = Vec::new();
             for (id, item) in self.items.iter() {
-                let score = exact_score(self.metric, &item.vector, &query, self.settings.simd_enabled);
+                let score = exact_score(
+                    self.metric,
+                    &item.vector,
+                    &query,
+                    self.settings.simd_enabled,
+                );
                 scored.push(SearchHit {
                     id: id.clone(),
                     score,

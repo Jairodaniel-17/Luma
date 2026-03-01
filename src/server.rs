@@ -75,7 +75,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .unwrap_or(PathBuf::from("data"));
     let search_engine = Arc::new(SearchEngine::new(data_dir)?);
 
-    let embeddings = std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default());
+    let embeddings = init_embeddings(&config);
     let app = luma::api::router(
         engine.clone(),
         config.clone(),
@@ -123,6 +123,28 @@ fn init_sqlite(config: &Config) -> anyhow::Result<SqliteService> {
         .ok_or_else(|| anyhow::anyhow!("SQLITE_ENABLED requiere DATA_DIR o SQLITE_DB_PATH"))?;
 
     SqliteService::new(path)
+}
+
+fn init_embeddings(config: &Config) -> Arc<luma::engine::embeddings::EmbeddingClient> {
+    use luma::engine::embeddings::{EmbeddingClient, EmbeddingProvider};
+
+    let provider = match config.embedding_provider.to_lowercase().as_str() {
+        "ollama" => EmbeddingProvider::Ollama {
+            api_url: config.embedding_url.clone(),
+            model: config.embedding_model.clone(),
+        },
+        "openai" => EmbeddingProvider::OpenAI {
+            api_url: config.embedding_url.clone(),
+            api_key: config.embedding_api_key.clone(),
+            model: config.embedding_model.clone(),
+        },
+        "mock" => EmbeddingProvider::Mock {
+            dim: config.embedding_dim,
+        },
+        _ => EmbeddingProvider::None,
+    };
+
+    Arc::new(EmbeddingClient::new(provider))
 }
 
 async fn shutdown_signal(token: CancellationToken) {

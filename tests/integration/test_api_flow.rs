@@ -30,7 +30,9 @@ async fn test_api_vector_flow() {
         None,
         search_engine,
         None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
+        )),
     );
 
     // 1. Create Collection
@@ -132,7 +134,9 @@ async fn test_api_sql_flow() {
         Some(sqlite),
         search_engine,
         None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::default()),
+        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
+        )),
     );
 
     // 1. Create Table (Exec)
