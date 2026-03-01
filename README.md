@@ -134,6 +134,15 @@ Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con b
 
 Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
 
+## 🚀 Novedades en v1.3.2 (Mmap & Zero-Copy Architecture)
+
+La versión 1.3.2 marca un hito en la eficiencia de recursos, permitiendo a Luma escalar a millones de vectores con un consumo de RAM mínimo:
+*   **Motor de Almacenamiento Zero-Copy:** Implementación de `VectorMmap` usando memoria mapeada (`memmap2`). Los vectores ya no residen obligatoriamente en el heap de Rust, sino que se acceden directamente desde el disco a través del Page Cache del SO.
+*   **Latencia de Ingesta Ultra-Baja:** Reducción de la latencia de escritura a ~2.4 microsegundos por vector (dim 1536), eliminando pases de serialización intermedios.
+*   **Arranque Instantáneo:** El mapeo de archivos permite que colecciones masivas estén listas para buscar en milisegundos, delegando la carga de datos al Kernel bajo demanda.
+*   **Mapeo ID-to-Offset O(1):** Integración de offsets binarios en `VectorItem` para saltar directamente a la posición física del vector en disco durante la fase de refinamiento.
+*   **Migración Automática Silenciosa:** Los datos existentes en el formato WAL heredado se migran automáticamente al nuevo motor binario al primer arranque.
+
 ## 🚀 Novedades en v1.3.1 (Mejoras de Arquitectura Nivel 2)
 
 La versión 1.3.1 introduce cambios radicales para eliminar cuellos de botella y maximizar el rendimiento en escenarios de alta concurrencia:
