@@ -261,6 +261,7 @@ pub async fn add(
             VectorItem {
                 vector: body.vector,
                 meta: body.meta.unwrap_or(serde_json::Value::Null),
+                mmap_offset: None,
             },
         )
         .map_err(map_engine_error)?;
@@ -311,6 +312,7 @@ pub async fn upsert(
             VectorItem {
                 vector: body.vector,
                 meta: body.meta.unwrap_or(serde_json::Value::Null),
+                mmap_offset: None,
             },
         )
         .map_err(map_engine_error)?;
@@ -385,6 +387,7 @@ pub async fn upsert_batch(
             VectorItem {
                 vector,
                 meta: meta.unwrap_or(serde_json::Value::Null),
+                mmap_offset: None,
             },
         ) {
             Ok(_) => results.push(VectorBatchResult::Upserted { id }),

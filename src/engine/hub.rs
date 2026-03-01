@@ -131,6 +131,7 @@ impl LumaDatabase {
             let item = crate::vector::VectorItem {
                 vector,
                 meta: serde_json::to_value(meta_struct).unwrap_or(serde_json::Value::Null),
+                mmap_offset: None,
             };
 
             if let Err(e) = self.engine.vector_upsert(namespace, &chunk_id, item) {
