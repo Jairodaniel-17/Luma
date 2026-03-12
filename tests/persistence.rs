@@ -83,3 +83,42 @@ async fn state_survives_restart_without_wal() {
         assert_eq!(item.value["i"], i);
     }
 }
+
+#[tokio::test]
+async fn group_commit_flushes_pending_events_on_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_string_lossy().to_string();
+
+    let config = Config {
+        port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
+        api_key: "test".to_string(),
+        data_dir: Some(data_dir.clone()),
+        snapshot_interval_secs: 3600,
+        wal_sync_mode: "group".to_string(),
+        wal_batch_size: 128,
+        wal_flush_interval_ms: 60_000,
+        ..Config::default()
+    };
+
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    for i in 0..8u32 {
+        engine
+            .put_state(
+                format!("pending:{i}"),
+                serde_json::json!({ "i": i }),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    engine.shutdown();
+    drop(engine);
+
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
+    for i in 0..8u32 {
+        let item = reopened.get_state(&format!("pending:{i}")).unwrap();
+        assert_eq!(item.value["i"], i);
+    }
+}

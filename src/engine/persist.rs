@@ -142,6 +142,15 @@ impl Persist {
         Ok(())
     }
 
+    pub fn group_flush_interval(&self) -> Option<std::time::Duration> {
+        match self.0.sync_mode {
+            WalSyncMode::Group {
+                flush_interval_ms, ..
+            } => Some(std::time::Duration::from_millis(flush_interval_ms)),
+            WalSyncMode::PerWrite => None,
+        }
+    }
+
     fn flush_group_buffer(&self) -> std::io::Result<()> {
         let Some(buf) = &self.0.group_buffer else {
             return Ok(());
@@ -386,4 +395,73 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Persist, Snapshot, WalSyncMode};
+    use crate::engine::events::EventRecord;
+    use tempfile::tempdir;
+
+    fn sample_event(offset: u64) -> EventRecord {
+        EventRecord {
+            offset,
+            ts_ms: 1,
+            event_type: "state_updated".to_string(),
+            data: serde_json::json!({
+                "key": format!("k{offset}"),
+                "value": offset,
+                "revision": 1
+            }),
+        }
+    }
+
+    #[test]
+    fn group_mode_flush_buffer_persists_pending_events() {
+        let dir = tempdir().unwrap();
+        let persist = Persist::new_with_mode(
+            dir.path(),
+            1024 * 1024,
+            4,
+            WalSyncMode::Group {
+                batch_size: 64,
+                flush_interval_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        persist.append_event(&sample_event(1)).unwrap();
+        let wal_path = dir.path().join("events-000001.log");
+        assert!(!wal_path.exists() || std::fs::read_to_string(&wal_path).unwrap().is_empty());
+
+        persist.flush_buffer().unwrap();
+
+        let wal_after = std::fs::read_to_string(wal_path).unwrap();
+        assert!(wal_after.contains("\"offset\":1"));
+    }
+
+    #[test]
+    fn snapshot_rotation_flushes_group_buffer_first() {
+        let dir = tempdir().unwrap();
+        let persist = Persist::new_with_mode(
+            dir.path(),
+            1024 * 1024,
+            4,
+            WalSyncMode::Group {
+                batch_size: 64,
+                flush_interval_ms: 10_000,
+            },
+        )
+        .unwrap();
+
+        persist.append_event(&sample_event(7)).unwrap();
+        persist
+            .write_snapshot_and_rotate(&Snapshot { last_offset: 7 })
+            .unwrap();
+
+        let first_segment = std::fs::read_to_string(dir.path().join("events-000001.log")).unwrap();
+        assert!(first_segment.contains("\"offset\":7"));
+        assert!(dir.path().join("snapshot.json").exists());
+        assert!(dir.path().join("events-000002.log").exists());
+    }
 }
