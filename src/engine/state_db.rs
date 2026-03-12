@@ -68,7 +68,26 @@ impl StateDb {
         Ok(self.get_state(key)?.is_some())
     }
 
+    pub fn exists_any(&self, key: &str) -> anyhow::Result<bool> {
+        let tx = self.db.begin_read()?;
+        let table = match tx.open_table(STATE) {
+            Ok(t) => t,
+            Err(_) => return Ok(false),
+        };
+        Ok(table.get(key.as_bytes())?.is_some())
+    }
+
     pub fn list(&self, prefix: Option<&str>, limit: usize) -> anyhow::Result<Vec<StateItem>> {
+        let end = prefix.and_then(next_prefix_boundary);
+        self.list_range(prefix, end.as_deref(), limit)
+    }
+
+    pub fn list_range(
+        &self,
+        start: Option<&str>,
+        end: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<StateItem>> {
         let tx = self.db.begin_read()?;
         let table = match tx.open_table(STATE) {
             Ok(t) => t,
@@ -77,45 +96,30 @@ impl StateDb {
         let now = now_ms();
         let mut out = Vec::new();
 
-        if let Some(prefix) = prefix {
-            let start = prefix.as_bytes().to_vec();
-            for kv in table.range(start.as_slice()..)? {
-                let (k, v) = kv?;
-                let key = std::str::from_utf8(k.value()).unwrap_or_default();
-                if !key.starts_with(prefix) {
-                    break;
-                }
-                let stored: StoredValue = serde_json::from_slice(v.value())?;
-                if stored.expires_at_ms.is_some_and(|e| e <= now) {
-                    continue;
-                }
-                out.push(StateItem {
-                    key: key.to_string(),
-                    value: stored.value,
-                    revision: stored.revision,
-                    expires_at_ms: stored.expires_at_ms,
-                });
-                if out.len() >= limit {
+        let iter = match start {
+            Some(start) => table.range(start.as_bytes()..)?,
+            None => table.iter()?,
+        };
+        for kv in iter {
+            let (k, v) = kv?;
+            let key = std::str::from_utf8(k.value()).unwrap_or_default();
+            if let Some(end) = end {
+                if key >= end {
                     break;
                 }
             }
-        } else {
-            for kv in table.iter()? {
-                let (k, v) = kv?;
-                let key = std::str::from_utf8(k.value()).unwrap_or_default();
-                let stored: StoredValue = serde_json::from_slice(v.value())?;
-                if stored.expires_at_ms.is_some_and(|e| e <= now) {
-                    continue;
-                }
-                out.push(StateItem {
-                    key: key.to_string(),
-                    value: stored.value,
-                    revision: stored.revision,
-                    expires_at_ms: stored.expires_at_ms,
-                });
-                if out.len() >= limit {
-                    break;
-                }
+            let stored: StoredValue = serde_json::from_slice(v.value())?;
+            if stored.expires_at_ms.is_some_and(|e| e <= now) {
+                continue;
+            }
+            out.push(StateItem {
+                key: key.to_string(),
+                value: stored.value,
+                revision: stored.revision,
+                expires_at_ms: stored.expires_at_ms,
+            });
+            if out.len() >= limit {
+                break;
             }
         }
 
@@ -168,6 +172,9 @@ impl StateDb {
     }
 
     pub fn apply_state_updated(&self, ev: &EventRecord) -> anyhow::Result<()> {
+        if ev.offset <= self.applied_offset()? {
+            return Ok(());
+        }
         let key = ev
             .data
             .get("key")
@@ -222,6 +229,9 @@ impl StateDb {
     }
 
     pub fn apply_state_deleted(&self, ev: &EventRecord) -> anyhow::Result<()> {
+        if ev.offset <= self.applied_offset()? {
+            return Ok(());
+        }
         let key = ev
             .data
             .get("key")
@@ -310,4 +320,16 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     dur.as_millis() as u64
+}
+
+fn next_prefix_boundary(prefix: &str) -> Option<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    for idx in (0..bytes.len()).rev() {
+        if bytes[idx] != u8::MAX {
+            bytes[idx] = bytes[idx].saturating_add(1);
+            bytes.truncate(idx + 1);
+            return String::from_utf8(bytes).ok();
+        }
+    }
+    None
 }

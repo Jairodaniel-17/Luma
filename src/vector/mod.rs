@@ -226,6 +226,15 @@ pub struct SearchHit {
     pub meta: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SearchStats {
+    pub candidate_expansion_steps: usize,
+    pub final_candidate_k: usize,
+    pub candidate_count: usize,
+    pub recall_estimate: f32,
+    pub filter_candidate_count: Option<usize>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VectorCollectionInfo {
     pub collection: String,
@@ -240,6 +249,7 @@ pub struct VectorCollectionInfo {
     pub updated_at_ms: Option<u64>,
     pub segments: Option<usize>,
     pub deleted_count: Option<u64>,
+    pub fragmentation_score: Option<f64>,
 }
 
 struct Collection {
@@ -440,6 +450,7 @@ impl VectorStore {
                         .total_records
                         .saturating_sub(c.manifest.live_count as u64),
                 ),
+                fragmentation_score: Some(collection_fragmentation_score(&c)),
             }
         })
     }
@@ -508,6 +519,7 @@ impl VectorStore {
                             .total_records
                             .saturating_sub(c.manifest.live_count as u64),
                     ),
+                    fragmentation_score: Some(collection_fragmentation_score(&c)),
                 }
             })
             .collect()
@@ -827,6 +839,15 @@ impl VectorStore {
         collection: &str,
         req: SearchRequest,
     ) -> Result<Vec<SearchHit>, VectorError> {
+        self.search_with_stats(collection, req)
+            .map(|(hits, _)| hits)
+    }
+
+    pub fn search_with_stats(
+        &self,
+        collection: &str,
+        req: SearchRequest,
+    ) -> Result<(Vec<SearchHit>, SearchStats), VectorError> {
         let c_arc = self
             .0
             .collections
@@ -860,8 +881,12 @@ impl VectorStore {
     /// PR6: Rebuild HNSW segments for collections that exceed the tombstone ratio threshold.
     ///
     /// Returns the list of collection names that were compacted.
-    /// Acquires a write lock per collection only when compaction is needed.
+    /// Rebuild work happens off-lock; only the final swap requires a write lock.
     pub fn compact_hnsw_segments(&self, threshold: f32) -> Vec<String> {
+        if threshold <= 0.0 {
+            return Vec::new();
+        }
+
         let mut compacted = Vec::new();
         let collection_names: Vec<String> =
             self.0.collections.iter().map(|r| r.key().clone()).collect();
@@ -871,44 +896,52 @@ impl VectorStore {
                 continue;
             };
 
-            // Check tombstone ratio without write lock first
-            let needs_compaction = {
+            let snapshot = {
                 let c = c_arc.read();
-                if c.segments.is_empty() {
-                    false
+                if !collection_needs_hnsw_compaction(&c, threshold) {
+                    None
                 } else {
-                    let total_tombstones: usize = c
-                        .segments
-                        .iter()
-                        .map(|s| s.deleted.iter().filter(|&&d| d).count())
-                        .sum();
-                    let total_capacity: usize =
-                        c.segments.iter().map(|s| s.id_by_data_id.len()).sum();
-                    total_capacity > 0
-                        && (total_tombstones as f32 / total_capacity as f32) > threshold
+                    Some((
+                        c.applied_offset,
+                        c.metric,
+                        c.segment_max_items,
+                        c.settings.hnsw_m,
+                        c.settings.hnsw_ef_construction,
+                        collect_segment_rebuild_items(&c),
+                    ))
                 }
             };
 
-            if needs_compaction {
-                let mut c = c_arc.write();
-                let still_needs_compaction = if c.segments.is_empty() {
-                    false
-                } else {
-                    let total_tombstones: usize = c
-                        .segments
-                        .iter()
-                        .map(|s| s.deleted.iter().filter(|&&d| d).count())
-                        .sum();
-                    let total_capacity: usize =
-                        c.segments.iter().map(|s| s.id_by_data_id.len()).sum();
-                    total_capacity > 0
-                        && (total_tombstones as f32 / total_capacity as f32) > threshold
-                };
-                if still_needs_compaction {
-                    c.rebuild_segments();
-                    compacted.push(name);
-                }
+            let Some((
+                applied_offset,
+                metric,
+                segment_max_items,
+                hnsw_m,
+                hnsw_ef_construction,
+                items,
+            )) = snapshot
+            else {
+                continue;
+            };
+
+            let (segments, item_segments) = build_segments_from_items(
+                metric,
+                segment_max_items,
+                hnsw_m,
+                hnsw_ef_construction,
+                &items,
+            );
+
+            let mut c = c_arc.write();
+            if c.applied_offset != applied_offset
+                || !collection_needs_hnsw_compaction(&c, threshold)
+            {
+                continue;
             }
+            c.segments = segments;
+            c.item_segments = item_segments;
+            c.refresh_item_clusters();
+            compacted.push(name);
         }
 
         compacted
@@ -1048,55 +1081,16 @@ impl Collection {
     }
 
     fn rebuild_segments(&mut self) {
-        self.item_segments.clear();
-        self.segments.clear();
-        if !self.settings.hnsw_fallback_enabled {
-            return;
-        }
-        if self.items.is_empty() {
-            self.segments.push(SegmentIndex::new(
-                self.metric,
-                self.segment_max_items,
-                self.settings.hnsw_m,
-                self.settings.hnsw_ef_construction,
-            ));
-            return;
-        }
-        let mut current = SegmentIndex::new(
+        let items = collect_segment_rebuild_items(self);
+        let (segments, item_segments) = build_segments_from_items(
             self.metric,
             self.segment_max_items,
             self.settings.hnsw_m,
             self.settings.hnsw_ef_construction,
+            &items,
         );
-        let mut ids: Vec<&String> = self.items.keys().collect();
-        ids.sort();
-        for id in ids {
-            let item = self
-                .items
-                .get(id)
-                .expect("item id collected from keys must exist");
-            if current.live >= current.capacity {
-                self.segments.push(current);
-                current = SegmentIndex::new(
-                    self.metric,
-                    self.segment_max_items,
-                    self.settings.hnsw_m,
-                    self.settings.hnsw_ef_construction,
-                );
-            }
-            current.insert(id.clone(), item.vector.clone());
-            let idx = self.segments.len();
-            self.item_segments.insert(id.clone(), idx);
-        }
-        self.segments.push(current);
-        if self.segments.is_empty() {
-            self.segments.push(SegmentIndex::new(
-                self.metric,
-                self.segment_max_items,
-                self.settings.hnsw_m,
-                self.settings.hnsw_ef_construction,
-            ));
-        }
+        self.segments = segments;
+        self.item_segments = item_segments;
         self.refresh_item_clusters();
     }
 
@@ -1662,15 +1656,17 @@ impl Collection {
         Ok(())
     }
 
-    fn search(&self, req: SearchRequest) -> Result<Vec<SearchHit>, VectorError> {
+    fn search(&self, req: SearchRequest) -> Result<(Vec<SearchHit>, SearchStats), VectorError> {
         if req.vector.len() != self.dim {
             return Err(VectorError::DimMismatch);
         }
+        let started = std::time::Instant::now();
+        let mut stats = SearchStats::default();
         let include_meta = req.options.include_meta;
         let k = req.k.max(1);
         let query = normalize_if_needed(self.metric, req.vector);
         if self.items.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), stats));
         }
         if self.items.len() < 100
             && req.options.filters.is_none()
@@ -1692,7 +1688,10 @@ impl Collection {
             }
             scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
             scored.truncate(k);
-            return Ok(scored);
+            stats.candidate_count = scored.len();
+            stats.final_candidate_k = scored.len();
+            stats.recall_estimate = 1.0;
+            return Ok((scored, stats));
         }
         let mut filter_candidates = req
             .options
@@ -1730,8 +1729,9 @@ impl Collection {
 
         if let Some(ref set) = filter_candidates {
             let set_ref: &HashSet<String> = set;
+            stats.filter_candidate_count = Some(set_ref.len());
             if set_ref.is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), stats));
             }
         }
         if self.settings.index_kind.is_diskann() {
@@ -1742,40 +1742,56 @@ impl Collection {
                 filter_candidates.as_ref(),
                 k,
             )? {
-                return Ok(hits);
+                stats.candidate_count = hits.len();
+                stats.final_candidate_k = k;
+                stats.recall_estimate = simple_recall_estimate(&hits, k);
+                return Ok((hits, stats));
             }
         }
         let ivf_probes = self.ivf_probe_set(query.as_slice());
         if let Some(ref set) = filter_candidates {
             let set_ref: &HashSet<String> = set;
             if set_ref.is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), stats));
             }
             if set_ref.len() <= 512 {
-                return Ok(self.search_subset_bruteforce(
+                let hits = self.search_subset_bruteforce(
                     query.as_slice(),
                     include_meta,
                     set_ref,
                     req.options.filters.as_ref(),
                     k,
                     ivf_probes.as_ref(),
-                ));
+                );
+                stats.candidate_count = hits.len();
+                stats.final_candidate_k = set_ref.len();
+                stats.recall_estimate = 1.0;
+                return Ok((hits, stats));
             }
         }
         if let Some(ref probes) = ivf_probes {
-            return Ok(self.search_ivf_flat(
+            let hits = self.search_ivf_flat(
                 query.as_slice(),
                 include_meta,
                 req.options.filters.as_ref(),
                 filter_candidates.as_ref(),
                 k,
                 probes,
-            ));
+            );
+            stats.candidate_count = hits.len();
+            stats.final_candidate_k = probes.len();
+            stats.recall_estimate = simple_recall_estimate(&hits, k);
+            return Ok((hits, stats));
         }
 
-        let candidate_k = (k * 10).min(self.items.len()).max(k);
-        let mut combined: Vec<(String, f32)> =
-            if self.settings.should_parallel_segments(self.segments.len()) {
+        let max_candidates = self.items.len().max(k);
+        let mut candidate_k = k.max(16).min(max_candidates);
+        let best_hits = loop {
+            stats.candidate_expansion_steps = stats.candidate_expansion_steps.saturating_add(1);
+            let mut combined: Vec<(String, f32)> = if self
+                .settings
+                .should_parallel_segments(self.segments.len())
+            {
                 self.segments
                     .par_iter()
                     .map(|segment| segment.search_candidates(query.as_slice(), candidate_k))
@@ -1789,45 +1805,81 @@ impl Collection {
                     .flat_map(|segment| segment.search_candidates(query.as_slice(), candidate_k))
                     .collect()
             };
-        combined.sort_by(compare_scores_desc);
+            combined.sort_by(compare_scores_desc);
+            let hits = self.filtered_hits_from_candidates(
+                &combined,
+                include_meta,
+                req.options.filters.as_ref(),
+                filter_candidates.as_ref(),
+                ivf_probes.as_ref(),
+                k,
+            );
+            stats.candidate_count = combined.len();
+            stats.final_candidate_k = candidate_k;
+            stats.recall_estimate = estimate_recall(candidate_k, k, &combined, &hits);
+            let hit_count = hits.len();
 
+            if should_stop_expansion(
+                candidate_k,
+                max_candidates,
+                hit_count,
+                k,
+                stats.recall_estimate,
+                filter_candidates.as_ref().map(|set| set.len()),
+            ) {
+                break hits;
+            }
+            candidate_k = (candidate_k.saturating_mul(2)).min(max_candidates);
+        };
+
+        let _elapsed = started.elapsed();
+        Ok((best_hits, stats))
+    }
+
+    fn filtered_hits_from_candidates(
+        &self,
+        combined: &[(String, f32)],
+        include_meta: bool,
+        filters: Option<&serde_json::Value>,
+        filter_candidates: Option<&HashSet<String>>,
+        ivf_probes: Option<&HashSet<usize>>,
+        k: usize,
+    ) -> Vec<SearchHit> {
         let mut hits = Vec::new();
         let mut seen = HashSet::new();
         for (id, score) in combined {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            if let Some(ref probes) = ivf_probes {
-                let Some(cluster) = self.item_clusters.get(&id) else {
+            if let Some(probes) = ivf_probes {
+                let Some(cluster) = self.item_clusters.get(id) else {
                     continue;
                 };
                 if !probes.contains(cluster) {
                     continue;
                 }
             }
-            if let Some(ref set) = filter_candidates {
-                let set_ref: &HashSet<String> = set;
-                if !set_ref.contains(&id) {
+            if let Some(set) = filter_candidates {
+                if !set.contains(id) {
                     continue;
                 }
             }
-            let Some(item) = self.items.get(&id) else {
+            let Some(item) = self.items.get(id) else {
                 continue;
             };
-            if !matches_filters(&item.meta, req.options.filters.as_ref()) {
+            if !matches_filters(&item.meta, filters) {
                 continue;
             }
             hits.push(SearchHit {
                 id: id.clone(),
-                score,
+                score: *score,
                 meta: include_meta.then(|| item.meta.clone()),
             });
             if hits.len() >= k {
                 break;
             }
         }
-
-        Ok(hits)
+        hits
     }
 
     #[inline(always)]
@@ -2021,97 +2073,138 @@ impl Collection {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Metric, SearchOptions, SearchRequest, VectorItem, VectorSettings, VectorStore};
+fn collection_needs_hnsw_compaction(collection: &Collection, threshold: f32) -> bool {
+    collection_fragmentation_score(collection) > threshold as f64
+}
 
-    #[test]
-    fn compact_hnsw_segments_preserves_live_ids_and_clears_tombstones() {
-        let store = VectorStore::with_settings(VectorSettings::default());
-        store.create_collection("docs", 3, Metric::Cosine).unwrap();
+fn collect_segment_rebuild_items(collection: &Collection) -> Vec<(String, Vec<f32>)> {
+    let mut items = collection
+        .items
+        .iter()
+        .map(|(id, item)| (id.clone(), item.vector.clone()))
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
+}
 
-        for idx in 0..24usize {
-            store
-                .upsert(
-                    "docs",
-                    &format!("doc-{idx:02}"),
-                    VectorItem {
-                        vector: vec![1.0, idx as f32, 0.0],
-                        meta: serde_json::json!({ "idx": idx }),
-                        mmap_offset: None,
-                    },
-                )
-                .unwrap();
-        }
-        for idx in 0..12usize {
-            store.delete("docs", &format!("doc-{idx:02}")).unwrap();
-        }
-
-        let compacted = store.compact_hnsw_segments(0.0);
-        assert_eq!(compacted, vec!["docs".to_string()]);
-
-        let collection = store.0.collections.get("docs").unwrap();
-        let collection = collection.read();
-        assert_eq!(collection.items.len(), 12);
-        assert_eq!(collection.item_segments.len(), 12);
-        assert!(collection
-            .segments
-            .iter()
-            .all(|segment| segment.deleted.iter().all(|deleted| !deleted)));
-
-        drop(collection);
-
-        let hits = store
-            .search(
-                "docs",
-                SearchRequest {
-                    vector: vec![1.0, 20.0, 0.0],
-                    k: 5,
-                    options: SearchOptions {
-                        filters: None,
-                        include_meta: false,
-                        allowed_ids: None,
-                    },
-                },
-            )
-            .unwrap();
-        assert!(hits.iter().all(|hit| !hit.id.starts_with("doc-0")));
-        assert!(hits.iter().any(|hit| hit.id == "doc-20"));
-    }
-
-    #[test]
-    fn rebuild_segments_uses_stable_id_order() {
-        let store = VectorStore::with_settings(VectorSettings::default());
-        store.create_collection("docs", 2, Metric::Cosine).unwrap();
-
-        for id in ["doc-c", "doc-a", "doc-b"] {
-            store
-                .upsert(
-                    "docs",
-                    id,
-                    VectorItem {
-                        vector: vec![1.0, 0.0],
-                        meta: serde_json::json!({ "id": id }),
-                        mmap_offset: None,
-                    },
-                )
-                .unwrap();
-        }
-
-        let collection = store.0.collections.get("docs").unwrap();
-        let mut collection = collection.write();
-        collection.rebuild_segments();
-
-        let ordered_ids = &collection.segments[0].id_by_data_id;
-        assert_eq!(
-            ordered_ids,
-            &vec![
-                "doc-a".to_string(),
-                "doc-b".to_string(),
-                "doc-c".to_string()
-            ]
+fn build_segments_from_items(
+    metric: Metric,
+    segment_max_items: usize,
+    hnsw_m: usize,
+    hnsw_ef_construction: usize,
+    items: &[(String, Vec<f32>)],
+) -> (Vec<SegmentIndex>, HashMap<String, usize>) {
+    if items.is_empty() {
+        return (
+            vec![SegmentIndex::new(
+                metric,
+                segment_max_items,
+                hnsw_m,
+                hnsw_ef_construction,
+            )],
+            HashMap::new(),
         );
     }
+
+    let mut segments = Vec::new();
+    let mut item_segments = HashMap::new();
+    let mut current = SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
+
+    for (id, vector) in items {
+        if current.live >= current.capacity {
+            segments.push(current);
+            current = SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
+        }
+        current.insert(id.clone(), vector.clone());
+        item_segments.insert(id.clone(), segments.len());
+    }
+    segments.push(current);
+
+    (segments, item_segments)
+}
+
+fn collection_fragmentation_score(collection: &Collection) -> f64 {
+    if collection.segments.is_empty() {
+        return 0.0;
+    }
+    let total_slots: usize = collection
+        .segments
+        .iter()
+        .map(|segment| segment.id_by_data_id.len())
+        .sum();
+    if total_slots == 0 {
+        return 0.0;
+    }
+    let tombstones: usize = collection
+        .segments
+        .iter()
+        .map(|segment| segment.deleted.iter().filter(|&&deleted| deleted).count())
+        .sum();
+    let sparse_segments = collection
+        .segments
+        .iter()
+        .filter(|segment| {
+            let slots = segment.id_by_data_id.len().max(1);
+            (segment.live as f64 / slots as f64) < 0.6
+        })
+        .count();
+    let tombstone_ratio = tombstones as f64 / total_slots as f64;
+    let sparse_ratio = sparse_segments as f64 / collection.segments.len().max(1) as f64;
+    (tombstone_ratio * 0.7 + sparse_ratio * 0.3).clamp(0.0, 1.0)
+}
+
+fn estimate_recall(
+    candidate_k: usize,
+    requested_k: usize,
+    combined: &[(String, f32)],
+    hits: &[SearchHit],
+) -> f32 {
+    if hits.len() < requested_k {
+        return (hits.len() as f32 / requested_k.max(1) as f32).clamp(0.0, 0.8);
+    }
+    let top_score = combined.first().map(|(_, score)| *score).unwrap_or(0.0);
+    let kth_score = hits
+        .get(requested_k.saturating_sub(1))
+        .map(|hit| hit.score)
+        .unwrap_or(top_score);
+    let tail_score = combined
+        .get(candidate_k.min(combined.len()).saturating_sub(1))
+        .map(|(_, score)| *score)
+        .unwrap_or(kth_score);
+    let separation = (kth_score - tail_score).abs();
+    let normalized = if top_score.abs() > f32::EPSILON {
+        (separation / top_score.abs()).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    (0.6 + normalized * 0.4).clamp(0.0, 1.0)
+}
+
+fn simple_recall_estimate(hits: &[SearchHit], requested_k: usize) -> f32 {
+    if hits.is_empty() {
+        return 0.0;
+    }
+    (hits.len() as f32 / requested_k.max(1) as f32).clamp(0.0, 1.0)
+}
+
+fn should_stop_expansion(
+    candidate_k: usize,
+    max_candidates: usize,
+    hit_count: usize,
+    requested_k: usize,
+    recall_estimate: f32,
+    filter_candidate_count: Option<usize>,
+) -> bool {
+    if candidate_k >= max_candidates {
+        return true;
+    }
+    if hit_count < requested_k {
+        return false;
+    }
+    if filter_candidate_count.is_some_and(|count| candidate_k >= count) {
+        return true;
+    }
+    recall_estimate >= 0.92
 }
 
 fn matches_filters(meta: &serde_json::Value, filters: Option<&serde_json::Value>) -> bool {
@@ -2270,5 +2363,136 @@ impl index::DiskAnnIndex for VectorStore {
         params: index::DiskAnnBuildParams,
     ) -> Result<index::DiskAnnBuildParams, VectorError> {
         VectorStore::update_disk_index_params(self, collection, params)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Metric, SearchOptions, SearchRequest, VectorItem, VectorSettings, VectorStore};
+
+    #[test]
+    fn compact_hnsw_segments_preserves_live_ids_and_clears_tombstones() {
+        let store = VectorStore::with_settings(VectorSettings::default());
+        store.create_collection("docs", 3, Metric::Cosine).unwrap();
+
+        for idx in 0..24usize {
+            store
+                .upsert(
+                    "docs",
+                    &format!("doc-{idx:02}"),
+                    VectorItem {
+                        vector: vec![1.0, idx as f32, 0.0],
+                        meta: serde_json::json!({ "idx": idx }),
+                        mmap_offset: None,
+                    },
+                )
+                .unwrap();
+        }
+        for idx in 0..12usize {
+            store.delete("docs", &format!("doc-{idx:02}")).unwrap();
+        }
+
+        let compacted = store.compact_hnsw_segments(0.25);
+        assert_eq!(compacted, vec!["docs".to_string()]);
+
+        let collection = store.0.collections.get("docs").unwrap();
+        let collection = collection.read();
+        assert_eq!(collection.items.len(), 12);
+        assert_eq!(collection.item_segments.len(), 12);
+        assert!(collection
+            .segments
+            .iter()
+            .all(|segment| segment.deleted.iter().all(|deleted| !deleted)));
+
+        drop(collection);
+
+        let hits = store
+            .search(
+                "docs",
+                SearchRequest {
+                    vector: vec![1.0, 20.0, 0.0],
+                    k: 5,
+                    options: SearchOptions {
+                        filters: None,
+                        include_meta: false,
+                        allowed_ids: None,
+                    },
+                },
+            )
+            .unwrap();
+        assert!(hits.iter().all(|hit| !hit.id.starts_with("doc-0")));
+        assert!(hits.iter().any(|hit| hit.id == "doc-20"));
+    }
+
+    #[test]
+    fn rebuild_segments_uses_stable_id_order() {
+        let store = VectorStore::with_settings(VectorSettings::default());
+        store.create_collection("docs", 2, Metric::Cosine).unwrap();
+
+        for id in ["doc-c", "doc-a", "doc-b"] {
+            store
+                .upsert(
+                    "docs",
+                    id,
+                    VectorItem {
+                        vector: vec![1.0, 0.0],
+                        meta: serde_json::json!({ "id": id }),
+                        mmap_offset: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let collection = store.0.collections.get("docs").unwrap();
+        let mut collection = collection.write();
+        collection.rebuild_segments();
+
+        let ordered_ids = &collection.segments[0].id_by_data_id;
+        assert_eq!(
+            ordered_ids,
+            &vec![
+                "doc-a".to_string(),
+                "doc-b".to_string(),
+                "doc-c".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn adaptive_search_reports_candidate_expansion_stats() {
+        let store = VectorStore::with_settings(VectorSettings::default());
+        store.create_collection("docs", 4, Metric::Cosine).unwrap();
+        for idx in 0..256usize {
+            store
+                .upsert(
+                    "docs",
+                    &format!("doc-{idx}"),
+                    VectorItem {
+                        vector: vec![1.0, idx as f32 / 256.0, 0.0, 0.0],
+                        meta: serde_json::json!({"group": if idx < 16 { "hot" } else { "cold" }}),
+                        mmap_offset: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let (_hits, stats) = store
+            .search_with_stats(
+                "docs",
+                SearchRequest {
+                    vector: vec![1.0, 0.1, 0.0, 0.0],
+                    k: 8,
+                    options: SearchOptions {
+                        filters: None,
+                        include_meta: false,
+                        allowed_ids: None,
+                    },
+                },
+            )
+            .unwrap();
+
+        assert!(stats.candidate_expansion_steps >= 1);
+        assert!(stats.final_candidate_k >= 8);
+        assert!(stats.recall_estimate > 0.0);
     }
 }

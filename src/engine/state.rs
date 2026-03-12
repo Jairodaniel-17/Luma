@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// PR8: Number of shards for the KV store. Must be a power of 2.
@@ -26,6 +27,9 @@ pub struct StateStore(Arc<Inner>);
 
 struct Inner {
     shards: [RwLock<HashMap<String, Entry>>; NUM_SHARDS],
+    expiry_heap: RwLock<BinaryHeap<Reverse<(u64, String, u64)>>>,
+    secondary_fields: RwLock<HashSet<String>>,
+    secondary_index: RwLock<HashMap<String, HashMap<String, HashSet<String>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +57,9 @@ impl StateStore {
     pub fn new() -> Self {
         Self(Arc::new(Inner {
             shards: std::array::from_fn(|_| RwLock::new(HashMap::new())),
+            expiry_heap: RwLock::new(BinaryHeap::new()),
+            secondary_fields: RwLock::new(HashSet::new()),
+            secondary_index: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -72,13 +79,28 @@ impl StateStore {
     }
 
     pub fn list(&self, prefix: Option<&str>, limit: usize) -> Vec<StateItem> {
+        let end = prefix.and_then(next_prefix_boundary);
+        self.list_range(prefix, end.as_deref(), limit)
+    }
+
+    pub fn list_range(
+        &self,
+        start: Option<&str>,
+        end: Option<&str>,
+        limit: usize,
+    ) -> Vec<StateItem> {
         let now = now_ms();
         let guards: Vec<_> = self.0.shards.iter().map(|shard| shard.read()).collect();
         let mut out = Vec::new();
         for map in &guards {
             for (k, v) in map.iter() {
-                if let Some(p) = prefix {
-                    if !k.starts_with(p) {
+                if let Some(start) = start {
+                    if k.as_str() < start {
+                        continue;
+                    }
+                }
+                if let Some(end) = end {
+                    if k.as_str() >= end {
                         continue;
                     }
                 }
@@ -111,20 +133,21 @@ impl StateStore {
         let mut map = shard.write();
 
         let entry = map.entry(key.clone());
-        let (revision, value_out) = match entry {
+        let (revision, value_out, old_value) = match entry {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 if let Some(expected) = if_revision {
                     if e.get().revision != expected {
                         return Err(StateError::RevisionMismatch);
                     }
                 }
+                let old_value = e.get().value.clone();
                 let next_rev = e.get().revision.saturating_add(1);
                 e.insert(Entry {
                     value: value.clone(),
                     revision: next_rev,
                     expires_at_ms,
                 });
-                (next_rev, value)
+                (next_rev, value, Some(old_value))
             }
             std::collections::hash_map::Entry::Vacant(e) => {
                 if if_revision.is_some() {
@@ -135,22 +158,34 @@ impl StateStore {
                     revision: 1,
                     expires_at_ms,
                 });
-                (1, value)
+                (1, value, None)
             }
         };
 
-        Ok(StateItem {
+        let item = StateItem {
             key,
             value: value_out,
             revision,
             expires_at_ms,
-        })
+        };
+        self.track_expiry(&item.key, item.revision, item.expires_at_ms);
+        if let Some(old_value) = old_value.as_ref() {
+            self.reindex_key(&item.key, Some(old_value), None);
+        }
+        self.reindex_key(&item.key, None, Some(&item.value));
+        Ok(item)
     }
 
     pub fn delete(&self, key: &str) -> bool {
         let shard = &self.0.shards[shard_index(key)];
         let mut map = shard.write();
-        map.remove(key).is_some()
+        let removed = map.remove(key);
+        if let Some(entry) = removed {
+            self.reindex_key(key, Some(&entry.value), None);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn peek_meta(&self, key: &str) -> Option<(u64, Option<u64>)> {
@@ -198,6 +233,8 @@ impl StateStore {
                 },
             );
         }
+        drop(guards);
+        self.rebuild_secondary_and_expiry_indexes();
         Ok(())
     }
 
@@ -210,14 +247,31 @@ impl StateStore {
     ) {
         let shard = &self.0.shards[shard_index(&key)];
         let mut map = shard.write();
+        if map
+            .get(&key)
+            .is_some_and(|existing| existing.revision >= revision)
+        {
+            return;
+        }
+        let old = map.get(&key).map(|entry| entry.value.clone());
         map.insert(
-            key,
+            key.clone(),
             Entry {
                 value,
                 revision,
                 expires_at_ms,
             },
         );
+        drop(map);
+        if let Some(old) = old.as_ref() {
+            self.reindex_key(&key, Some(old), None);
+        }
+        let shard = &self.0.shards[shard_index(&key)];
+        let map = shard.read();
+        if let Some(entry) = map.get(&key) {
+            self.reindex_key(&key, None, Some(&entry.value));
+        }
+        self.track_expiry(&key, revision, expires_at_ms);
     }
 
     pub fn prepare_put_revision(
@@ -256,6 +310,7 @@ impl StateStore {
     ) -> StateItem {
         let shard = &self.0.shards[shard_index(&key)];
         let mut map = shard.write();
+        let old = map.get(&key).map(|entry| entry.value.clone());
         map.insert(
             key.clone(),
             Entry {
@@ -264,6 +319,12 @@ impl StateStore {
                 expires_at_ms,
             },
         );
+        drop(map);
+        if let Some(old) = old.as_ref() {
+            self.reindex_key(&key, Some(old), None);
+        }
+        self.reindex_key(&key, None, Some(&value));
+        self.track_expiry(&key, revision, expires_at_ms);
         StateItem {
             key,
             value,
@@ -279,21 +340,136 @@ impl StateStore {
         map.get(key).is_some_and(|entry| !is_expired(entry, now))
     }
 
+    pub fn exists_any(&self, key: &str) -> bool {
+        let shard = &self.0.shards[shard_index(key)];
+        let map = shard.read();
+        map.contains_key(key)
+    }
+
     pub fn expired_keys(&self, now_ms: u64, limit: usize) -> Vec<String> {
-        let guards: Vec<_> = self.0.shards.iter().map(|shard| shard.read()).collect();
         let mut out = Vec::new();
+        let mut heap = self.0.expiry_heap.write();
+        while let Some(Reverse((expires_at_ms, key, revision))) = heap.peek().cloned() {
+            if expires_at_ms > now_ms || out.len() >= limit {
+                break;
+            }
+            heap.pop();
+            let shard = &self.0.shards[shard_index(&key)];
+            let map = shard.read();
+            if let Some(entry) = map.get(&key) {
+                if entry.revision == revision
+                    && entry.expires_at_ms.is_some_and(|exp| exp <= now_ms)
+                {
+                    out.push(key);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn create_secondary_index(&self, field: &str) {
+        self.0.secondary_fields.write().insert(field.to_string());
+        self.rebuild_secondary_and_expiry_indexes();
+    }
+
+    pub fn query_secondary_index(&self, field: &str, value: &str, limit: usize) -> Vec<StateItem> {
+        let keys = self
+            .0
+            .secondary_index
+            .read()
+            .get(field)
+            .and_then(|values| values.get(value))
+            .cloned()
+            .unwrap_or_default();
+        let mut items = keys
+            .into_iter()
+            .filter_map(|key| self.get(&key))
+            .filter(|item| {
+                item.value
+                    .get(field)
+                    .and_then(|field_value| indexable_json_value(field_value, ""))
+                    .or_else(|| indexable_json_value(&item.value, field))
+                    .is_some_and(|actual| actual == value)
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| a.key.cmp(&b.key));
+        items.truncate(limit);
+        items
+    }
+
+    fn rebuild_secondary_and_expiry_indexes(&self) {
+        let fields = self.0.secondary_fields.read().clone();
+        let guards: Vec<_> = self.0.shards.iter().map(|shard| shard.read()).collect();
+        let now = now_ms();
+        let mut secondary = HashMap::<String, HashMap<String, HashSet<String>>>::new();
+        let mut heap = BinaryHeap::new();
         for map in &guards {
-            for (k, v) in map.iter() {
-                if let Some(exp) = v.expires_at_ms {
-                    if exp <= now_ms {
-                        out.push(k.clone());
+            for (key, entry) in map.iter() {
+                if let Some(expires_at_ms) = entry.expires_at_ms {
+                    heap.push(Reverse((expires_at_ms, key.clone(), entry.revision)));
+                }
+                if is_expired(entry, now) {
+                    continue;
+                }
+                for field in &fields {
+                    if let Some(value) = indexable_json_value(&entry.value, field) {
+                        secondary
+                            .entry(field.clone())
+                            .or_default()
+                            .entry(value)
+                            .or_default()
+                            .insert(key.clone());
                     }
                 }
             }
         }
-        out.sort();
-        out.truncate(limit);
-        out
+        *self.0.secondary_index.write() = secondary;
+        *self.0.expiry_heap.write() = heap;
+    }
+
+    fn reindex_key(
+        &self,
+        key: &str,
+        old_value: Option<&serde_json::Value>,
+        new_value: Option<&serde_json::Value>,
+    ) {
+        let fields = self.0.secondary_fields.read().clone();
+        if fields.is_empty() {
+            return;
+        }
+        let mut index = self.0.secondary_index.write();
+        for field in fields {
+            if let Some(old_value) = old_value.and_then(|value| indexable_json_value(value, &field))
+            {
+                if let Some(values) = index.get_mut(&field) {
+                    if let Some(keys) = values.get_mut(&old_value) {
+                        keys.remove(key);
+                        if keys.is_empty() {
+                            values.remove(&old_value);
+                        }
+                    }
+                }
+            }
+            if let Some(new_value) = new_value.and_then(|value| indexable_json_value(value, &field))
+            {
+                index
+                    .entry(field.clone())
+                    .or_default()
+                    .entry(new_value)
+                    .or_default()
+                    .insert(key.to_string());
+            }
+        }
+    }
+
+    fn track_expiry(&self, key: &str, revision: u64, expires_at_ms: Option<u64>) {
+        let Some(expires_at_ms) = expires_at_ms else {
+            return;
+        };
+        self.0
+            .expiry_heap
+            .write()
+            .push(Reverse((expires_at_ms, key.to_string(), revision)));
     }
 }
 
@@ -319,6 +495,27 @@ fn now_ms() -> u64 {
 
 fn is_expired(e: &Entry, now_ms: u64) -> bool {
     e.expires_at_ms.is_some_and(|exp| exp <= now_ms)
+}
+
+fn next_prefix_boundary(prefix: &str) -> Option<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    for idx in (0..bytes.len()).rev() {
+        if bytes[idx] != u8::MAX {
+            bytes[idx] = bytes[idx].saturating_add(1);
+            bytes.truncate(idx + 1);
+            return String::from_utf8(bytes).ok();
+        }
+    }
+    None
+}
+
+fn indexable_json_value(value: &serde_json::Value, field: &str) -> Option<String> {
+    match value.get(field) {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(serde_json::Value::Bool(b)) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +584,71 @@ mod tests {
 
         let expired = s.expired_keys(now, 10);
         assert_eq!(expired, vec!["ttl-expired".to_string()]);
+    }
+
+    #[test]
+    fn list_range_is_sorted_and_end_exclusive() {
+        let s = StateStore::new();
+        for key in ["a:1", "a:2", "b:1", "c:1"] {
+            s.apply_wal_set(key.to_string(), serde_json::json!(key), 1, None);
+        }
+        let listed = s.list_range(Some("a:"), Some("c:"), 10);
+        let keys: Vec<_> = listed.into_iter().map(|item| item.key).collect();
+        assert_eq!(keys, vec!["a:1", "a:2", "b:1"]);
+    }
+
+    #[test]
+    fn wal_set_is_idempotent_for_older_revisions() {
+        let s = StateStore::new();
+        s.apply_wal_set("k".to_string(), serde_json::json!(1), 4, None);
+        s.apply_wal_set("k".to_string(), serde_json::json!(2), 3, None);
+        assert_eq!(s.get("k").unwrap().value, serde_json::json!(1));
+    }
+
+    #[test]
+    fn secondary_index_tracks_updates_and_deletes() {
+        let s = StateStore::new();
+        s.create_secondary_index("tenant");
+        s.put(
+            "doc:1".to_string(),
+            serde_json::json!({"tenant":"acme","value":1}),
+            None,
+            None,
+        )
+        .unwrap();
+        s.put(
+            "doc:2".to_string(),
+            serde_json::json!({"tenant":"globex","value":2}),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.query_secondary_index("tenant", "acme", 10).len(), 1);
+
+        s.put(
+            "doc:1".to_string(),
+            serde_json::json!({"tenant":"globex","value":3}),
+            None,
+            Some(1),
+        )
+        .unwrap();
+        assert!(s.query_secondary_index("tenant", "acme", 10).is_empty());
+        assert_eq!(s.query_secondary_index("tenant", "globex", 10).len(), 2);
+
+        s.delete("doc:2");
+        assert_eq!(s.query_secondary_index("tenant", "globex", 10).len(), 1);
+    }
+
+    #[test]
+    fn ttl_heap_returns_due_keys_without_full_scan_ordering() {
+        let s = StateStore::new();
+        let now = now_ms();
+        s.apply_wal_set("a".to_string(), serde_json::json!(1), 1, Some(now + 20));
+        s.apply_wal_set("b".to_string(), serde_json::json!(2), 1, Some(now + 10));
+        s.apply_wal_set("c".to_string(), serde_json::json!(3), 1, Some(now + 30));
+
+        let due = s.expired_keys(now + 15, 10);
+        assert_eq!(due, vec!["b".to_string()]);
     }
 
     #[test]

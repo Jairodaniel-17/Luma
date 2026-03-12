@@ -12,6 +12,7 @@ mod state_db;
 pub mod traits;
 
 use crate::config::Config;
+use crate::engine::metrics::VectorMetricsSnapshot;
 use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};
 use crate::vector::{
     Metric, SearchHit, SearchRequest, VectorCollectionInfo, VectorError, VectorItem,
@@ -19,6 +20,7 @@ use crate::vector::{
 };
 use anyhow::Context;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -46,6 +48,7 @@ struct Inner {
     events: events::EventBus,
     metrics: Arc<metrics::Metrics>,
     persist: Option<persist::Persist>,
+    memory_rss_bytes: AtomicU64,
 
     shutdown: CancellationToken,
 }
@@ -93,6 +96,7 @@ impl Engine {
             events,
             metrics,
             persist,
+            memory_rss_bytes: AtomicU64::new(read_process_memory_rss()),
 
             shutdown,
         }));
@@ -107,6 +111,7 @@ impl Engine {
         engine.start_ttl_task_if_runtime();
         engine.start_wal_flush_task_if_runtime();
         engine.start_hnsw_compaction_task_if_runtime();
+        engine.start_process_metrics_task_if_runtime();
 
         Ok(engine)
     }
@@ -121,20 +126,34 @@ impl Engine {
     }
 
     pub fn metrics_text(&self) -> String {
+        let cached = self.0.metrics.cached_render();
+        if !cached.is_empty() {
+            return cached;
+        }
+        self.refresh_metrics_snapshot()
+    }
+
+    fn refresh_metrics_snapshot(&self) -> String {
         let collections = self.0.vectors.list_collections();
         let active_collections = collections.len() as u64;
         let total_vectors: u64 = collections.iter().map(|c| c.live_count as u64).sum();
-        let memory_rss_bytes = {
-            let mut sys = sysinfo::System::new();
-            sys.refresh_processes();
-            let pid = sysinfo::get_current_pid().ok();
-            pid.and_then(|p| sys.process(p))
-                .map(|p| p.memory())
-                .unwrap_or(0)
-        };
-        self.0
-            .metrics
-            .render(active_collections, total_vectors, memory_rss_bytes)
+        let vector_metrics = collections
+            .iter()
+            .map(|c| VectorMetricsSnapshot {
+                collection: c.collection.clone(),
+                live_count: c.live_count as u64,
+                segments: c.segments.unwrap_or_default() as u64,
+                deleted_count: c.deleted_count.unwrap_or_default(),
+                fragmentation_score: c.fragmentation_score.unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        let memory_rss_bytes = self.0.memory_rss_bytes.load(Ordering::Relaxed);
+        self.0.metrics.render(
+            active_collections,
+            total_vectors,
+            memory_rss_bytes,
+            &vector_metrics,
+        )
     }
 
     pub fn health(&self) -> &'static str {
@@ -167,39 +186,66 @@ impl Engine {
             since_offset = snapshot.last_offset;
         }
 
-        let mut applied = 0usize;
         if let Some(db) = &self.0.state_db {
             let vectors = self.0.vectors.clone();
             let events = self.0.events.clone();
-            persist
-                .for_each_event_since(since_offset, |ev| {
+            let replay = persist
+                .try_for_each_event_since(since_offset, |ev| {
                     match ev.event_type.as_str() {
                         "state_updated" => {
-                            let _ = db.apply_state_updated(&ev);
+                            db.apply_state_updated(&ev)
+                                .map_err(|err| std::io::Error::other(err.to_string()))?;
                         }
                         "state_deleted" => {
-                            let _ = db.apply_state_deleted(&ev);
+                            db.apply_state_deleted(&ev)
+                                .map_err(|err| std::io::Error::other(err.to_string()))?;
                         }
                         "vector_collection_created"
                         | "vector_added"
                         | "vector_upserted"
                         | "vector_updated"
                         | "vector_deleted" => {
-                            let _ = vectors.apply_event(&ev);
+                            vectors
+                                .apply_event(&ev)
+                                .map_err(|err| std::io::Error::other(err.to_string()))?;
                         }
                         _ => {}
                     }
                     events.set_next_offset(ev.offset.saturating_add(1));
-                    applied += 1;
-                    true
+                    Ok(true)
                 })
                 .context("replay wal (db)")?;
+            self.0.metrics.observe_replay(
+                replay.applied as u64,
+                replay.duplicates_skipped as u64,
+                replay.corrupted_records as u64,
+                replay.gap_detected,
+            );
+            tracing::info!(
+                applied = replay.applied,
+                duplicates = replay.duplicates_skipped,
+                corrupted = replay.corrupted_records,
+                gap_detected = replay.gap_detected,
+                "replayed wal events"
+            );
         } else {
-            applied = persist
+            let replay = persist
                 .replay_wal_since(since_offset, &self.0.state, &self.0.vectors, &self.0.events)
                 .context("replay wal")?;
+            self.0.metrics.observe_replay(
+                replay.applied as u64,
+                replay.duplicates_skipped as u64,
+                replay.corrupted_records as u64,
+                replay.gap_detected,
+            );
+            tracing::info!(
+                applied = replay.applied,
+                duplicates = replay.duplicates_skipped,
+                corrupted = replay.corrupted_records,
+                gap_detected = replay.gap_detected,
+                "replayed wal events"
+            );
         }
-        tracing::info!(applied, "replayed wal events");
 
         Ok(())
     }
@@ -219,11 +265,21 @@ impl Engine {
                     _ = interval.tick() => {
                         let Some(inner) = weak.upgrade() else { break };
                         let engine = Engine(inner);
-                        let res = tokio::task::spawn_blocking(move || engine.snapshot_once()).await;
+                        let snapshot_engine = engine.clone();
+                        let res = tokio::task::spawn_blocking(move || snapshot_engine.snapshot_once()).await;
                         match res {
-                            Ok(Ok(())) => tracing::info!("snapshot ok"),
-                            Ok(Err(err)) => tracing::warn!(error = %err, "snapshot failed"),
-                            Err(err) => tracing::warn!(error = %err, "snapshot task join failed"),
+                            Ok(Ok(())) => {
+                                engine.0.metrics.inc_snapshot_ok();
+                                tracing::info!("snapshot ok");
+                            }
+                            Ok(Err(err)) => {
+                                engine.0.metrics.inc_snapshot_failed();
+                                tracing::warn!(error = %err, "snapshot failed");
+                            }
+                            Err(err) => {
+                                engine.0.metrics.inc_snapshot_failed();
+                                tracing::warn!(error = %err, "snapshot task join failed");
+                            }
                         };
                     }
                     _ = shutdown.cancelled() => {
@@ -252,7 +308,9 @@ impl Engine {
         let snapshot = persist::Snapshot {
             last_offset: self.0.events.last_published_offset(),
         };
-        persist.write_snapshot_and_rotate(&snapshot)
+        persist.write_snapshot_and_rotate(&snapshot)?;
+        self.0.metrics.inc_wal_rotation();
+        Ok(())
     }
 
     pub fn force_snapshot(&self) -> Result<(), EngineError> {
@@ -328,26 +386,34 @@ impl Engine {
 
     /// PR6: Background task that periodically compacts HNSW segments with high tombstone ratios.
     fn start_hnsw_compaction_task_if_runtime(&self) {
+        if !self.0.config.hnsw_segment_compaction_enabled {
+            return;
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
         let weak = Arc::downgrade(&self.0);
         let shutdown = self.0.shutdown.clone();
-        let threshold = self.0.config.compaction_trigger_tombstone_ratio;
+        let threshold = self
+            .0
+            .config
+            .hnsw_segment_compaction_threshold
+            .clamp(0.0, 1.0);
+        let interval_secs = self.0.config.hnsw_segment_compaction_interval_secs.max(5);
         tokio::spawn(async move {
-            // Check every 60 seconds
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let Some(inner) = weak.upgrade() else { break };
-                        let engine = Engine(inner);
+                        let engine = Engine(inner.clone());
                         let res = tokio::task::spawn_blocking(move || {
                             engine.0.vectors.compact_hnsw_segments(threshold)
                         })
                         .await;
                         match res {
                             Ok(compacted) if !compacted.is_empty() => {
+                                inner.metrics.inc_hnsw_compaction();
                                 tracing::info!(collections = ?compacted, "HNSW segment compaction completed");
                             }
                             Ok(_) => {}
@@ -365,6 +431,30 @@ impl Engine {
         });
     }
 
+    fn start_process_metrics_task_if_runtime(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        let shutdown = self.0.shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        inner
+                            .memory_rss_bytes
+                            .store(read_process_memory_rss(), Ordering::Relaxed);
+                        let engine = Engine(inner);
+                        let _ = engine.refresh_metrics_snapshot();
+                    }
+                    _ = shutdown.cancelled() => break,
+                }
+            }
+        });
+    }
+
     pub fn list_state(&self, prefix: Option<&str>, limit: usize) -> Vec<state::StateItem> {
         if let Some(db) = &self.0.state_db {
             return db.list(prefix, limit).unwrap_or_default();
@@ -372,11 +462,57 @@ impl Engine {
         self.0.state.list(prefix, limit)
     }
 
+    pub fn list_state_range(
+        &self,
+        start: Option<&str>,
+        end: Option<&str>,
+        limit: usize,
+    ) -> Vec<state::StateItem> {
+        if let Some(db) = &self.0.state_db {
+            return db.list_range(start, end, limit).unwrap_or_default();
+        }
+        self.0.state.list_range(start, end, limit)
+    }
+
     pub fn get_state(&self, key: &str) -> Option<state::StateItem> {
         if let Some(db) = &self.0.state_db {
             return db.get_state(key).ok().flatten();
         }
         self.0.state.get(key)
+    }
+
+    pub fn get_consumer_offset(&self, group: &str) -> Option<u64> {
+        self.get_state(&format!("consumer_offset:{group}"))
+            .and_then(|item| item.value.get("offset").and_then(|value| value.as_u64()))
+    }
+
+    pub fn commit_consumer_offset(&self, group: &str, offset: u64) -> Result<(), EngineError> {
+        let key = format!("consumer_offset:{group}");
+        let revision = self.get_state(&key).map(|item| item.revision);
+        let _ = self.put_state(
+            key,
+            serde_json::json!({
+                "group": group,
+                "offset": offset,
+                "updated_at_ms": now_ms(),
+            }),
+            None,
+            revision,
+        )?;
+        Ok(())
+    }
+
+    pub fn create_state_secondary_index(&self, field: &str) {
+        self.0.state.create_secondary_index(field);
+    }
+
+    pub fn query_state_secondary_index(
+        &self,
+        field: &str,
+        value: &str,
+        limit: usize,
+    ) -> Vec<state::StateItem> {
+        self.0.state.query_secondary_index(field, value, limit)
     }
 
     pub fn put_state(
@@ -527,6 +663,7 @@ impl Engine {
                     updated_at_ms: meta.updated_at_ms,
                     segments: None,
                     deleted_count: None,
+                    fragmentation_score: None,
                 },
             );
         }
@@ -822,12 +959,12 @@ impl Engine {
         };
         let mut expired = 0usize;
         for key in keys {
-            let live = if let Some(db) = &self.0.state_db {
-                db.exists_live(&key).unwrap_or(false)
+            let present = if let Some(db) = &self.0.state_db {
+                db.exists_any(&key).unwrap_or(false)
             } else {
-                self.0.state.exists_live(&key)
+                self.0.state.exists_any(&key)
             };
-            if !live {
+            if !present {
                 continue;
             }
             let data = serde_json::json!({
@@ -849,6 +986,7 @@ impl Engine {
             self.0.events.publish_record(event);
             self.metrics().inc_events();
             self.metrics().inc_state_delete();
+            self.metrics().add_ttl_expired(1);
             expired += 1;
         }
         Ok(expired)
@@ -864,6 +1002,15 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     dur.as_millis() as u64
+}
+
+fn read_process_memory_rss() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes();
+    let pid = sysinfo::get_current_pid().ok();
+    pid.and_then(|p| sys.process(p))
+        .map(|p| p.memory())
+        .unwrap_or(0)
 }
 
 fn vector_manifest_key(collection: &str) -> String {

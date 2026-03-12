@@ -79,3 +79,6 @@ ivf_stress_tests = []
 name = "vector_mmap_bench"
 harness = false
 
+[[bench]]
+name = "hybrid_hub_bench"
+harness = false

@@ -77,6 +77,24 @@ impl EventBus {
             .collect()
     }
 
+    pub fn replay_since_with_gap(
+        &self,
+        last_offset: u64,
+    ) -> (Vec<EventRecord>, Option<(u64, u64)>) {
+        let buf = self.0.buffer.lock();
+        let earliest = buf.front().map(|event| event.offset);
+        let gap = earliest.and_then(|earliest| {
+            let expected = last_offset.saturating_add(1);
+            (expected < earliest).then_some((expected, earliest.saturating_sub(1)))
+        });
+        let events = buf
+            .iter()
+            .filter(|e| e.offset > last_offset)
+            .cloned()
+            .collect();
+        (events, gap)
+    }
+
     pub fn last_published_offset(&self) -> u64 {
         self.0.last_published_offset.load(Ordering::Relaxed)
     }
@@ -91,4 +109,30 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     dur.as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventBus, EventRecord};
+    use serde_json::json;
+
+    #[test]
+    fn replay_since_with_gap_reports_missing_prefix() {
+        let bus = EventBus::new(2, 16);
+        for offset in 1..=4u64 {
+            bus.publish_record(EventRecord {
+                offset,
+                ts_ms: 0,
+                event_type: "state_updated".to_string(),
+                data: json!({"key": format!("k{offset}")}),
+            });
+        }
+
+        let (events, gap) = bus.replay_since_with_gap(1);
+        assert_eq!(gap, Some((2, 2)));
+        assert_eq!(
+            events.iter().map(|event| event.offset).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
 }

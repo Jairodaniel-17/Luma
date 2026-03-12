@@ -3,6 +3,7 @@
 ## Requisitos mínimos
 
 - **Durabilidad**: define `DATA_DIR` en producción (habilita WAL segmentado + snapshots).
+- **Integridad WAL**: los segmentos nuevos incluyen checksum por registro. Si el proceso cae a mitad de append, Luma recupera el prefijo válido y contabiliza corrupción detectada en métricas.
 - **Bind seguro**: sin flags el binario sólo escucha en `127.0.0.1`. Usa `--bind 0.0.0.0` o `--unsafe-bind` sólo si lo pones detrás de un proxy.
 - **Auth**: exporta `RUSTKISS_API_KEY`/`API_KEY` para exigir `Authorization: Bearer …`. Si no lo haces, las rutas quedan abiertas (útil para laboratorio, no prod).
 
@@ -10,6 +11,7 @@
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).
 - Clientes lentos: el servidor no se cae; emite `event: gap` y el cliente debe reconectar usando `since=<last_offset>`.
+- Si el `since` pedido ya no está retenido por buffer o WAL, Luma emite `event: gap` con `from_offset`/`to_offset` antes del primer evento disponible.
 - Proxies: asegúrate de permitir `text/event-stream` y deshabilitar buffering (p.ej. nginx `proxy_buffering off`).
 
 ## Límites Anti-DoS
@@ -23,6 +25,7 @@
 - `WAL_SEGMENT_MAX_BYTES`: tamaño de segmento.
 - `WAL_RETENTION_SEGMENTS`: cantidad de segmentos retenidos.
 - Si necesitas replay largo, aumenta `WAL_RETENTION_SEGMENTS` o reduce snapshot interval.
+- Observa `wal_replay_corrupt_total`, `wal_gap_total` y `wal_rotation_total` en `/v1/metrics`.
 
 ## CORS
 
@@ -44,9 +47,17 @@
 - Límites recomendados (v1): `dim <= 1536`, `k <= 200`, `<= 1e6` vectores por colección (más allá considera sharding o instancias extra).
 - SSE vectorial expone `collection` en `data` y respeta `?collection=foo` en `/v1/stream`. También se envía `event: vector_*` para auditar ingestas.
 - Los filtros por metadata usan un índice exact-match; dimensiona la RAM según tu cardinalidad.
+- La compactación HNSW en memoria es opt-in (`HNSW_SEGMENT_COMPACTION_ENABLED=1`) y ahora rebuilda fuera del lock de escritura, intercambiando segmentos solo si el `applied_offset` no cambió durante el rebuild.
+
+## Estado / KV
+
+- `/v1/state` soporta `?prefix=` para scans por prefijo y `?start=&end=` para scans lexicográficos end-exclusive.
+- CAS (`if_revision`) y replay aplican revisiones de forma idempotente; una revisión más antigua no pisa una más nueva.
 
 ## DocStore / SQL
 
 - DocStore vive sobre KV (`doc:{collection}:{id}` + `docidx:*`). Ideal para dashboards/configuraciones ligeras.
 - SQLite embebido (`SQLITE_ENABLED=1`) comparte proceso pero NO WAL; respáldalo como parte del backup del `DATA_DIR`.
 - Ambos módulos reutilizan el middleware de auth/API key; si no los necesitas mantenlos desactivados.
+- El hub híbrido publica métricas por etapa: `hybrid_sql_prefilter_duration_ms`, `hybrid_vector_duration_ms`, `hybrid_hydration_duration_ms`, `hybrid_chunking_duration_ms`, `hybrid_vector_write_duration_ms`, `hybrid_sql_write_duration_ms`.
+- También expone contadores/gauges útiles para explicar consultas: `hybrid_sql_first_total`, `hybrid_vector_first_total`, `hybrid_last_sql_candidates`, `hybrid_last_vector_candidates`, `hybrid_last_doc_candidates`, `hybrid_last_hydrated_docs`.

@@ -152,3 +152,83 @@ async fn sse_lagged_emits_gap_instead_of_dying() {
 
     let _ = shutdown.send(());
 }
+
+#[tokio::test]
+async fn consumer_group_resumes_from_committed_offset() {
+    let (base, shutdown) = start_with_config(base_config()).await;
+    let client = reqwest::Client::new();
+
+    let _ = client
+        .put(format!("{}/v1/state/group:1", base))
+        .json(&serde_json::json!({"value":{"i":1}}))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!(
+            "{}/v1/stream?types=state_updated&consumer_group=agents",
+            base
+        ))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => panic!("timeout waiting for first group event"),
+            chunk = stream.next() => {
+                let Some(chunk) = chunk else { break };
+                buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+                if buf.contains("\"key\":\"group:1\"") {
+                    break;
+                }
+            }
+        }
+    }
+    drop(stream);
+
+    let _ = client
+        .put(format!("{}/v1/state/group:2", base))
+        .json(&serde_json::json!({"value":{"i":2}}))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap();
+
+    let resp2 = client
+        .get(format!(
+            "{}/v1/stream?types=state_updated&consumer_group=agents",
+            base
+        ))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp2.status().is_success());
+
+    let mut stream2 = resp2.bytes_stream();
+    let mut buf2 = String::new();
+    let deadline2 = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline2) => panic!("timeout waiting for resumed group event"),
+            chunk = stream2.next() => {
+                let Some(chunk) = chunk else { break };
+                buf2.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+                if buf2.contains("\"key\":\"group:2\"") {
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(!buf2.contains("\"key\":\"group:1\""));
+    let _ = shutdown.send(());
+}

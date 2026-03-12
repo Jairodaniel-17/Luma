@@ -28,7 +28,14 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub prefix: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateIndexBody {
+    pub field: String,
 }
 
 pub async fn list(
@@ -44,8 +51,39 @@ pub async fn list(
             ));
         }
     }
+    if let Some(start) = &q.start {
+        if start.len() > state.config.max_key_len {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_argument",
+                "start too long",
+            ));
+        }
+    }
+    if let Some(end) = &q.end {
+        if end.len() > state.config.max_key_len {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_argument",
+                "end too long",
+            ));
+        }
+    }
+    if q.prefix.is_some() && (q.start.is_some() || q.end.is_some()) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "prefix cannot be combined with start/end",
+        ));
+    }
     let limit = q.limit.unwrap_or(100).min(1000);
-    let items = state.engine.list_state(q.prefix.as_deref(), limit);
+    let items = if q.prefix.is_some() {
+        state.engine.list_state(q.prefix.as_deref(), limit)
+    } else {
+        state
+            .engine
+            .list_state_range(q.start.as_deref(), q.end.as_deref(), limit)
+    };
     Ok(axum::Json(items))
 }
 
@@ -274,4 +312,34 @@ pub async fn delete(
         ),
     })?;
     Ok(axum::Json(DeleteResponse { deleted }))
+}
+
+pub async fn create_index(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<CreateIndexBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.field.is_empty() || body.field.len() > state.config.max_key_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "invalid field",
+        ));
+    }
+    state.engine.create_state_secondary_index(&body.field);
+    Ok(axum::Json(serde_json::json!({
+        "status": "ok",
+        "field": body.field
+    })))
+}
+
+pub async fn query_index(
+    State(state): State<AppState>,
+    Path((field, value)): Path<(String, String)>,
+    Query(q): Query<ListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let items = state
+        .engine
+        .query_state_secondary_index(&field, &value, limit);
+    Ok(axum::Json(items))
 }
