@@ -3,11 +3,29 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// PR8: Number of shards for the KV store. Must be a power of 2.
+const NUM_SHARDS: usize = 16;
+
+/// FNV-1a hash for shard routing — fast, avoids external dependency.
+fn shard_index(key: &str) -> usize {
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    let mut hash = FNV_OFFSET;
+    for byte in key.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash as usize) & (NUM_SHARDS - 1)
+}
+
+/// PR8: ShardedStateStore — 16 independent RwLock<HashMap> shards.
+/// Replaces the single global RwLock with per-key routing, reducing contention
+/// under concurrent write workloads.
 #[derive(Clone)]
 pub struct StateStore(Arc<Inner>);
 
 struct Inner {
-    map: RwLock<HashMap<String, Entry>>,
+    shards: [RwLock<HashMap<String, Entry>>; NUM_SHARDS],
 }
 
 #[derive(Clone, Debug)]
@@ -34,13 +52,14 @@ pub enum StateError {
 impl StateStore {
     pub fn new() -> Self {
         Self(Arc::new(Inner {
-            map: RwLock::new(HashMap::new()),
+            shards: std::array::from_fn(|_| RwLock::new(HashMap::new())),
         }))
     }
 
     pub fn get(&self, key: &str) -> Option<StateItem> {
         let now = now_ms();
-        let map = self.0.map.read();
+        let shard = &self.0.shards[shard_index(key)];
+        let map = shard.read();
         match map.get(key) {
             Some(e) if !is_expired(e, now) => Some(StateItem {
                 key: key.to_string(),
@@ -54,25 +73,27 @@ impl StateStore {
 
     pub fn list(&self, prefix: Option<&str>, limit: usize) -> Vec<StateItem> {
         let now = now_ms();
-        let map = self.0.map.read();
         let mut out = Vec::new();
-        for (k, v) in map.iter() {
-            if let Some(p) = prefix {
-                if !k.starts_with(p) {
+        for shard in &self.0.shards {
+            let map = shard.read();
+            for (k, v) in map.iter() {
+                if let Some(p) = prefix {
+                    if !k.starts_with(p) {
+                        continue;
+                    }
+                }
+                if is_expired(v, now) {
                     continue;
                 }
-            }
-            if is_expired(v, now) {
-                continue;
-            }
-            out.push(StateItem {
-                key: k.clone(),
-                value: v.value.clone(),
-                revision: v.revision,
-                expires_at_ms: v.expires_at_ms,
-            });
-            if out.len() >= limit {
-                break;
+                out.push(StateItem {
+                    key: k.clone(),
+                    value: v.value.clone(),
+                    revision: v.revision,
+                    expires_at_ms: v.expires_at_ms,
+                });
+                if out.len() >= limit {
+                    return out;
+                }
             }
         }
         out
@@ -85,9 +106,10 @@ impl StateStore {
         ttl_ms: Option<u64>,
         if_revision: Option<u64>,
     ) -> Result<StateItem, StateError> {
-        let mut map = self.0.map.write();
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
+        let shard = &self.0.shards[shard_index(&key)];
+        let mut map = shard.write();
 
         let entry = map.entry(key.clone());
         let (revision, value_out) = match entry {
@@ -127,38 +149,47 @@ impl StateStore {
     }
 
     pub fn delete(&self, key: &str) -> bool {
-        let mut map = self.0.map.write();
+        let shard = &self.0.shards[shard_index(key)];
+        let mut map = shard.write();
         map.remove(key).is_some()
     }
 
     pub fn peek_meta(&self, key: &str) -> Option<(u64, Option<u64>)> {
-        let map = self.0.map.read();
+        let shard = &self.0.shards[shard_index(key)];
+        let map = shard.read();
         map.get(key).map(|e| (e.revision, e.expires_at_ms))
     }
 
     pub fn snapshot(&self) -> Vec<(String, PersistStateEntry)> {
         let now = now_ms();
-        let map = self.0.map.read();
-        map.iter()
-            .filter(|(_, v)| !is_expired(v, now))
-            .map(|(k, v)| {
-                (
+        let mut out = Vec::new();
+        for shard in &self.0.shards {
+            let map = shard.read();
+            for (k, v) in map.iter() {
+                if is_expired(v, now) {
+                    continue;
+                }
+                out.push((
                     k.clone(),
                     PersistStateEntry {
                         value: v.value.clone(),
                         revision: v.revision,
                         expires_at_ms: v.expires_at_ms,
                     },
-                )
-            })
-            .collect()
+                ));
+            }
+        }
+        out
     }
 
     pub fn load_snapshot(&self, entries: Vec<(String, PersistStateEntry)>) -> anyhow::Result<()> {
-        let mut map = self.0.map.write();
-        map.clear();
+        // Clear all shards first
+        for shard in &self.0.shards {
+            shard.write().clear();
+        }
         for (k, e) in entries {
-            map.insert(
+            let shard = &self.0.shards[shard_index(&k)];
+            shard.write().insert(
                 k,
                 Entry {
                     value: e.value,
@@ -177,7 +208,8 @@ impl StateStore {
         revision: u64,
         expires_at_ms: Option<u64>,
     ) {
-        let mut map = self.0.map.write();
+        let shard = &self.0.shards[shard_index(&key)];
+        let mut map = shard.write();
         map.insert(
             key,
             Entry {
@@ -194,7 +226,8 @@ impl StateStore {
         if_revision: Option<u64>,
     ) -> Result<u64, StateError> {
         let now = now_ms();
-        let map = self.0.map.read();
+        let shard = &self.0.shards[shard_index(key)];
+        let map = shard.read();
         let current = map.get(key).filter(|e| !is_expired(e, now));
         match current {
             Some(e) => {
@@ -221,7 +254,8 @@ impl StateStore {
         revision: u64,
         expires_at_ms: Option<u64>,
     ) -> StateItem {
-        let mut map = self.0.map.write();
+        let shard = &self.0.shards[shard_index(&key)];
+        let mut map = shard.write();
         map.insert(
             key.clone(),
             Entry {
@@ -239,19 +273,22 @@ impl StateStore {
     }
 
     pub fn exists_live(&self, key: &str) -> bool {
-        let map = self.0.map.read();
+        let shard = &self.0.shards[shard_index(key)];
+        let map = shard.read();
         map.contains_key(key)
     }
 
     pub fn expired_keys(&self, now_ms: u64, limit: usize) -> Vec<String> {
-        let map = self.0.map.read();
         let mut out = Vec::new();
-        for (k, v) in map.iter() {
-            if let Some(exp) = v.expires_at_ms {
-                if exp <= now_ms {
-                    out.push(k.clone());
-                    if out.len() >= limit {
-                        break;
+        for shard in &self.0.shards {
+            let map = shard.read();
+            for (k, v) in map.iter() {
+                if let Some(exp) = v.expires_at_ms {
+                    if exp <= now_ms {
+                        out.push(k.clone());
+                        if out.len() >= limit {
+                            return out;
+                        }
                     }
                 }
             }
@@ -311,5 +348,16 @@ mod tests {
 
         assert!(s.delete("k"));
         assert!(s.get("k").is_none());
+    }
+
+    #[test]
+    fn sharding_distributes_keys() {
+        let s = StateStore::new();
+        for i in 0..100 {
+            s.put(format!("key-{i}"), serde_json::json!(i), None, None)
+                .unwrap();
+        }
+        let all = s.list(None, 200);
+        assert_eq!(all.len(), 100);
     }
 }
