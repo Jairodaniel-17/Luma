@@ -73,9 +73,9 @@ impl StateStore {
 
     pub fn list(&self, prefix: Option<&str>, limit: usize) -> Vec<StateItem> {
         let now = now_ms();
+        let guards: Vec<_> = self.0.shards.iter().map(|shard| shard.read()).collect();
         let mut out = Vec::new();
-        for shard in &self.0.shards {
-            let map = shard.read();
+        for map in &guards {
             for (k, v) in map.iter() {
                 if let Some(p) = prefix {
                     if !k.starts_with(p) {
@@ -91,11 +91,10 @@ impl StateStore {
                     revision: v.revision,
                     expires_at_ms: v.expires_at_ms,
                 });
-                if out.len() >= limit {
-                    return out;
-                }
             }
         }
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        out.truncate(limit);
         out
     }
 
@@ -162,9 +161,9 @@ impl StateStore {
 
     pub fn snapshot(&self) -> Vec<(String, PersistStateEntry)> {
         let now = now_ms();
+        let guards: Vec<_> = self.0.shards.iter().map(|shard| shard.read()).collect();
         let mut out = Vec::new();
-        for shard in &self.0.shards {
-            let map = shard.read();
+        for map in &guards {
             for (k, v) in map.iter() {
                 if is_expired(v, now) {
                     continue;
@@ -179,17 +178,18 @@ impl StateStore {
                 ));
             }
         }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
 
     pub fn load_snapshot(&self, entries: Vec<(String, PersistStateEntry)>) -> anyhow::Result<()> {
-        // Clear all shards first
-        for shard in &self.0.shards {
-            shard.write().clear();
+        let mut guards: Vec<_> = self.0.shards.iter().map(|shard| shard.write()).collect();
+        for shard in &mut guards {
+            shard.clear();
         }
         for (k, e) in entries {
-            let shard = &self.0.shards[shard_index(&k)];
-            shard.write().insert(
+            let shard = &mut guards[shard_index(&k)];
+            shard.insert(
                 k,
                 Entry {
                     value: e.value,
@@ -273,26 +273,26 @@ impl StateStore {
     }
 
     pub fn exists_live(&self, key: &str) -> bool {
+        let now = now_ms();
         let shard = &self.0.shards[shard_index(key)];
         let map = shard.read();
-        map.contains_key(key)
+        map.get(key).is_some_and(|entry| !is_expired(entry, now))
     }
 
     pub fn expired_keys(&self, now_ms: u64, limit: usize) -> Vec<String> {
+        let guards: Vec<_> = self.0.shards.iter().map(|shard| shard.read()).collect();
         let mut out = Vec::new();
-        for shard in &self.0.shards {
-            let map = shard.read();
+        for map in &guards {
             for (k, v) in map.iter() {
                 if let Some(exp) = v.expires_at_ms {
                     if exp <= now_ms {
                         out.push(k.clone());
-                        if out.len() >= limit {
-                            return out;
-                        }
                     }
                 }
             }
         }
+        out.sort();
+        out.truncate(limit);
         out
     }
 }
@@ -359,5 +359,65 @@ mod tests {
         }
         let all = s.list(None, 200);
         assert_eq!(all.len(), 100);
+    }
+
+    #[test]
+    fn global_operations_are_sorted_and_expiry_aware() {
+        let s = StateStore::new();
+        let now = now_ms();
+        s.apply_wal_set("z-key".to_string(), serde_json::json!(1), 1, None);
+        s.apply_wal_set("a-key".to_string(), serde_json::json!(2), 1, None);
+        s.apply_wal_set(
+            "ttl-expired".to_string(),
+            serde_json::json!(3),
+            1,
+            Some(now.saturating_sub(1)),
+        );
+
+        let listed = s.list(None, 10);
+        let listed_keys: Vec<_> = listed.iter().map(|item| item.key.as_str()).collect();
+        assert_eq!(listed_keys, vec!["a-key", "z-key"]);
+        assert!(!s.exists_live("ttl-expired"));
+
+        let snapshot_keys: Vec<_> = s.snapshot().into_iter().map(|(key, _)| key).collect();
+        assert_eq!(
+            snapshot_keys,
+            vec!["a-key".to_string(), "z-key".to_string()]
+        );
+
+        let expired = s.expired_keys(now, 10);
+        assert_eq!(expired, vec!["ttl-expired".to_string()]);
+    }
+
+    #[test]
+    fn load_snapshot_replaces_all_shards_consistently() {
+        let s = StateStore::new();
+        s.apply_wal_set("old-a".to_string(), serde_json::json!(1), 1, None);
+        s.apply_wal_set("old-b".to_string(), serde_json::json!(2), 1, None);
+
+        s.load_snapshot(vec![
+            (
+                "new-z".to_string(),
+                PersistStateEntry {
+                    value: serde_json::json!(10),
+                    revision: 3,
+                    expires_at_ms: None,
+                },
+            ),
+            (
+                "new-a".to_string(),
+                PersistStateEntry {
+                    value: serde_json::json!(11),
+                    revision: 4,
+                    expires_at_ms: None,
+                },
+            ),
+        ])
+        .unwrap();
+
+        assert!(s.get("old-a").is_none());
+        assert!(s.get("old-b").is_none());
+        let keys: Vec<_> = s.list(None, 10).into_iter().map(|item| item.key).collect();
+        assert_eq!(keys, vec!["new-a".to_string(), "new-z".to_string()]);
     }
 }
