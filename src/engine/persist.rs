@@ -8,8 +8,40 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// PR5: WAL sync mode.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WalSyncMode {
+    /// Fsync every write (safe, lower throughput).
+    PerWrite,
+    /// Buffer writes; flush on count threshold or explicit flush (higher throughput).
+    Group {
+        batch_size: usize,
+        flush_interval_ms: u64,
+    },
+}
+
+impl WalSyncMode {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        if config.wal_sync_mode.trim().eq_ignore_ascii_case("group") {
+            Self::Group {
+                batch_size: config.wal_batch_size.max(1),
+                flush_interval_ms: config.wal_flush_interval_ms.max(1),
+            }
+        } else {
+            Self::PerWrite
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Persist(Arc<Inner>);
+
+/// State for the WAL group-commit buffer.
+struct GroupBuffer {
+    /// Serialized JSON lines buffered for flushing
+    pending: Vec<Vec<u8>>,
+    last_flush_ms: u64,
+}
 
 struct Inner {
     dir: PathBuf,
@@ -17,6 +49,9 @@ struct Inner {
     segment_max_bytes: u64,
     retention_segments: usize,
     current_segment: Mutex<u64>,
+    /// PR5: group-commit buffer (None when mode is PerWrite)
+    group_buffer: Option<Mutex<GroupBuffer>>,
+    sync_mode: WalSyncMode,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,29 +65,111 @@ impl Persist {
         segment_max_bytes: u64,
         retention_segments: usize,
     ) -> std::io::Result<Self> {
+        Self::new_with_mode(
+            dir,
+            segment_max_bytes,
+            retention_segments,
+            WalSyncMode::PerWrite,
+        )
+    }
+
+    pub fn new_with_mode(
+        dir: impl AsRef<Path>,
+        segment_max_bytes: u64,
+        retention_segments: usize,
+        sync_mode: WalSyncMode,
+    ) -> std::io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let current_segment = find_latest_segment_id(&dir).unwrap_or(1);
+        let group_buffer = if matches!(sync_mode, WalSyncMode::Group { .. }) {
+            Some(Mutex::new(GroupBuffer {
+                pending: Vec::new(),
+                last_flush_ms: now_ms(),
+            }))
+        } else {
+            None
+        };
         Ok(Self(Arc::new(Inner {
             dir,
             wal_lock: Mutex::new(()),
             segment_max_bytes: segment_max_bytes.max(1024 * 1024),
             retention_segments: retention_segments.max(1),
             current_segment: Mutex::new(current_segment),
+            group_buffer,
+            sync_mode,
         })))
     }
 
+    /// Append a single event to the WAL.
+    /// In PerWrite mode: fsync immediately.
+    /// In Group mode: buffer until batch_size or flush_interval_ms.
     pub fn append_event(&self, event: &EventRecord) -> std::io::Result<()> {
+        let line = serde_json::to_vec(event)?;
+
+        if let Some(buf) = &self.0.group_buffer {
+            let should_flush = {
+                let mut guard = buf.lock();
+                guard.pending.push(line);
+                let (batch_size, flush_interval_ms) = if let WalSyncMode::Group {
+                    batch_size,
+                    flush_interval_ms,
+                } = self.0.sync_mode
+                {
+                    (batch_size, flush_interval_ms)
+                } else {
+                    (64, 10)
+                };
+                guard.pending.len() >= batch_size
+                    || now_ms().saturating_sub(guard.last_flush_ms) >= flush_interval_ms
+            };
+            if should_flush {
+                self.flush_group_buffer()?;
+            }
+            return Ok(());
+        }
+
+        // PerWrite mode: fsync each event
+        self.write_lines_to_wal(std::slice::from_ref(&line), true)
+    }
+
+    /// Flush any buffered events to disk (group commit mode only).
+    /// Always called before snapshot rotation to ensure durability.
+    pub fn flush_buffer(&self) -> std::io::Result<()> {
+        if self.0.group_buffer.is_some() {
+            self.flush_group_buffer()?;
+        }
+        Ok(())
+    }
+
+    fn flush_group_buffer(&self) -> std::io::Result<()> {
+        let Some(buf) = &self.0.group_buffer else {
+            return Ok(());
+        };
+        let lines: Vec<Vec<u8>> = {
+            let mut guard = buf.lock();
+            if guard.pending.is_empty() {
+                return Ok(());
+            }
+            let drained = std::mem::take(&mut guard.pending);
+            guard.last_flush_ms = now_ms();
+            drained
+        };
+        self.write_lines_to_wal(&lines, true)
+    }
+
+    /// Write a batch of serialized JSON lines to the current WAL segment.
+    fn write_lines_to_wal(&self, lines: &[Vec<u8>], sync: bool) -> std::io::Result<()> {
         let _g = self.0.wal_lock.lock();
 
         let mut seg = *self.0.current_segment.lock();
         let mut path = self.segment_path(seg);
         ensure_file_exists(&path)?;
 
-        let line = serde_json::to_vec(event)?;
-        let estimated = line.len() as u64 + 1;
+        // Estimate total bytes to write
+        let total_bytes: u64 = lines.iter().map(|l| l.len() as u64 + 1).sum();
         let current_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        if current_size.saturating_add(estimated) > self.0.segment_max_bytes {
+        if current_size.saturating_add(total_bytes) > self.0.segment_max_bytes {
             seg = seg.saturating_add(1);
             *self.0.current_segment.lock() = seg;
             path = self.segment_path(seg);
@@ -60,10 +177,14 @@ impl Persist {
         }
 
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-        file.write_all(&line)?;
-        file.write_all(b"\n")?;
+        for line in lines {
+            file.write_all(line)?;
+            file.write_all(b"\n")?;
+        }
         file.flush()?;
-        file.sync_data()?;
+        if sync {
+            file.sync_data()?;
+        }
 
         self.enforce_retention_locked(seg)?;
         Ok(())
@@ -80,6 +201,9 @@ impl Persist {
     }
 
     pub fn write_snapshot_and_rotate(&self, snapshot: &Snapshot) -> std::io::Result<()> {
+        // PR5: flush any buffered events before rotating
+        self.flush_buffer()?;
+
         let _g = self.0.wal_lock.lock();
 
         let tmp = self.0.dir.join("snapshot.json.tmp");
@@ -255,4 +379,11 @@ fn parse_segment_id(path: &Path) -> Option<u64> {
     let name = name.strip_prefix("events-")?;
     let name = name.strip_suffix(".log")?;
     name.parse::<u64>().ok()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
