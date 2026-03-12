@@ -29,6 +29,14 @@ struct HydratedResult {
     score: f32,
     snippets: Vec<String>,
     document: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _plan: Option<QueryPlan>,
+}
+
+#[derive(serde::Serialize)]
+struct QueryPlan {
+    strategy: &'static str,
+    reason: &'static str,
 }
 
 impl LumaDatabase {
@@ -75,6 +83,8 @@ impl LumaDatabase {
         raw_json: serde_json::Value,
         metadata: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
+        let ingest_start = std::time::Instant::now();
+
         // 1. Save original document to DocStore (state store for now)
         let doc_key = format!("doc:{}:{}", namespace, doc_id);
         self.engine
@@ -87,24 +97,12 @@ impl LumaDatabase {
             return Ok(()); // Nothing to embed
         }
 
-        // 3. Embeddings & Vector Insert
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
-        let mut tasks = Vec::new();
-
-        for chunk in chunks.iter() {
-            let chunk_str = chunk.to_string();
-            let embeddings = self.embeddings.clone();
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            tasks.push(tokio::spawn(async move {
-                let _permit = permit;
-                embeddings.embed(&chunk_str).await
-            }));
-        }
-
-        let mut vectors = Vec::new();
-        for task in tasks {
-            vectors.push(task.await.unwrap()?);
-        }
+        // 3. Embeddings — PR3: batch all chunks in a single call
+        let chunk_strs: Vec<String> = chunks.iter().map(|c| c.to_string()).collect();
+        let embed_start = std::time::Instant::now();
+        let vectors = self.embeddings.embed_batch(&chunk_strs).await?;
+        let embed_us = embed_start.elapsed().as_micros() as u64;
+        self.engine.metrics().embed_latency.record_us(embed_us);
 
         if vectors.is_empty() {
             return Ok(());
@@ -213,6 +211,9 @@ impl LumaDatabase {
             }
         }
 
+        let ingest_us = ingest_start.elapsed().as_micros() as u64;
+        self.engine.metrics().ingest_latency.record_us(ingest_us);
+
         Ok(())
     }
 
@@ -223,27 +224,64 @@ impl LumaDatabase {
         sql_filter: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        // 1. Relational Pre-filtering (Hard Filter)
+        let search_start = std::time::Instant::now();
+
+        // PR7: Query planner heuristics
+        // Use collection_size cached from live_count (no COUNT(*) query needed)
+        let collection_size = self
+            .engine
+            .vector_collection_info(namespace)
+            .map(|info| info.live_count)
+            .unwrap_or(0);
+
+        let has_sql_filter = sql_filter.is_some() && self.sqlite.is_some();
+        let (strategy, reason) = choose_strategy(limit, collection_size, has_sql_filter);
+
         let mut allowed_ids: Option<std::collections::HashSet<String>> = None;
 
-        if let (Some(filter_str), Some(sql)) = (sql_filter, &self.sqlite) {
-            let query_sql = format!("SELECT id FROM {}_docs WHERE {}", namespace, filter_str);
-
-            match sql.query(query_sql, vec![]).await {
-                Ok(rows) => {
-                    let mut ids = std::collections::HashSet::new();
-                    for row in rows {
-                        if let Some(id_str) = row.get("id").and_then(|v| v.as_str()) {
-                            ids.insert(id_str.to_string());
+        match strategy {
+            "sql_first" => {
+                // 1a. SQL pre-filter first (reduces vector search space)
+                if let (Some(filter_str), Some(sql)) = (sql_filter, &self.sqlite) {
+                    let query_sql =
+                        format!("SELECT id FROM {}_docs WHERE {}", namespace, filter_str);
+                    match sql.query(query_sql, vec![]).await {
+                        Ok(rows) => {
+                            let mut ids = std::collections::HashSet::new();
+                            for row in rows {
+                                if let Some(id_str) = row.get("id").and_then(|v| v.as_str()) {
+                                    ids.insert(id_str.to_string());
+                                }
+                            }
+                            if ids.is_empty() {
+                                return Ok(Vec::new());
+                            }
+                            allowed_ids = Some(ids);
                         }
+                        Err(e) => return Err(anyhow::anyhow!("SQL filter error: {}", e)),
                     }
-                    if ids.is_empty() {
-                        return Ok(Vec::new());
-                    }
-                    allowed_ids = Some(ids);
                 }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("SQL filter error: {}", e));
+            }
+            _ => {
+                // "vector_first": run SQL filter concurrently or after (for collation)
+                if let (Some(filter_str), Some(sql)) = (sql_filter, &self.sqlite) {
+                    let query_sql =
+                        format!("SELECT id FROM {}_docs WHERE {}", namespace, filter_str);
+                    match sql.query(query_sql, vec![]).await {
+                        Ok(rows) => {
+                            let mut ids = std::collections::HashSet::new();
+                            for row in rows {
+                                if let Some(id_str) = row.get("id").and_then(|v| v.as_str()) {
+                                    ids.insert(id_str.to_string());
+                                }
+                            }
+                            if ids.is_empty() {
+                                return Ok(Vec::new());
+                            }
+                            allowed_ids = Some(ids);
+                        }
+                        Err(e) => return Err(anyhow::anyhow!("SQL filter error: {}", e)),
+                    }
                 }
             }
         }
@@ -254,9 +292,9 @@ impl LumaDatabase {
         // 3. Vector Search
         let req = crate::vector::SearchRequest {
             vector: query_vector,
-            k: limit, // Only fetch limit, pre-filtering handles exact matches
+            k: limit,
             options: crate::vector::SearchOptions {
-                filters: None, // We do pre-filtering via SQL instead of vector metadata
+                filters: None,
                 include_meta: true,
                 allowed_ids: allowed_ids.clone(),
             },
@@ -273,7 +311,6 @@ impl LumaDatabase {
                 if let Ok(chunk_meta) = serde_json::from_value::<ChunkMetadata>(meta) {
                     let parent_id = chunk_meta.parent_id;
 
-                    // Check if it passes our SQL pre-filter
                     if let Some(ref allowed) = allowed_ids {
                         if !allowed.contains(&parent_id) {
                             continue;
@@ -287,16 +324,14 @@ impl LumaDatabase {
                             score: hit.score,
                             snippets: Vec::new(),
                             document: None,
+                            _plan: Some(QueryPlan { strategy, reason }),
                         });
 
-                    // Update score if higher
                     if hit.score > entry.score {
                         entry.score = hit.score;
                     }
 
-                    // Add snippet
                     if entry.snippets.len() < 3 {
-                        // Limit to top 3 snippets per doc
                         entry.snippets.push(chunk_meta.text_snippet);
                     }
                 }
@@ -320,10 +355,39 @@ impl LumaDatabase {
             }
         }
 
-        // Convert to JSON at the very end
+        let search_us = search_start.elapsed().as_micros() as u64;
+        self.engine.metrics().search_latency.record_us(search_us);
+
         Ok(final_results
             .into_iter()
             .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
             .collect())
     }
+}
+
+/// PR7: Simple heuristic-based query planner.
+///
+/// Returns (strategy, reason):
+/// - `"sql_first"`: run SQL filter before vector search (reduces search space for large collections with selective filters)
+/// - `"vector_first"`: run vector search directly (better for small k relative to collection, or no filter)
+fn choose_strategy(
+    limit: usize,
+    collection_size: usize,
+    has_sql_filter: bool,
+) -> (&'static str, &'static str) {
+    if !has_sql_filter {
+        return ("vector_first", "no_sql_filter");
+    }
+    // If collection is large and we have a filter, pre-filter with SQL first
+    if collection_size > 100_000 {
+        return ("sql_first", "large_collection_with_filter");
+    }
+    // If limit is a very small fraction of the collection, vector_first is better
+    if collection_size > 0 {
+        let ratio = limit as f64 / collection_size as f64;
+        if ratio < 0.01 {
+            return ("vector_first", "small_k_ratio");
+        }
+    }
+    ("sql_first", "has_filter")
 }
