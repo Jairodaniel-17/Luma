@@ -75,7 +75,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .unwrap_or(PathBuf::from("data"));
     let search_engine = Arc::new(SearchEngine::new(data_dir)?);
 
-    let embeddings = init_embeddings(&config);
+    let embeddings = init_embeddings(&config, engine.metrics());
     let app = luma::api::router(
         engine.clone(),
         config.clone(),
@@ -125,7 +125,10 @@ fn init_sqlite(config: &Config) -> anyhow::Result<SqliteService> {
     SqliteService::new(path)
 }
 
-fn init_embeddings(config: &Config) -> Arc<luma::engine::embeddings::EmbeddingClient> {
+fn init_embeddings(
+    config: &Config,
+    metrics: std::sync::Arc<luma::engine::metrics::Metrics>,
+) -> Arc<luma::engine::embeddings::EmbeddingClient> {
     use luma::engine::embeddings::{EmbeddingClient, EmbeddingProvider};
 
     let provider = match config.embedding_provider.to_lowercase().as_str() {
@@ -144,7 +147,11 @@ fn init_embeddings(config: &Config) -> Arc<luma::engine::embeddings::EmbeddingCl
         _ => EmbeddingProvider::None,
     };
 
-    Arc::new(EmbeddingClient::new(provider))
+    Arc::new(EmbeddingClient::with_cache(
+        provider,
+        config.embedding_cache_size,
+        Some(metrics),
+    ))
 }
 
 async fn shutdown_signal(token: CancellationToken) {

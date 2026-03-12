@@ -51,6 +51,18 @@ pub struct Config {
     pub embedding_url: String,
     pub embedding_api_key: String,
     pub embedding_dim: usize,
+    /// PR2: LRU embedding cache size (0 = disabled). Default 10_000.
+    pub embedding_cache_size: usize,
+    /// PR4: HNSW M parameter (connections per node). Default 16.
+    pub hnsw_m: usize,
+    /// PR4: HNSW ef_construction parameter. Default 200.
+    pub hnsw_ef_construction: usize,
+    /// PR5: WAL sync mode: "per_write" (fsync each write) or "group" (buffered flush).
+    pub wal_sync_mode: String,
+    /// PR5: Group commit flush interval in ms. Default 10.
+    pub wal_flush_interval_ms: u64,
+    /// PR5: Group commit batch size (flush after N events). Default 64.
+    pub wal_batch_size: usize,
 }
 
 impl Default for Config {
@@ -102,6 +114,12 @@ impl Default for Config {
             embedding_url: "".to_string(),
             embedding_api_key: "".to_string(),
             embedding_dim: 384,
+            embedding_cache_size: 10_000,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            wal_sync_mode: "per_write".to_string(),
+            wal_flush_interval_ms: 10,
+            wal_batch_size: 64,
         }
     }
 }
@@ -282,6 +300,28 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(384);
+        let embedding_cache_size = std::env::var("EMBEDDING_CACHE_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let hnsw_m = std::env::var("HNSW_M")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16);
+        let hnsw_ef_construction = std::env::var("HNSW_EF_CONSTRUCTION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let wal_sync_mode =
+            std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "per_write".to_string());
+        let wal_flush_interval_ms = std::env::var("WAL_FLUSH_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let wal_batch_size = std::env::var("WAL_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64);
 
         Ok(Self {
             port,
@@ -330,6 +370,12 @@ impl Config {
             embedding_url,
             embedding_api_key,
             embedding_dim,
+            embedding_cache_size,
+            hnsw_m,
+            hnsw_ef_construction,
+            wal_sync_mode,
+            wal_flush_interval_ms,
+            wal_batch_size,
         })
     }
 }
