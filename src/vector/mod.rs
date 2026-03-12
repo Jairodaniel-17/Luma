@@ -891,8 +891,23 @@ impl VectorStore {
 
             if needs_compaction {
                 let mut c = c_arc.write();
-                c.rebuild_segments();
-                compacted.push(name);
+                let still_needs_compaction = if c.segments.is_empty() {
+                    false
+                } else {
+                    let total_tombstones: usize = c
+                        .segments
+                        .iter()
+                        .map(|s| s.deleted.iter().filter(|&&d| d).count())
+                        .sum();
+                    let total_capacity: usize =
+                        c.segments.iter().map(|s| s.id_by_data_id.len()).sum();
+                    total_capacity > 0
+                        && (total_tombstones as f32 / total_capacity as f32) > threshold
+                };
+                if still_needs_compaction {
+                    c.rebuild_segments();
+                    compacted.push(name);
+                }
             }
         }
 
@@ -1053,7 +1068,13 @@ impl Collection {
             self.settings.hnsw_m,
             self.settings.hnsw_ef_construction,
         );
-        for (id, item) in self.items.iter() {
+        let mut ids: Vec<&String> = self.items.keys().collect();
+        ids.sort();
+        for id in ids {
+            let item = self
+                .items
+                .get(id)
+                .expect("item id collected from keys must exist");
             if current.live >= current.capacity {
                 self.segments.push(current);
                 current = SegmentIndex::new(
@@ -1997,6 +2018,99 @@ impl Collection {
             }
         }
         Ok(Some(hits))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Metric, SearchOptions, SearchRequest, VectorItem, VectorSettings, VectorStore};
+
+    #[test]
+    fn compact_hnsw_segments_preserves_live_ids_and_clears_tombstones() {
+        let store = VectorStore::with_settings(VectorSettings::default());
+        store.create_collection("docs", 3, Metric::Cosine).unwrap();
+
+        for idx in 0..24usize {
+            store
+                .upsert(
+                    "docs",
+                    &format!("doc-{idx:02}"),
+                    VectorItem {
+                        vector: vec![1.0, idx as f32, 0.0],
+                        meta: serde_json::json!({ "idx": idx }),
+                        mmap_offset: None,
+                    },
+                )
+                .unwrap();
+        }
+        for idx in 0..12usize {
+            store.delete("docs", &format!("doc-{idx:02}")).unwrap();
+        }
+
+        let compacted = store.compact_hnsw_segments(0.0);
+        assert_eq!(compacted, vec!["docs".to_string()]);
+
+        let collection = store.0.collections.get("docs").unwrap();
+        let collection = collection.read();
+        assert_eq!(collection.items.len(), 12);
+        assert_eq!(collection.item_segments.len(), 12);
+        assert!(collection
+            .segments
+            .iter()
+            .all(|segment| segment.deleted.iter().all(|deleted| !deleted)));
+
+        drop(collection);
+
+        let hits = store
+            .search(
+                "docs",
+                SearchRequest {
+                    vector: vec![1.0, 20.0, 0.0],
+                    k: 5,
+                    options: SearchOptions {
+                        filters: None,
+                        include_meta: false,
+                        allowed_ids: None,
+                    },
+                },
+            )
+            .unwrap();
+        assert!(hits.iter().all(|hit| !hit.id.starts_with("doc-0")));
+        assert!(hits.iter().any(|hit| hit.id == "doc-20"));
+    }
+
+    #[test]
+    fn rebuild_segments_uses_stable_id_order() {
+        let store = VectorStore::with_settings(VectorSettings::default());
+        store.create_collection("docs", 2, Metric::Cosine).unwrap();
+
+        for id in ["doc-c", "doc-a", "doc-b"] {
+            store
+                .upsert(
+                    "docs",
+                    id,
+                    VectorItem {
+                        vector: vec![1.0, 0.0],
+                        meta: serde_json::json!({ "id": id }),
+                        mmap_offset: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let collection = store.0.collections.get("docs").unwrap();
+        let mut collection = collection.write();
+        collection.rebuild_segments();
+
+        let ordered_ids = &collection.segments[0].id_by_data_id;
+        assert_eq!(
+            ordered_ids,
+            &vec![
+                "doc-a".to_string(),
+                "doc-b".to_string(),
+                "doc-c".to_string()
+            ]
+        );
     }
 }
 
