@@ -61,6 +61,10 @@ pub struct VectorSettings {
     pub diskann_search_list_size: usize,
     pub diskann_max_degree: usize,
     pub diskann_build_threads: usize,
+    /// PR4: HNSW M parameter (connections per node). Applies to new collections.
+    pub hnsw_m: usize,
+    /// PR4: HNSW ef_construction parameter. Applies to new collections.
+    pub hnsw_ef_construction: usize,
 }
 
 impl Default for VectorSettings {
@@ -90,6 +94,8 @@ impl Default for VectorSettings {
             diskann_build_threads: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
         }
     }
 }
@@ -130,6 +136,8 @@ impl VectorSettings {
             diskann_search_list_size: config.diskann_search_list_size.max(4),
             diskann_max_degree: config.diskann_max_degree.max(4),
             diskann_build_threads: config.diskann_build_threads.max(1),
+            hnsw_m: config.hnsw_m.clamp(2, 128),
+            hnsw_ef_construction: config.hnsw_ef_construction.clamp(16, 2048),
         }
     }
 
@@ -271,9 +279,9 @@ struct SegmentIndex {
 }
 
 impl SegmentIndex {
-    fn new(metric: Metric, capacity: usize) -> Self {
+    fn new(metric: Metric, capacity: usize, hnsw_m: usize, hnsw_ef_construction: usize) -> Self {
         Self {
-            hnsw: make_hnsw(metric, 16, capacity.max(1024), 16, 200),
+            hnsw: make_hnsw(metric, hnsw_m, capacity.max(1024), 16, hnsw_ef_construction),
             data_ids: HashMap::new(),
             id_by_data_id: Vec::new(),
             deleted: Vec::new(),
@@ -848,6 +856,48 @@ impl VectorStore {
         c.rebuild_index();
         Ok(())
     }
+
+    /// PR6: Rebuild HNSW segments for collections that exceed the tombstone ratio threshold.
+    ///
+    /// Returns the list of collection names that were compacted.
+    /// Acquires a write lock per collection only when compaction is needed.
+    pub fn compact_hnsw_segments(&self, threshold: f32) -> Vec<String> {
+        let mut compacted = Vec::new();
+        let collection_names: Vec<String> =
+            self.0.collections.iter().map(|r| r.key().clone()).collect();
+
+        for name in collection_names {
+            let Some(c_arc) = self.0.collections.get(&name) else {
+                continue;
+            };
+
+            // Check tombstone ratio without write lock first
+            let needs_compaction = {
+                let c = c_arc.read();
+                if c.segments.is_empty() {
+                    false
+                } else {
+                    let total_tombstones: usize = c
+                        .segments
+                        .iter()
+                        .map(|s| s.deleted.iter().filter(|&&d| d).count())
+                        .sum();
+                    let total_capacity: usize =
+                        c.segments.iter().map(|s| s.id_by_data_id.len()).sum();
+                    total_capacity > 0
+                        && (total_tombstones as f32 / total_capacity as f32) > threshold
+                }
+            };
+
+            if needs_compaction {
+                let mut c = c_arc.write();
+                c.rebuild_segments();
+                compacted.push(name);
+            }
+        }
+
+        compacted
+    }
 }
 
 impl Default for VectorStore {
@@ -989,15 +1039,29 @@ impl Collection {
             return;
         }
         if self.items.is_empty() {
-            self.segments
-                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+            self.segments.push(SegmentIndex::new(
+                self.metric,
+                self.segment_max_items,
+                self.settings.hnsw_m,
+                self.settings.hnsw_ef_construction,
+            ));
             return;
         }
-        let mut current = SegmentIndex::new(self.metric, self.segment_max_items);
+        let mut current = SegmentIndex::new(
+            self.metric,
+            self.segment_max_items,
+            self.settings.hnsw_m,
+            self.settings.hnsw_ef_construction,
+        );
         for (id, item) in self.items.iter() {
             if current.live >= current.capacity {
                 self.segments.push(current);
-                current = SegmentIndex::new(self.metric, self.segment_max_items);
+                current = SegmentIndex::new(
+                    self.metric,
+                    self.segment_max_items,
+                    self.settings.hnsw_m,
+                    self.settings.hnsw_ef_construction,
+                );
             }
             current.insert(id.clone(), item.vector.clone());
             let idx = self.segments.len();
@@ -1005,8 +1069,12 @@ impl Collection {
         }
         self.segments.push(current);
         if self.segments.is_empty() {
-            self.segments
-                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+            self.segments.push(SegmentIndex::new(
+                self.metric,
+                self.segment_max_items,
+                self.settings.hnsw_m,
+                self.settings.hnsw_ef_construction,
+            ));
         }
         self.refresh_item_clusters();
     }
@@ -1226,13 +1294,21 @@ impl Collection {
 
     fn ensure_active_segment(&mut self) -> usize {
         if self.segments.is_empty() {
-            self.segments
-                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+            self.segments.push(SegmentIndex::new(
+                self.metric,
+                self.segment_max_items,
+                self.settings.hnsw_m,
+                self.settings.hnsw_ef_construction,
+            ));
         }
         let last_idx = self.segments.len() - 1;
         if self.segments[last_idx].live >= self.segments[last_idx].capacity {
-            self.segments
-                .push(SegmentIndex::new(self.metric, self.segment_max_items));
+            self.segments.push(SegmentIndex::new(
+                self.metric,
+                self.segment_max_items,
+                self.settings.hnsw_m,
+                self.settings.hnsw_ef_construction,
+            ));
             return self.segments.len() - 1;
         }
         last_idx
