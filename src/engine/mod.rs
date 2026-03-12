@@ -105,12 +105,18 @@ impl Engine {
             tracing::warn!(error = %err, "startup ttl expire failed");
         }
         engine.start_ttl_task_if_runtime();
+        engine.start_wal_flush_task_if_runtime();
         engine.start_hnsw_compaction_task_if_runtime();
 
         Ok(engine)
     }
 
     pub fn shutdown(&self) {
+        if let Some(persist) = &self.0.persist {
+            if let Err(err) = persist.flush_buffer() {
+                tracing::warn!(error = %err, "wal flush during shutdown failed");
+            }
+        }
         self.0.shutdown.cancel();
     }
 
@@ -277,6 +283,42 @@ impl Engine {
                     }
                     _ = shutdown.cancelled() => {
                         tracing::info!("ttl task stopping");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn start_wal_flush_task_if_runtime(&self) {
+        let Some(persist) = self.persist() else {
+            return;
+        };
+        let Some(flush_interval) = persist.group_flush_interval() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+
+        let shutdown = self.0.shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flush_interval);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let persist = persist.clone();
+                        let res = tokio::task::spawn_blocking(move || persist.flush_buffer()).await;
+                        match res {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => tracing::warn!(error = %err, "wal flush task failed"),
+                            Err(err) => tracing::warn!(error = %err, "wal flush task join failed"),
+                        }
+                    }
+                    _ = shutdown.cancelled() => {
+                        let persist = persist.clone();
+                        let _ = tokio::task::spawn_blocking(move || persist.flush_buffer()).await;
+                        tracing::info!("wal flush task stopping");
                         break;
                     }
                 }
