@@ -10,8 +10,10 @@ use uuid::Uuid;
 pub struct ApiKeyRecord {
     pub id: String,
     pub name: String,
+    pub tenant_id: Option<String>,
     pub role: String, // "admin" or "user"
     pub permissions: serde_json::Value,
+    pub quotas: serde_json::Value,
     pub created_at_ms: u64,
 }
 
@@ -32,14 +34,30 @@ impl AuthStore {
                 id TEXT PRIMARY KEY,
                 key_hash TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL,
+                tenant_id TEXT,
                 role TEXT NOT NULL,
                 permissions TEXT NOT NULL,
+                quotas TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
             )"
                 .to_string(),
                 vec![],
             )
             .await?;
+        let _ = self
+            .sqlite
+            .execute(
+                "ALTER TABLE sys_api_keys ADD COLUMN tenant_id TEXT".to_string(),
+                vec![],
+            )
+            .await;
+        let _ = self
+            .sqlite
+            .execute(
+                "ALTER TABLE sys_api_keys ADD COLUMN quotas TEXT NOT NULL DEFAULT '{}'".to_string(),
+                vec![],
+            )
+            .await;
 
         self.bootstrap().await?;
         Ok(())
@@ -66,8 +84,15 @@ impl AuthStore {
             tracing::warn!("🔑 KEY: {}", key);
             tracing::warn!("⚠️  Save this key! It will not be shown again.");
 
-            self.create_key("Admin", "admin", &key, serde_json::json!({"allow": "*"}))
-                .await?;
+            self.create_key(
+                "Admin",
+                None,
+                "admin",
+                &key,
+                serde_json::json!({"allow": "*"}),
+                serde_json::json!({"storage_bytes":"unlimited","qps":"unlimited"}),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -75,9 +100,11 @@ impl AuthStore {
     pub async fn create_key(
         &self,
         name: &str,
+        tenant_id: Option<&str>,
         role: &str,
         plain_key: &str,
         permissions: serde_json::Value,
+        quotas: serde_json::Value,
     ) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
         let hash = self.hash_key(plain_key);
@@ -86,13 +113,17 @@ impl AuthStore {
             .as_millis() as u64;
 
         self.sqlite.execute(
-            "INSERT INTO sys_api_keys (id, key_hash, name, role, permissions, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)".to_string(),
+            "INSERT INTO sys_api_keys (id, key_hash, name, tenant_id, role, permissions, quotas, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)".to_string(),
             vec![
                 serde_json::json!(id),
                 serde_json::json!(hash),
                 serde_json::json!(name),
+                tenant_id
+                    .map(|tenant| serde_json::Value::String(tenant.to_string()))
+                    .unwrap_or(serde_json::Value::Null),
                 serde_json::json!(role),
                 serde_json::Value::String(permissions.to_string()),
+                serde_json::Value::String(quotas.to_string()),
                 serde_json::json!(now),
             ]
         ).await?;
@@ -115,6 +146,11 @@ impl AuthStore {
                 if let Some(perm_str) = obj.get("permissions").and_then(|v| v.as_str()) {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(perm_str) {
                         obj.insert("permissions".to_string(), parsed);
+                    }
+                }
+                if let Some(quota_str) = obj.get("quotas").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(quota_str) {
+                        obj.insert("quotas".to_string(), parsed);
                     }
                 }
             }
@@ -142,6 +178,11 @@ impl AuthStore {
                 if let Some(perm_str) = obj.get("permissions").and_then(|v| v.as_str()) {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(perm_str) {
                         obj.insert("permissions".to_string(), parsed);
+                    }
+                }
+                if let Some(quota_str) = obj.get("quotas").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(quota_str) {
+                        obj.insert("quotas".to_string(), parsed);
                     }
                 }
             }
@@ -182,15 +223,18 @@ impl AuthStore {
 
             // Default permissions for admin
             let permissions = serde_json::json!({"allow": "*"});
+            let quotas = serde_json::json!({"storage_bytes":"unlimited","qps":"unlimited"});
 
             self.sqlite.execute(
-                "INSERT INTO sys_api_keys (id, key_hash, name, role, permissions, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)".to_string(),
+                "INSERT INTO sys_api_keys (id, key_hash, name, tenant_id, role, permissions, quotas, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)".to_string(),
                 vec![
                     serde_json::json!(id),
                     serde_json::json!(hash),
                     serde_json::json!("Bootstrap/Dev"),
+                    serde_json::Value::Null,
                     serde_json::json!("admin"),
                     serde_json::Value::String(permissions.to_string()),
+                    serde_json::Value::String(quotas.to_string()),
                     serde_json::json!(now),
                 ]
             ).await?;

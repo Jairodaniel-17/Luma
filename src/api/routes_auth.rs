@@ -14,8 +14,10 @@ pub struct CreateKeyResponse {
 #[derive(Debug, Deserialize)]
 pub struct CreateKeyBody {
     pub name: String,
+    pub tenant_id: Option<String>,
     pub role: Option<String>,
     pub permissions: Option<serde_json::Value>,
+    pub quotas: Option<serde_json::Value>,
 }
 
 pub async fn list_keys(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -56,9 +58,21 @@ pub async fn create_key(
     let plain_key = store.generate_api_key();
     let role = body.role.unwrap_or_else(|| "user".to_string());
     let permissions = body.permissions.unwrap_or(serde_json::json!({}));
+    let quotas = body.quotas.unwrap_or(serde_json::json!({
+        "storage_bytes": 1_073_741_824u64,
+        "qps": 100u64,
+        "max_collections": 32u64
+    }));
 
     let id = store
-        .create_key(&body.name, &role, &plain_key, permissions)
+        .create_key(
+            &body.name,
+            body.tenant_id.as_deref(),
+            &role,
+            &plain_key,
+            permissions,
+            quotas,
+        )
         .await
         .map_err(|err| {
             ApiError::new(

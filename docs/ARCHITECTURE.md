@@ -17,14 +17,18 @@ Objetivo: DB single-node KISS con **State Store + Event Store + SSE + Vector Sto
 - Cada mutación publica un evento con `offset` global u64 incremental.
 - `broadcast` para fan-out “tail” a clientes SSE.
 - Si `DATA_DIR` está habilitado, el replay es desde WAL segmentado; el buffer in-memory queda como fallback si no hay disco.
+- El replay in-memory ahora detecta offsets ya no retenidos y emite `event: gap` antes de reanudar desde el primer offset disponible.
 
 ### Persistencia (opcional)
 Si `DATA_DIR` está definido:
-- WAL segmentado: `DATA_DIR/events-000001.log`, `events-000002.log` (JSON lines, append-only).
-- Snapshot: `DATA_DIR/snapshot.json` (estado + vectores + `last_offset`).
-- Snapshot periódico (`SNAPSHOT_INTERVAL_SECS`) bloquea momentáneamente el WAL, escribe snapshot y rota truncando el WAL.
+- WAL segmentado: `DATA_DIR/events-000001.log`, `events-000002.log`.
+- Cada línea WAL nueva es un envelope versionado con `crc32` del `EventRecord`; el lector sigue aceptando líneas legacy para no romper upgrades.
+- Al detectar corrupción parcial o tail truncado, el replay se detiene en el primer registro inválido y conserva el prefijo válido. No continúa sobre bytes dudosos.
+- Snapshot: `DATA_DIR/snapshot.json` (checkpoint de `last_offset` para recuperación idempotente).
+- Snapshot periódico (`SNAPSHOT_INTERVAL_SECS`) fuerza flush del buffer WAL, escribe snapshot por rename atómico y luego rota segmento.
 
 Invariante: el evento se emite “en vivo” **después** de persistirse en WAL (cuando `DATA_DIR` está habilitado).
+Invariante: `state_db` y vector store tratan eventos con `offset <= applied_offset` como idempotentes durante replay.
 
 ### Vector Store (v1.1)
 - Colecciones: `{dim, metric}` con `hnsw_rs`, ahora divididas en segmentos (`DEFAULT_SEGMENT_MAX=8192`).
@@ -45,6 +49,13 @@ Invariante: el evento se emite “en vivo” **después** de persistirse en WAL 
 - DocStore vive sobre el KV (`doc:{collection}:{id}` + `docidx:{collection}:{field}:{value}`), expone `/v1/doc/*`.
 - SQLite (opcional) usa un `rusqlite::Connection` en WAL mode y expone `/v1/sql/query|exec`.
 - Ambos módulos comparten engine/config pero no el mismo WAL (SQLite mantiene su archivo independiente).
+
+### Hub híbrido (`/v1/db`)
+- El planner híbrido decide entre dos caminos reales:
+  - `sql_first`: `COUNT(*)` del filtro SQL, fetch de ids, `allowed_ids` en vector search, luego colapso e hydration.
+  - `vector_first`: vector search ampliado, colapso a documentos candidatos, post-filter SQL con `id IN (...)`, luego hydration.
+- El plan se expone solo con `include_plan=true`.
+- Los diagnósticos operativos se exponen con `include_diagnostics=true` e incluyen tiempos por etapa y tamaños de candidate sets.
 
 ## SSE
 - Endpoint: `GET /v1/stream?since=...&types=...&key_prefix=...&collection=...`

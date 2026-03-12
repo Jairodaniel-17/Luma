@@ -1,5 +1,5 @@
 use crate::api::errors::ApiError;
-use crate::api::AppState;
+use crate::api::{AppState, TenantContext};
 use axum::extract::State;
 use axum::http::Request;
 use axum::middleware::Next;
@@ -64,7 +64,14 @@ pub async fn auth_middleware(
     // 1. Check AuthStore (DB)
     if let Some(store) = &state.auth_store {
         match store.validate_key(&token).await {
-            Ok(Some(_record)) => {
+            Ok(Some(record)) => {
+                let mut req = req;
+                req.extensions_mut().insert(TenantContext {
+                    tenant_id: record.tenant_id.clone(),
+                    role: record.role,
+                    permissions: record.permissions,
+                    quotas: record.quotas,
+                });
                 return Ok(next.run(req).await);
             }
             Ok(None) => {
@@ -83,6 +90,13 @@ pub async fn auth_middleware(
 
     // 2. Check Static Config
     if token == state.config.api_key {
+        let mut req = req;
+        req.extensions_mut().insert(TenantContext {
+            tenant_id: None,
+            role: "admin".to_string(),
+            permissions: serde_json::json!({"allow":"*"}),
+            quotas: serde_json::json!({"storage_bytes":"unlimited","qps":"unlimited"}),
+        });
         return Ok(next.run(req).await);
     }
 

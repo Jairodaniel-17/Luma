@@ -1,6 +1,7 @@
 use crate::engine::events::EventRecord;
 use crate::engine::EventBus;
 use crate::vector::VectorStore;
+use crc32fast::Hasher;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -54,9 +55,28 @@ struct Inner {
     sync_mode: WalSyncMode,
 }
 
+const WAL_RECORD_VERSION: u8 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub last_offset: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ReplayReport {
+    pub applied: usize,
+    pub duplicates_skipped: usize,
+    pub corrupted_records: usize,
+    pub gap_detected: bool,
+    pub highest_offset_seen: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WalEnvelope {
+    version: u8,
+    offset: u64,
+    crc32: u32,
+    event: EventRecord,
 }
 
 impl Persist {
@@ -105,7 +125,7 @@ impl Persist {
     /// In PerWrite mode: fsync immediately.
     /// In Group mode: buffer until batch_size or flush_interval_ms.
     pub fn append_event(&self, event: &EventRecord) -> std::io::Result<()> {
-        let line = serde_json::to_vec(event)?;
+        let line = encode_wal_record(event)?;
 
         if let Some(buf) = &self.0.group_buffer {
             let should_flush = {
@@ -247,31 +267,13 @@ impl Persist {
         state: &crate::engine::state::StateStore,
         vectors: &VectorStore,
         events: &EventBus,
-    ) -> std::io::Result<usize> {
-        let mut applied = 0usize;
-
-        for path in list_segments_sorted(&self.0.dir) {
-            let f = File::open(path)?;
-            let reader = BufReader::new(f);
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let ev: EventRecord = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if ev.offset <= since_offset {
-                    continue;
-                }
-                apply_event(state, vectors, &ev);
-                events.set_next_offset(ev.offset.saturating_add(1));
-                applied += 1;
-            }
-        }
-
-        Ok(applied)
+    ) -> std::io::Result<ReplayReport> {
+        self.for_each_decoded_event_since(since_offset, |ev, report| {
+            apply_event(state, vectors, &ev);
+            events.set_next_offset(ev.offset.saturating_add(1));
+            report.applied += 1;
+            Ok(true)
+        })
     }
 
     pub fn list_segments(&self) -> Vec<PathBuf> {
@@ -282,27 +284,35 @@ impl Persist {
     where
         F: FnMut(EventRecord) -> bool,
     {
-        for path in list_segments_sorted(&self.0.dir) {
-            let file = File::open(path)?;
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let ev: EventRecord = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if ev.offset <= since_offset {
-                    continue;
-                }
-                if !f(ev) {
-                    return Ok(());
-                }
-            }
-        }
+        let _ = self.for_each_decoded_event_since(since_offset, |ev, _| Ok(f(ev)))?;
         Ok(())
+    }
+
+    pub fn try_for_each_event_since<F>(
+        &self,
+        since_offset: u64,
+        mut f: F,
+    ) -> std::io::Result<ReplayReport>
+    where
+        F: FnMut(EventRecord) -> std::io::Result<bool>,
+    {
+        self.for_each_decoded_event_since(since_offset, |ev, _| f(ev))
+    }
+
+    pub fn replay_report(&self, since_offset: u64) -> std::io::Result<ReplayReport> {
+        self.for_each_decoded_event_since(since_offset, |_ev, report| {
+            report.applied += 1;
+            Ok(true)
+        })
+    }
+
+    pub fn earliest_persisted_offset(&self) -> std::io::Result<Option<u64>> {
+        let mut earliest = None;
+        let _ = self.for_each_decoded_event_since(0, |ev, _| {
+            earliest = Some(ev.offset);
+            Ok(false)
+        })?;
+        Ok(earliest)
     }
 
     fn segment_path(&self, seg: u64) -> PathBuf {
@@ -324,6 +334,47 @@ impl Persist {
             }
         }
         Ok(())
+    }
+
+    fn for_each_decoded_event_since<F>(
+        &self,
+        since_offset: u64,
+        mut f: F,
+    ) -> std::io::Result<ReplayReport>
+    where
+        F: FnMut(EventRecord, &mut ReplayReport) -> std::io::Result<bool>,
+    {
+        let mut report = ReplayReport::default();
+        let mut last_seen_offset = since_offset;
+
+        for path in list_segments_sorted(&self.0.dir) {
+            let file = File::open(path)?;
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Some(ev) = decode_wal_record(&line) else {
+                    report.corrupted_records = report.corrupted_records.saturating_add(1);
+                    break;
+                };
+                report.highest_offset_seen = report.highest_offset_seen.max(ev.offset);
+                if ev.offset <= since_offset {
+                    report.duplicates_skipped = report.duplicates_skipped.saturating_add(1);
+                    continue;
+                }
+                if report.applied > 0 && ev.offset != last_seen_offset.saturating_add(1) {
+                    report.gap_detected = true;
+                }
+                last_seen_offset = ev.offset;
+                if !f(ev, &mut report)? {
+                    return Ok(report);
+                }
+            }
+        }
+
+        Ok(report)
     }
 }
 
@@ -349,6 +400,13 @@ fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore,
             if let Some(key) = ev.data.get("key").and_then(|v| v.as_str()) {
                 let _ = state.delete(key);
             }
+        }
+        "vector_collection_created"
+        | "vector_added"
+        | "vector_upserted"
+        | "vector_updated"
+        | "vector_deleted" => {
+            let _ = _vectors.apply_event(ev);
         }
         _ => {}
     }
@@ -397,9 +455,38 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn encode_wal_record(event: &EventRecord) -> std::io::Result<Vec<u8>> {
+    let payload = serde_json::to_vec(event)?;
+    let mut hasher = Hasher::new();
+    hasher.update(&payload);
+    let envelope = WalEnvelope {
+        version: WAL_RECORD_VERSION,
+        offset: event.offset,
+        crc32: hasher.finalize(),
+        event: event.clone(),
+    };
+    serde_json::to_vec(&envelope).map_err(std::io::Error::other)
+}
+
+fn decode_wal_record(line: &str) -> Option<EventRecord> {
+    if let Ok(envelope) = serde_json::from_str::<WalEnvelope>(line) {
+        if envelope.version != WAL_RECORD_VERSION || envelope.offset != envelope.event.offset {
+            return None;
+        }
+        let payload = serde_json::to_vec(&envelope.event).ok()?;
+        let mut hasher = Hasher::new();
+        hasher.update(&payload);
+        if hasher.finalize() != envelope.crc32 {
+            return None;
+        }
+        return Some(envelope.event);
+    }
+    serde_json::from_str::<EventRecord>(line).ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Persist, Snapshot, WalSyncMode};
+    use super::{decode_wal_record, encode_wal_record, Persist, Snapshot, WalSyncMode};
     use crate::engine::events::EventRecord;
     use tempfile::tempdir;
 
@@ -463,5 +550,13 @@ mod tests {
         assert!(first_segment.contains("\"offset\":7"));
         assert!(dir.path().join("snapshot.json").exists());
         assert!(dir.path().join("events-000002.log").exists());
+    }
+
+    #[test]
+    fn wal_record_checksum_detects_tampering() {
+        let encoded = encode_wal_record(&sample_event(9)).unwrap();
+        let mut line = String::from_utf8(encoded).unwrap();
+        line = line.replace("\"offset\":9", "\"offset\":99");
+        assert!(decode_wal_record(&line).is_none());
     }
 }

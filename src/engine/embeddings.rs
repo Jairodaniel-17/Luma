@@ -4,13 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
-type EmbedCache = std::sync::Arc<Mutex<LruCache<u64, Vec<CacheEntry>>>>;
-
-#[derive(Clone)]
-struct CacheEntry {
-    text: String,
-    embedding: Vec<f32>,
-}
+type EmbedCache = std::sync::Arc<Mutex<LruCache<String, Vec<f32>>>>;
 
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
@@ -29,27 +23,15 @@ pub enum EmbeddingProvider {
     None,
 }
 
-/// FNV-1a 64-bit hash — fast, no external dependency.
-fn fnv1a_hash(text: &str) -> u64 {
-    const FNV_PRIME: u64 = 1_099_511_628_211;
-    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
-    let mut hash = FNV_OFFSET;
-    for byte in text.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
 #[derive(Clone)]
 pub struct EmbeddingClient {
     provider: EmbeddingProvider,
     client: reqwest::Client,
-    /// Optional LRU cache: key = FNV-1a hash of input text.
-    /// `None` means caching is disabled.
+    /// Optional LRU cache: key = provider/model/dim/text namespace.
     cache: Option<EmbedCache>,
     /// Metrics handle for tracking cache hits/misses (optional).
     metrics: Option<std::sync::Arc<crate::engine::metrics::Metrics>>,
+    max_inflight_requests: usize,
 }
 
 impl Default for EmbeddingClient {
@@ -59,6 +41,7 @@ impl Default for EmbeddingClient {
             client: reqwest::Client::new(),
             cache: None,
             metrics: None,
+            max_inflight_requests: 16,
         }
     }
 }
@@ -70,36 +53,43 @@ impl EmbeddingClient {
             client: reqwest::Client::new(),
             cache: None,
             metrics: None,
+            max_inflight_requests: 16,
         }
     }
 
-    /// Create a client with an LRU embedding cache.
-    /// `cache_size = 0` disables the cache.
-    pub fn with_cache(
+    pub fn with_limits(
         provider: EmbeddingProvider,
         cache_size: usize,
+        max_inflight_requests: usize,
         metrics: Option<std::sync::Arc<crate::engine::metrics::Metrics>>,
     ) -> Self {
-        let cache: Option<EmbedCache> = if cache_size > 0 {
-            NonZeroUsize::new(cache_size).map(|n| std::sync::Arc::new(Mutex::new(LruCache::new(n))))
-        } else {
-            None
-        };
+        let cache = NonZeroUsize::new(cache_size)
+            .map(|n| std::sync::Arc::new(Mutex::new(LruCache::new(n))));
         Self {
             provider,
             client: reqwest::Client::new(),
             cache,
             metrics,
+            max_inflight_requests: max_inflight_requests.max(1),
         }
+    }
+
+    /// Backward-compatible helper for tests/callers that only care about cache size.
+    pub fn with_cache(
+        provider: EmbeddingProvider,
+        cache_size: usize,
+        metrics: Option<std::sync::Arc<crate::engine::metrics::Metrics>>,
+    ) -> Self {
+        Self::with_limits(provider, cache_size, 16, metrics)
     }
 
     /// Embed a single text string. Uses the LRU cache when enabled.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         if let Some(cache) = &self.cache {
-            let key = fnv1a_hash(text);
+            let key = self.cache_key(text);
             {
                 let mut guard = cache.lock().unwrap();
-                if let Some(cached) = cache_lookup(&mut guard, key, text) {
+                if let Some(cached) = cache_lookup(&mut guard, &key) {
                     if let Some(m) = &self.metrics {
                         m.inc_embed_cache_hit();
                     }
@@ -110,7 +100,7 @@ impl EmbeddingClient {
                 m.inc_embed_cache_miss();
             }
             let vec = self.embed_uncached(text).await?;
-            cache_store(&mut cache.lock().unwrap(), key, text, vec.clone());
+            cache_store(&mut cache.lock().unwrap(), key, vec.clone());
             return Ok(vec);
         }
         self.embed_uncached(text).await
@@ -131,8 +121,8 @@ impl EmbeddingClient {
             {
                 let mut guard = cache.lock().unwrap();
                 for (i, text) in texts.iter().enumerate() {
-                    let key = fnv1a_hash(text);
-                    if let Some(cached) = cache_lookup(&mut guard, key, text) {
+                    let key = self.cache_key(text);
+                    if let Some(cached) = cache_lookup(&mut guard, &key) {
                         if let Some(m) = &self.metrics {
                             m.inc_embed_cache_hit();
                         }
@@ -166,8 +156,8 @@ impl EmbeddingClient {
                     if let Some(m) = &self.metrics {
                         m.inc_embed_cache_miss();
                     }
-                    let key = fnv1a_hash(&texts[idx]);
-                    cache_store(&mut guard, key, &texts[idx], vec.clone());
+                    let key = self.cache_key(&texts[idx]);
+                    cache_store(&mut guard, key, vec.clone());
                     result[idx] = Some(vec.clone());
                 }
             }
@@ -354,42 +344,44 @@ impl EmbeddingClient {
         model: &str,
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>> {
-        let futures: Vec<_> = texts
-            .iter()
-            .map(|text| self.embed_ollama(api_url, model, text))
-            .collect();
-        futures_util::future::try_join_all(futures).await
+        use futures_util::stream::{self, StreamExt, TryStreamExt};
+
+        let rows: Vec<(usize, Vec<f32>)> = stream::iter(texts.iter().cloned().enumerate())
+            .map(|(index, text)| async move {
+                self.embed_ollama(api_url, model, &text)
+                    .await
+                    .map(|embedding| (index, embedding))
+            })
+            .buffer_unordered(self.max_inflight_requests)
+            .try_collect()
+            .await?;
+        reorder_openai_embeddings(rows, texts.len())
+    }
+
+    fn cache_key(&self, text: &str) -> String {
+        format!("{}::{text}", self.provider_cache_namespace())
+    }
+
+    fn provider_cache_namespace(&self) -> String {
+        match &self.provider {
+            EmbeddingProvider::OpenAI { api_url, model, .. } => {
+                format!("openai::{api_url}::{model}")
+            }
+            EmbeddingProvider::Ollama { api_url, model } => {
+                format!("ollama::{api_url}::{model}")
+            }
+            EmbeddingProvider::Mock { dim } => format!("mock::{dim}"),
+            EmbeddingProvider::None => "none".to_string(),
+        }
     }
 }
 
-fn cache_lookup(
-    cache: &mut LruCache<u64, Vec<CacheEntry>>,
-    key: u64,
-    text: &str,
-) -> Option<Vec<f32>> {
-    let entries = cache.get(&key)?;
-    entries
-        .iter()
-        .find(|entry| entry.text == text)
-        .map(|entry| entry.embedding.clone())
+fn cache_lookup(cache: &mut LruCache<String, Vec<f32>>, key: &str) -> Option<Vec<f32>> {
+    cache.get(key).cloned()
 }
 
-fn cache_store(
-    cache: &mut LruCache<u64, Vec<CacheEntry>>,
-    key: u64,
-    text: &str,
-    embedding: Vec<f32>,
-) {
-    let mut entries = cache.pop(&key).unwrap_or_default();
-    if let Some(existing) = entries.iter_mut().find(|entry| entry.text == text) {
-        existing.embedding = embedding;
-    } else {
-        entries.push(CacheEntry {
-            text: text.to_string(),
-            embedding,
-        });
-    }
-    cache.put(key, entries);
+fn cache_store(cache: &mut LruCache<String, Vec<f32>>, key: String, embedding: Vec<f32>) {
+    cache.put(key, embedding);
 }
 
 fn reorder_openai_embeddings(

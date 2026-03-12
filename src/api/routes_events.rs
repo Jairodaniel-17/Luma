@@ -17,6 +17,7 @@ pub struct StreamQuery {
     pub types: Option<String>,
     pub key_prefix: Option<String>,
     pub collection: Option<String>,
+    pub consumer_group: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +40,7 @@ pub async fn events(
             types: q.types,
             key_prefix: q.prefix,
             collection: None,
+            consumer_group: None,
         }),
     )
     .await
@@ -49,12 +51,15 @@ pub async fn stream(
     headers: HeaderMap,
     Query(q): Query<StreamQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let since = headers
+    let mut since = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .or(q.since)
         .unwrap_or(0);
+    if let Some(group) = q.consumer_group.as_deref() {
+        since = since.max(state.engine.get_consumer_offset(group).unwrap_or(0));
+    }
 
     let key_prefix = q.key_prefix.clone();
     let collection = q.collection.clone();
@@ -62,6 +67,7 @@ pub async fn stream(
         .types
         .as_deref()
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
+    let consumer_group = q.consumer_group.clone();
 
     let metrics = state.engine.metrics();
     metrics.inc_sse_clients();
@@ -75,11 +81,24 @@ pub async fn stream(
                 self.0.dec_sse_clients();
             }
         }
-        let _guard = Guard(metrics);
+        let _guard = Guard(metrics.clone());
 
         let mut last_sent_offset = since;
 
         if let Some(persist) = persist {
+            if let Ok(Some(earliest)) = persist.earliest_persisted_offset() {
+                if since.saturating_add(1) < earliest {
+                    last_sent_offset = earliest.saturating_sub(1);
+                    metrics.inc_wal_gap();
+                    if let Some(ev) = gap_event(
+                        earliest.saturating_sub(since.saturating_add(1)),
+                        &mut last_sent_offset,
+                        earliest.saturating_sub(1),
+                    ) {
+                        yield Ok(ev);
+                    }
+                }
+            }
             let (tx, mut rx) = mpsc::unbounded_channel::<crate::engine::EventRecord>();
             let key_prefix2 = key_prefix.clone();
             let collection2 = collection.clone();
@@ -95,14 +114,33 @@ pub async fn stream(
 
             while let Some(ev) = rx.recv().await {
                 last_sent_offset = ev.offset;
+                if let Some(group) = consumer_group.as_deref() {
+                    let _ = state.engine.commit_consumer_offset(group, ev.offset);
+                }
                 yield Ok(to_sse(ev));
             }
         } else {
-            for ev in bus.replay_since(since) {
+            let (replay, gap) = bus.replay_since_with_gap(since);
+            if let Some((from_offset, to_offset)) = gap {
+                last_sent_offset = to_offset;
+                metrics.inc_wal_gap();
+                yield Ok(Event::default().event("gap").data(
+                    serde_json::json!({
+                        "from_offset": from_offset,
+                        "to_offset": to_offset,
+                        "dropped": to_offset.saturating_sub(from_offset).saturating_add(1),
+                    })
+                    .to_string(),
+                ));
+            }
+            for ev in replay {
                 if !matches_filters(&ev, types.as_ref(), key_prefix.as_deref(), collection.as_deref()) {
                     continue;
                 }
                 last_sent_offset = ev.offset;
+                if let Some(group) = consumer_group.as_deref() {
+                    let _ = state.engine.commit_consumer_offset(group, ev.offset);
+                }
                 yield Ok(to_sse(ev));
             }
         }
@@ -113,10 +151,14 @@ pub async fn stream(
                 Some(Ok(ev)) => {
                     if matches_filters(&ev, types.as_ref(), key_prefix.as_deref(), collection.as_deref()) {
                         last_sent_offset = ev.offset;
+                        if let Some(group) = consumer_group.as_deref() {
+                            let _ = state.engine.commit_consumer_offset(group, ev.offset);
+                        }
                         yield Ok(to_sse(ev));
                     }
                 }
                 Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
+                    metrics.inc_wal_gap();
                     if let Some(ev) = gap_event(n, &mut last_sent_offset, bus.last_published_offset()) {
                         yield Ok(ev);
                     }

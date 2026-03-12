@@ -39,6 +39,14 @@ pub struct AppState {
     pub hub: Arc<crate::engine::hub::LumaDatabase>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TenantContext {
+    pub tenant_id: Option<String>,
+    pub role: String,
+    pub permissions: serde_json::Value,
+    pub quotas: serde_json::Value,
+}
+
 pub fn router(
     engine: Engine,
     config: Config,
@@ -50,9 +58,9 @@ pub fn router(
     let hub = Arc::new(crate::engine::hub::LumaDatabase::new(
         Arc::new(engine.clone()),
         sqlite.clone().map(Arc::new),
-        search_engine.clone(),
         (*embeddings).clone(),
         crate::engine::chunking::ChunkingEngine::default(),
+        config.clone(),
     ));
 
     let state = AppState {
@@ -94,6 +102,11 @@ pub fn router(
         )
         .route("/v1/auth/keys/:id", delete(routes_auth::revoke_key))
         .route("/v1/state", get(routes_state::list))
+        .route("/v1/state/indexes", post(routes_state::create_index))
+        .route(
+            "/v1/state/index/:field/:value",
+            get(routes_state::query_index),
+        )
         .route("/v1/state/batch_put", post(routes_state::batch_put))
         .route("/v1/state/:key", get(routes_state::get))
         .route("/v1/state/:key", put(routes_state::put))

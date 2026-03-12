@@ -1,8 +1,10 @@
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params_from_iter, Connection, Row};
+use rusqlite::{Connection, Row};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 mod actor;
@@ -12,6 +14,13 @@ use actor::{SqliteActor, SqliteCommand};
 pub struct SqliteService {
     sender: mpsc::Sender<SqliteCommand>,
     path: PathBuf,
+    planner_stats: Arc<Mutex<HashMap<String, CachedCount>>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedCount {
+    count: usize,
+    expires_at_ms: u64,
 }
 
 impl SqliteService {
@@ -35,6 +44,7 @@ impl SqliteService {
         Ok(Self {
             sender,
             path: db_path,
+            planner_stats: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -43,29 +53,19 @@ impl SqliteService {
         sql: String,
         params: Vec<serde_json::Value>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        // Query operations still open a temporary connection locally and leverage WAL for concurrency.
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = Connection::open(&path)?;
-            conn.pragma_update(None, "journal_mode", "WAL")?;
-            conn.busy_timeout(std::time::Duration::from_secs(5))?;
-
-            let mut stmt = conn.prepare(&sql)?;
-            let columns = stmt
-                .column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>();
-            let values = json_params_to_values(params)?;
-            let mut rows = stmt.query(params_from_iter(values.iter()))?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next()? {
-                out.push(row_to_json(row, &columns)?);
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!(err))?
+        let (respond_to, receiver) = oneshot::channel();
+        let values = json_params_to_values(params)?;
+        let msg = SqliteCommand::Query {
+            sql,
+            params: values,
+            respond_to,
+        };
+        if self.sender.send(msg).await.is_err() {
+            return Err(anyhow::anyhow!("sqlite actor channel closed"));
+        }
+        receiver
+            .await
+            .map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
     }
 
     pub async fn execute(
@@ -93,6 +93,38 @@ impl SqliteService {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub async fn estimate_count_cached(
+        &self,
+        cache_key: String,
+        sql: String,
+        ttl_ms: u64,
+    ) -> anyhow::Result<usize> {
+        let now = now_ms();
+        if let Some(cached) = self.planner_stats.lock().unwrap().get(&cache_key).copied() {
+            if cached.expires_at_ms > now {
+                return Ok(cached.count);
+            }
+        }
+        let rows = self.query(sql, vec![]).await?;
+        let count = rows
+            .first()
+            .and_then(|row| row.get("count"))
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_i64().map(|v| v.max(0) as u64))
+            })
+            .unwrap_or(0) as usize;
+        self.planner_stats.lock().unwrap().insert(
+            cache_key,
+            CachedCount {
+                count,
+                expires_at_ms: now.saturating_add(ttl_ms.max(1)),
+            },
+        );
+        Ok(count)
     }
 }
 
@@ -143,4 +175,11 @@ fn sqlite_value_to_json(value: ValueRef<'_>) -> anyhow::Result<serde_json::Value
         ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).to_string()),
         ValueRef::Blob(b) => serde_json::Value::String(STANDARD_NO_PAD.encode(b)),
     })
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

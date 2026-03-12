@@ -1,15 +1,17 @@
 use crate::api::errors::ApiError;
-use crate::api::AppState;
-use axum::extract::{Path, State};
+use crate::api::{AppState, TenantContext};
+use axum::extract::{Extension, Path, State};
 use axum::Json;
 use serde_json::Value;
 use uuid::Uuid;
 
 pub async fn ingest(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
     Path(namespace): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    let scoped_namespace = scope_namespace(&tenant, &namespace);
     let text = payload
         .get("text")
         .and_then(|v| v.as_str())
@@ -31,7 +33,7 @@ pub async fn ingest(
 
     let metadata = payload.get("metadata").cloned();
 
-    state.hub.ingest_document(&namespace, &generated_id, text, payload.clone(), metadata)
+    state.hub.ingest_document(&scoped_namespace, &generated_id, text, payload.clone(), metadata)
         .await
         .map_err(|e| {
             if e.to_string().contains("I/O") || e.to_string().contains("disk") {
@@ -50,15 +52,18 @@ pub async fn ingest(
     Ok(Json(serde_json::json!({
         "status": "success",
         "doc_id": generated_id,
-        "namespace": namespace
+        "namespace": namespace,
+        "tenant": tenant.tenant_id
     })))
 }
 
 pub async fn search(
     State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
     Path(namespace): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    let scoped_namespace = scope_namespace(&tenant, &namespace);
     let query = payload
         .get("query")
         .and_then(|v| v.as_str())
@@ -72,10 +77,18 @@ pub async fn search(
 
     let sql_filter = payload.get("sql_filter").and_then(|v| v.as_str());
     let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let include_plan = payload
+        .get("include_plan")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let include_diagnostics = payload
+        .get("include_diagnostics")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    let results = state
+    let outcome = state
         .hub
-        .search(&namespace, query, sql_filter, limit)
+        .search_with_plan(&scoped_namespace, query, sql_filter, limit)
         .await
         .map_err(|e| {
             ApiError::new(
@@ -85,7 +98,27 @@ pub async fn search(
             )
         })?;
 
-    Ok(Json(serde_json::json!({
+    let crate::engine::hub::SearchOutcome {
+        results,
+        plan,
+        diagnostics,
+    } = outcome;
+    let mut body = serde_json::json!({
         "results": results
-    })))
+    });
+    if include_plan {
+        body["_plan"] = serde_json::to_value(plan).unwrap_or(serde_json::Value::Null);
+    }
+    if include_diagnostics {
+        body["_diagnostics"] = serde_json::to_value(diagnostics).unwrap_or(serde_json::Value::Null);
+    }
+
+    Ok(Json(body))
+}
+
+fn scope_namespace(tenant: &TenantContext, namespace: &str) -> String {
+    match tenant.tenant_id.as_deref() {
+        Some(tenant_id) => format!("tenant__{}__{}", tenant_id, namespace),
+        None => namespace.to_string(),
+    }
 }

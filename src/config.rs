@@ -53,10 +53,23 @@ pub struct Config {
     pub embedding_dim: usize,
     /// PR2: LRU embedding cache size (0 = disabled). Default 10_000.
     pub embedding_cache_size: usize,
+    /// Maximum concurrent provider calls when native batching is unavailable.
+    pub embedding_max_inflight_requests: usize,
+    pub hub_ingest_max_inflight: usize,
+    pub hub_hydration_max_inflight: usize,
+    pub hub_sql_prefilter_max_candidates: usize,
+    pub hub_sql_prefilter_selectivity_threshold: f32,
+    pub hub_vector_first_candidate_multiplier: usize,
     /// PR4: HNSW M parameter (connections per node). Default 16.
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Default 200.
     pub hnsw_ef_construction: usize,
+    /// Background HNSW segment compaction is opt-in because it trades write latency for cleanup.
+    pub hnsw_segment_compaction_enabled: bool,
+    /// Tombstone ratio threshold for in-memory HNSW segment rebuilds.
+    pub hnsw_segment_compaction_threshold: f32,
+    /// Interval for checking HNSW compaction candidates.
+    pub hnsw_segment_compaction_interval_secs: u64,
     /// PR5: WAL sync mode: "per_write" (fsync each write) or "group" (buffered flush).
     pub wal_sync_mode: String,
     /// PR5: Group commit flush interval in ms. Default 10.
@@ -115,8 +128,17 @@ impl Default for Config {
             embedding_api_key: "".to_string(),
             embedding_dim: 384,
             embedding_cache_size: 10_000,
+            embedding_max_inflight_requests: 16,
+            hub_ingest_max_inflight: 32,
+            hub_hydration_max_inflight: 32,
+            hub_sql_prefilter_max_candidates: 20_000,
+            hub_sql_prefilter_selectivity_threshold: 0.2,
+            hub_vector_first_candidate_multiplier: 8,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
+            hnsw_segment_compaction_enabled: false,
+            hnsw_segment_compaction_threshold: 0.35,
+            hnsw_segment_compaction_interval_secs: 300,
             wal_sync_mode: "per_write".to_string(),
             wal_flush_interval_ms: 10,
             wal_batch_size: 64,
@@ -304,6 +326,32 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10_000);
+        let embedding_max_inflight_requests = std::env::var("EMBEDDING_MAX_INFLIGHT_REQUESTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16);
+        let hub_ingest_max_inflight = std::env::var("HUB_INGEST_MAX_INFLIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+        let hub_hydration_max_inflight = std::env::var("HUB_HYDRATION_MAX_INFLIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+        let hub_sql_prefilter_max_candidates = std::env::var("HUB_SQL_PREFILTER_MAX_CANDIDATES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20_000);
+        let hub_sql_prefilter_selectivity_threshold =
+            std::env::var("HUB_SQL_PREFILTER_SELECTIVITY_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2);
+        let hub_vector_first_candidate_multiplier =
+            std::env::var("HUB_VECTOR_FIRST_CANDIDATE_MULTIPLIER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8);
         let hnsw_m = std::env::var("HNSW_M")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -312,6 +360,17 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(200);
+        let hnsw_segment_compaction_enabled =
+            parse_env_bool("HNSW_SEGMENT_COMPACTION_ENABLED", false);
+        let hnsw_segment_compaction_threshold = std::env::var("HNSW_SEGMENT_COMPACTION_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.35);
+        let hnsw_segment_compaction_interval_secs =
+            std::env::var("HNSW_SEGMENT_COMPACTION_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300);
         let wal_sync_mode =
             std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "per_write".to_string());
         let wal_flush_interval_ms = std::env::var("WAL_FLUSH_INTERVAL_MS")
@@ -371,8 +430,17 @@ impl Config {
             embedding_api_key,
             embedding_dim,
             embedding_cache_size,
+            embedding_max_inflight_requests,
+            hub_ingest_max_inflight,
+            hub_hydration_max_inflight,
+            hub_sql_prefilter_max_candidates,
+            hub_sql_prefilter_selectivity_threshold,
+            hub_vector_first_candidate_multiplier,
             hnsw_m,
             hnsw_ef_construction,
+            hnsw_segment_compaction_enabled,
+            hnsw_segment_compaction_threshold,
+            hnsw_segment_compaction_interval_secs,
             wal_sync_mode,
             wal_flush_interval_ms,
             wal_batch_size,

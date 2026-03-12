@@ -147,9 +147,10 @@ fn init_embeddings(
         _ => EmbeddingProvider::None,
     };
 
-    Arc::new(EmbeddingClient::with_cache(
+    Arc::new(EmbeddingClient::with_limits(
         provider,
         config.embedding_cache_size,
+        config.embedding_max_inflight_requests,
         Some(metrics),
     ))
 }
