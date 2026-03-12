@@ -1,10 +1,16 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
-type EmbedCache = std::sync::Arc<Mutex<LruCache<u64, Vec<f32>>>>;
+type EmbedCache = std::sync::Arc<Mutex<LruCache<u64, Vec<CacheEntry>>>>;
+
+#[derive(Clone)]
+struct CacheEntry {
+    text: String,
+    embedding: Vec<f32>,
+}
 
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
@@ -93,18 +99,18 @@ impl EmbeddingClient {
             let key = fnv1a_hash(text);
             {
                 let mut guard = cache.lock().unwrap();
-                if let Some(cached) = guard.get(&key) {
+                if let Some(cached) = cache_lookup(&mut guard, key, text) {
                     if let Some(m) = &self.metrics {
                         m.inc_embed_cache_hit();
                     }
-                    return Ok(cached.clone());
+                    return Ok(cached);
                 }
             }
             if let Some(m) = &self.metrics {
                 m.inc_embed_cache_miss();
             }
             let vec = self.embed_uncached(text).await?;
-            cache.lock().unwrap().put(key, vec.clone());
+            cache_store(&mut cache.lock().unwrap(), key, text, vec.clone());
             return Ok(vec);
         }
         self.embed_uncached(text).await
@@ -126,11 +132,11 @@ impl EmbeddingClient {
                 let mut guard = cache.lock().unwrap();
                 for (i, text) in texts.iter().enumerate() {
                     let key = fnv1a_hash(text);
-                    if let Some(cached) = guard.get(&key) {
+                    if let Some(cached) = cache_lookup(&mut guard, key, text) {
                         if let Some(m) = &self.metrics {
                             m.inc_embed_cache_hit();
                         }
-                        result[i] = Some(cached.clone());
+                        result[i] = Some(cached);
                     } else {
                         missing_indices.push(i);
                     }
@@ -145,6 +151,13 @@ impl EmbeddingClient {
             let missing_texts: Vec<String> =
                 missing_indices.iter().map(|&i| texts[i].clone()).collect();
             let missing_vecs = self.embed_batch_uncached(&missing_texts).await?;
+            if missing_vecs.len() != missing_indices.len() {
+                return Err(anyhow!(
+                    "Batch embedding response size mismatch: expected {}, got {}",
+                    missing_indices.len(),
+                    missing_vecs.len()
+                ));
+            }
 
             // Update cache and fill result
             {
@@ -154,12 +167,15 @@ impl EmbeddingClient {
                         m.inc_embed_cache_miss();
                     }
                     let key = fnv1a_hash(&texts[idx]);
-                    guard.put(key, vec.clone());
+                    cache_store(&mut guard, key, &texts[idx], vec.clone());
                     result[idx] = Some(vec.clone());
                 }
             }
 
-            return Ok(result.into_iter().map(|v| v.unwrap()).collect());
+            return result
+                .into_iter()
+                .map(|v| v.ok_or_else(|| anyhow!("Missing embedding result after batch merge")))
+                .collect();
         }
 
         self.embed_batch_uncached(texts).await
@@ -289,13 +305,16 @@ impl EmbeddingClient {
             index: usize,
         }
 
-        let mut parsed: Resp = resp.json().await?;
+        let parsed: Resp = resp.json().await?;
         if parsed.data.is_empty() {
-            return Err(anyhow::anyhow!("No embeddings returned from OpenAI"));
+            return Err(anyhow!("No embeddings returned from OpenAI"));
         }
-        // OpenAI returns data sorted by index — ensure correct ordering
-        parsed.data.sort_by_key(|d| d.index);
-        Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
+        let rows = parsed
+            .data
+            .into_iter()
+            .map(|row| (row.index, row.embedding))
+            .collect();
+        reorder_openai_embeddings(rows, texts.len())
     }
 
     async fn embed_ollama(&self, api_url: &str, model: &str, text: &str) -> Result<Vec<f32>> {
@@ -340,5 +359,106 @@ impl EmbeddingClient {
             .map(|text| self.embed_ollama(api_url, model, text))
             .collect();
         futures_util::future::try_join_all(futures).await
+    }
+}
+
+fn cache_lookup(
+    cache: &mut LruCache<u64, Vec<CacheEntry>>,
+    key: u64,
+    text: &str,
+) -> Option<Vec<f32>> {
+    let entries = cache.get(&key)?;
+    entries
+        .iter()
+        .find(|entry| entry.text == text)
+        .map(|entry| entry.embedding.clone())
+}
+
+fn cache_store(
+    cache: &mut LruCache<u64, Vec<CacheEntry>>,
+    key: u64,
+    text: &str,
+    embedding: Vec<f32>,
+) {
+    let mut entries = cache.pop(&key).unwrap_or_default();
+    if let Some(existing) = entries.iter_mut().find(|entry| entry.text == text) {
+        existing.embedding = embedding;
+    } else {
+        entries.push(CacheEntry {
+            text: text.to_string(),
+            embedding,
+        });
+    }
+    cache.put(key, entries);
+}
+
+fn reorder_openai_embeddings(
+    data: Vec<(usize, Vec<f32>)>,
+    expected_len: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if data.len() != expected_len {
+        return Err(anyhow!(
+            "OpenAI batch response size mismatch: expected {}, got {}",
+            expected_len,
+            data.len()
+        ));
+    }
+
+    let mut ordered = vec![None; expected_len];
+    for (index, embedding) in data {
+        if index >= expected_len {
+            return Err(anyhow!(
+                "OpenAI batch response index {} out of range for {} inputs",
+                index,
+                expected_len
+            ));
+        }
+        if ordered[index].is_some() {
+            return Err(anyhow!(
+                "OpenAI batch response contains duplicate index {}",
+                index
+            ));
+        }
+        ordered[index] = Some(embedding);
+    }
+
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            item.ok_or_else(|| anyhow!("OpenAI batch response missing index {}", idx))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reorder_openai_embeddings, EmbeddingClient, EmbeddingProvider};
+
+    #[test]
+    fn reorder_openai_embeddings_restores_order() {
+        let data = vec![(1, vec![2.0]), (0, vec![1.0])];
+
+        let ordered = reorder_openai_embeddings(data, 2).unwrap();
+        assert_eq!(ordered, vec![vec![1.0], vec![2.0]]);
+    }
+
+    #[test]
+    fn reorder_openai_embeddings_rejects_missing_rows() {
+        let err = reorder_openai_embeddings(vec![(0, vec![1.0])], 2).unwrap_err();
+
+        assert!(err.to_string().contains("size mismatch"));
+    }
+
+    #[tokio::test]
+    async fn embed_batch_with_cache_size_zero_still_returns_all_vectors() {
+        let client = EmbeddingClient::with_cache(EmbeddingProvider::Mock { dim: 4 }, 0, None);
+        let texts = vec!["alpha".to_string(), "beta".to_string(), "alpha".to_string()];
+
+        let vectors = client.embed_batch(&texts).await.unwrap();
+
+        assert_eq!(vectors.len(), 3);
+        assert_eq!(vectors[0], vectors[2]);
+        assert_ne!(vectors[0], vectors[1]);
     }
 }
