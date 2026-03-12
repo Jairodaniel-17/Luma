@@ -4,7 +4,7 @@ pub mod embeddings;
 mod events;
 pub mod hub;
 pub mod meta;
-mod metrics;
+pub mod metrics;
 pub mod parser;
 mod persist;
 mod state;
@@ -62,10 +62,11 @@ impl Engine {
 
         let persist = match &config.data_dir {
             Some(dir) => Some(
-                persist::Persist::new(
+                persist::Persist::new_with_mode(
                     dir,
                     config.wal_segment_max_bytes,
                     config.wal_retention_segments,
+                    persist::WalSyncMode::from_config(&config),
                 )
                 .context("init persistence")?,
             ),
@@ -104,6 +105,7 @@ impl Engine {
             tracing::warn!(error = %err, "startup ttl expire failed");
         }
         engine.start_ttl_task_if_runtime();
+        engine.start_hnsw_compaction_task_if_runtime();
 
         Ok(engine)
     }
@@ -113,7 +115,20 @@ impl Engine {
     }
 
     pub fn metrics_text(&self) -> String {
-        self.0.metrics.render()
+        let collections = self.0.vectors.list_collections();
+        let active_collections = collections.len() as u64;
+        let total_vectors: u64 = collections.iter().map(|c| c.live_count as u64).sum();
+        let memory_rss_bytes = {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_processes();
+            let pid = sysinfo::get_current_pid().ok();
+            pid.and_then(|p| sys.process(p))
+                .map(|p| p.memory())
+                .unwrap_or(0)
+        };
+        self.0
+            .metrics
+            .render(active_collections, total_vectors, memory_rss_bytes)
     }
 
     pub fn health(&self) -> &'static str {
@@ -262,6 +277,45 @@ impl Engine {
                     }
                     _ = shutdown.cancelled() => {
                         tracing::info!("ttl task stopping");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// PR6: Background task that periodically compacts HNSW segments with high tombstone ratios.
+    fn start_hnsw_compaction_task_if_runtime(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        let shutdown = self.0.shutdown.clone();
+        let threshold = self.0.config.compaction_trigger_tombstone_ratio;
+        tokio::spawn(async move {
+            // Check every 60 seconds
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        let engine = Engine(inner);
+                        let res = tokio::task::spawn_blocking(move || {
+                            engine.0.vectors.compact_hnsw_segments(threshold)
+                        })
+                        .await;
+                        match res {
+                            Ok(compacted) if !compacted.is_empty() => {
+                                tracing::info!(collections = ?compacted, "HNSW segment compaction completed");
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                tracing::warn!(error = %err, "HNSW compaction task failed");
+                            }
+                        }
+                    }
+                    _ = shutdown.cancelled() => {
+                        tracing::info!("HNSW compaction task stopping");
                         break;
                     }
                 }
