@@ -29,14 +29,6 @@ struct HydratedResult {
     score: f32,
     snippets: Vec<String>,
     document: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    _plan: Option<QueryPlan>,
-}
-
-#[derive(serde::Serialize)]
-struct QueryPlan {
-    strategy: &'static str,
-    reason: &'static str,
 }
 
 impl LumaDatabase {
@@ -235,7 +227,7 @@ impl LumaDatabase {
             .unwrap_or(0);
 
         let has_sql_filter = sql_filter.is_some() && self.sqlite.is_some();
-        let (strategy, reason) = choose_strategy(limit, collection_size, has_sql_filter);
+        let (strategy, _reason) = choose_strategy(limit, collection_size, has_sql_filter);
 
         let mut allowed_ids: Option<std::collections::HashSet<String>> = None;
 
@@ -324,7 +316,6 @@ impl LumaDatabase {
                             score: hit.score,
                             snippets: Vec::new(),
                             document: None,
-                            _plan: Some(QueryPlan { strategy, reason }),
                         });
 
                     if hit.score > entry.score {
@@ -390,4 +381,25 @@ fn choose_strategy(
         }
     }
     ("sql_first", "has_filter")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_strategy;
+
+    #[test]
+    fn choose_strategy_without_filter_stays_vector_first() {
+        assert_eq!(
+            choose_strategy(10, 1_000, false),
+            ("vector_first", "no_sql_filter")
+        );
+    }
+
+    #[test]
+    fn choose_strategy_large_filtered_collection_prefers_sql_first() {
+        assert_eq!(
+            choose_strategy(10, 150_000, true),
+            ("sql_first", "large_collection_with_filter")
+        );
+    }
 }
