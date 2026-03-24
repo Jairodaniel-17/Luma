@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 mod actor;
+pub mod memory_schema;
 use actor::{SqliteActor, SqliteCommand};
 
 #[derive(Clone)]
