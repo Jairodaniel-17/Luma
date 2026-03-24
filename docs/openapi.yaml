@@ -42,6 +42,8 @@ tags:
 - name: LumaDatabase
   description: High-level unified orchestrator (Nivel 2) for complex RAG flows, chunking,
     and multi-engine coordination.
+- name: NS-Mem
+  description: Memory layer for episodic, semantic, procedural and working-memory flows.
 components:
   securitySchemes:
     bearerAuth:
@@ -587,6 +589,393 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/HighLevelSearchResult'
+    MemoryKind:
+      type: string
+      enum:
+      - episodic
+      - semantic
+      - procedural
+      - working
+    MemoryStatus:
+      type: string
+      enum:
+      - draft
+      - active
+      - archived
+    MemoryQueryMode:
+      type: string
+      enum:
+      - auto
+      - recall
+      - timeline
+      - next_step
+      - constraint_check
+    RuleCondition:
+      type: object
+      required:
+      - field
+      - op
+      - value
+      properties:
+        field:
+          type: string
+          example: actor.role
+        op:
+          type: string
+          enum:
+          - eq
+          - neq
+          - gt
+          - gte
+          - lt
+          - lte
+          - contains
+          - in
+        value: {}
+    MemoryRecord:
+      type: object
+      required:
+      - id
+      - namespace
+      - kind
+      - status
+      - content
+      - confidence
+      - source
+      - created_at_ms
+      - updated_at_ms
+      properties:
+        id:
+          type: string
+        namespace:
+          type: string
+        entity_id:
+          type: string
+          nullable: true
+        kind:
+          $ref: '#/components/schemas/MemoryKind'
+        status:
+          $ref: '#/components/schemas/MemoryStatus'
+        content:
+          type: string
+        metadata:
+          type: object
+          nullable: true
+        confidence:
+          type: number
+          format: float
+        source:
+          type: string
+        created_at_ms:
+          type: integer
+          format: uint64
+        updated_at_ms:
+          type: integer
+          format: uint64
+        expires_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
+        embedding_ref:
+          type: string
+          nullable: true
+    MemoryEvidence:
+      type: object
+      required:
+      - memory_id
+      - kind
+      - score
+      - source
+      - snippet
+      properties:
+        memory_id:
+          type: string
+        kind:
+          $ref: '#/components/schemas/MemoryKind'
+        score:
+          type: number
+          format: float
+        source:
+          type: string
+        snippet:
+          type: string
+    MemoryResult:
+      type: object
+      required:
+      - record
+      properties:
+        record:
+          $ref: '#/components/schemas/MemoryRecord'
+        score:
+          type: number
+          format: float
+          nullable: true
+    ProcedureNode:
+      type: object
+      required:
+      - node_id
+      - kind
+      - label
+      properties:
+        node_id:
+          type: string
+        kind:
+          type: string
+          enum:
+          - start
+          - action
+          - decision
+          - goal
+        label:
+          type: string
+        payload:
+          type: object
+          nullable: true
+    ProcedureEdge:
+      type: object
+      required:
+      - from_node_id
+      - to_node_id
+      properties:
+        from_node_id:
+          type: string
+        to_node_id:
+          type: string
+        priority:
+          type: integer
+          default: 0
+        condition:
+          allOf:
+          - $ref: '#/components/schemas/RuleCondition'
+          nullable: true
+    ProcedureConstraint:
+      type: object
+      required:
+      - constraint_id
+      - condition
+      properties:
+        constraint_id:
+          type: string
+        target_node_id:
+          type: string
+          nullable: true
+        condition:
+          $ref: '#/components/schemas/RuleCondition'
+        message:
+          type: string
+          nullable: true
+    IngestEventRequest:
+      type: object
+      required:
+      - text
+      properties:
+        id:
+          type: string
+          nullable: true
+        entity_id:
+          type: string
+          nullable: true
+        text:
+          type: string
+        metadata:
+          type: object
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        session_id:
+          type: string
+          nullable: true
+        expires_at_ms:
+          type: integer
+          format: uint64
+          nullable: true
+    UpsertFactRequest:
+      type: object
+      required:
+      - content
+      properties:
+        id:
+          type: string
+          nullable: true
+        entity_id:
+          type: string
+          nullable: true
+        fact_key:
+          type: string
+          nullable: true
+        content:
+          type: string
+        metadata:
+          type: object
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        confidence:
+          type: number
+          format: float
+          nullable: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/MemoryStatus'
+          nullable: true
+    UpsertProcedureRequest:
+      type: object
+      required:
+      - procedure_id
+      - name
+      - nodes
+      - edges
+      properties:
+        procedure_id:
+          type: string
+        name:
+          type: string
+        version:
+          type: integer
+          format: int64
+          nullable: true
+        status:
+          type: string
+          enum:
+          - draft
+          - active
+          - archived
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        confidence:
+          type: number
+          format: float
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProcedureNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProcedureEdge'
+        constraints:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProcedureConstraint'
+    MemoryQueryRequest:
+      type: object
+      required:
+      - query
+      properties:
+        query:
+          type: string
+        entity_id:
+          type: string
+          nullable: true
+        session_id:
+          type: string
+          nullable: true
+        procedure_id:
+          type: string
+          nullable: true
+        current_node_id:
+          type: string
+          nullable: true
+        context:
+          type: object
+          nullable: true
+        mode:
+          allOf:
+          - $ref: '#/components/schemas/MemoryQueryMode'
+          nullable: true
+        limit:
+          type: integer
+          nullable: true
+        include_evidence:
+          type: boolean
+          nullable: true
+        include_plan:
+          type: boolean
+          nullable: true
+        include_diagnostics:
+          type: boolean
+          nullable: true
+    NextStepRequest:
+      type: object
+      required:
+      - procedure_id
+      properties:
+        procedure_id:
+          type: string
+        current_node_id:
+          type: string
+          nullable: true
+        context:
+          type: object
+          nullable: true
+    NextStepResponse:
+      type: object
+      required:
+      - procedure_id
+      properties:
+        procedure_id:
+          type: string
+        current_node_id:
+          type: string
+          nullable: true
+        next_node:
+          allOf:
+          - $ref: '#/components/schemas/ProcedureNode'
+          nullable: true
+        edge:
+          allOf:
+          - $ref: '#/components/schemas/ProcedureEdge'
+          nullable: true
+        blocked_reason:
+          type: string
+          nullable: true
+    MemoryQueryResponse:
+      type: object
+      required:
+      - mode
+      - results
+      properties:
+        mode:
+          $ref: '#/components/schemas/MemoryQueryMode'
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryResult'
+        evidence:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/MemoryEvidence'
+        next_step:
+          allOf:
+          - $ref: '#/components/schemas/NextStepResponse'
+          nullable: true
+        plan:
+          type: object
+          nullable: true
+        diagnostics:
+          type: object
+          nullable: true
+    TimelineResponse:
+      type: object
+      required:
+      - entity_id
+      - events
+      properties:
+        entity_id:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryRecord'
 paths:
   /v1/health:
     get:
@@ -1417,3 +1806,194 @@ paths:
                           type: object
         '500':
           description: Internal Server Error
+  /v1/memory/{namespace}/ingest_event:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Ingest an episodic memory event
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestEventRequest'
+      responses:
+        '200':
+          description: Episodic memory stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryRecord'
+        '500':
+          description: Ingest failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/upsert_fact:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Create or update a semantic memory fact
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertFactRequest'
+      responses:
+        '200':
+          description: Semantic fact stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryRecord'
+        '500':
+          description: Upsert failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/upsert_procedure:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Create or replace a procedural DAG
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertProcedureRequest'
+      responses:
+        '200':
+          description: Procedure stored
+          content:
+            application/json:
+              schema:
+                type: object
+        '500':
+          description: Procedure upsert failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/query:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Query memory across episodic, semantic and procedural layers
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryQueryRequest'
+      responses:
+        '200':
+          description: Memory query response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryQueryResponse'
+        '500':
+          description: Query failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/next_step:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Resolve the next valid step of a procedure
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NextStepRequest'
+      responses:
+        '200':
+          description: Next procedural step
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NextStepResponse'
+        '500':
+          description: Resolution failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/timeline/{entity_id}:
+    get:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Fetch the episodic timeline for an entity
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: entity_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Entity timeline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelineResponse'
+        '500':
+          description: Timeline lookup failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
