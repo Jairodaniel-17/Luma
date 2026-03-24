@@ -50,6 +50,10 @@ pub struct Config {
     pub embedding_model: String,
     pub embedding_url: String,
     pub embedding_api_key: String,
+    pub llm_provider: String,
+    pub llm_model: String,
+    pub llm_url: String,
+    pub llm_api_key: String,
     pub embedding_dim: usize,
     /// PR2: LRU embedding cache size (0 = disabled). Default 10_000.
     pub embedding_cache_size: usize,
@@ -60,6 +64,12 @@ pub struct Config {
     pub hub_sql_prefilter_max_candidates: usize,
     pub hub_sql_prefilter_selectivity_threshold: f32,
     pub hub_vector_first_candidate_multiplier: usize,
+    pub memory_consolidation_enabled: bool,
+    pub memory_working_ttl_secs: u64,
+    pub memory_default_limit: usize,
+    pub memory_max_evidence: usize,
+    pub memory_procedural_max_nodes: usize,
+    pub memory_fact_promotion_threshold: f32,
     /// PR4: HNSW M parameter (connections per node). Default 16.
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Default 200.
@@ -126,6 +136,10 @@ impl Default for Config {
             embedding_model: "".to_string(),
             embedding_url: "".to_string(),
             embedding_api_key: "".to_string(),
+            llm_provider: "none".to_string(),
+            llm_model: "".to_string(),
+            llm_url: "".to_string(),
+            llm_api_key: "".to_string(),
             embedding_dim: 384,
             embedding_cache_size: 10_000,
             embedding_max_inflight_requests: 16,
@@ -134,6 +148,12 @@ impl Default for Config {
             hub_sql_prefilter_max_candidates: 20_000,
             hub_sql_prefilter_selectivity_threshold: 0.2,
             hub_vector_first_candidate_multiplier: 8,
+            memory_consolidation_enabled: false,
+            memory_working_ttl_secs: 3600,
+            memory_default_limit: 10,
+            memory_max_evidence: 10,
+            memory_procedural_max_nodes: 128,
+            memory_fact_promotion_threshold: 0.85,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
             hnsw_segment_compaction_enabled: false,
@@ -318,6 +338,10 @@ impl Config {
         let embedding_model = std::env::var("EMBEDDING_MODEL").unwrap_or_default();
         let embedding_url = std::env::var("EMBEDDING_URL").unwrap_or_default();
         let embedding_api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_default();
+        let llm_provider = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "none".to_string());
+        let llm_model = std::env::var("LLM_MODEL").unwrap_or_default();
+        let llm_url = std::env::var("LLM_URL").unwrap_or_default();
+        let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
         let embedding_dim = std::env::var("EMBEDDING_DIM")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -352,6 +376,28 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8);
+        let memory_consolidation_enabled = parse_env_bool("MEMORY_CONSOLIDATION_ENABLED", false);
+        let memory_working_ttl_secs = std::env::var("MEMORY_WORKING_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
+        let memory_default_limit = std::env::var("MEMORY_DEFAULT_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let memory_max_evidence = std::env::var("MEMORY_MAX_EVIDENCE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let memory_procedural_max_nodes = std::env::var("MEMORY_PROCEDURAL_MAX_NODES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(128);
+        let memory_fact_promotion_threshold =
+            std::env::var("MEMORY_FACT_PROMOTION_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.85);
         let hnsw_m = std::env::var("HNSW_M")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -428,6 +474,10 @@ impl Config {
             embedding_model,
             embedding_url,
             embedding_api_key,
+            llm_provider,
+            llm_model,
+            llm_url,
+            llm_api_key,
             embedding_dim,
             embedding_cache_size,
             embedding_max_inflight_requests,
@@ -436,6 +486,12 @@ impl Config {
             hub_sql_prefilter_max_candidates,
             hub_sql_prefilter_selectivity_threshold,
             hub_vector_first_candidate_multiplier,
+            memory_consolidation_enabled,
+            memory_working_ttl_secs,
+            memory_default_limit,
+            memory_max_evidence,
+            memory_procedural_max_nodes,
+            memory_fact_promotion_threshold,
             hnsw_m,
             hnsw_ef_construction,
             hnsw_segment_compaction_enabled,

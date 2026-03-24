@@ -8,6 +8,7 @@ pub mod routes_docs;
 pub mod routes_events;
 pub mod routes_hub;
 pub mod routes_meta;
+pub mod routes_memory;
 pub mod routes_search;
 pub mod routes_sql;
 pub mod routes_state;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub auth_store: Option<Arc<AuthStore>>,
     pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
     pub hub: Arc<crate::engine::hub::LumaDatabase>,
+    pub memory: Arc<crate::memory::MemoryService>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +57,12 @@ pub fn router(
     auth_store: Option<Arc<AuthStore>>,
     embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
 ) -> Router {
+    let memory = Arc::new(crate::memory::MemoryService::new(
+        Arc::new(engine.clone()),
+        sqlite.clone().map(Arc::new),
+        (*embeddings).clone(),
+        config.clone(),
+    ));
     let hub = Arc::new(crate::engine::hub::LumaDatabase::new(
         Arc::new(engine.clone()),
         sqlite.clone().map(Arc::new),
@@ -71,6 +79,7 @@ pub fn router(
         auth_store,
         embeddings,
         hub,
+        memory,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -152,6 +161,18 @@ pub fn router(
         .route("/v1/sql/exec", post(routes_sql::exec))
         .route("/v1/db/:namespace/ingest", post(routes_hub::ingest))
         .route("/v1/db/:namespace/search", post(routes_hub::search))
+        .route("/v1/memory/:namespace/ingest_event", post(routes_memory::ingest_event))
+        .route("/v1/memory/:namespace/upsert_fact", post(routes_memory::upsert_fact))
+        .route(
+            "/v1/memory/:namespace/upsert_procedure",
+            post(routes_memory::upsert_procedure),
+        )
+        .route("/v1/memory/:namespace/query", post(routes_memory::query))
+        .route("/v1/memory/:namespace/next_step", post(routes_memory::next_step))
+        .route(
+            "/v1/memory/:namespace/timeline/:entity_id",
+            get(routes_memory::timeline),
+        )
         .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/v1/config", get(routes_config::get_config))
         .route("/v1/config", put(routes_config::update_config))
