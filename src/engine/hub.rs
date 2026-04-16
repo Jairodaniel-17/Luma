@@ -453,9 +453,8 @@ impl LumaDatabase {
         };
         let ((query_vector, embed_elapsed), (allowed_ids, sql_elapsed)) =
             tokio::join!(embed_future, sql_future);
-        let query_vector = query_vector.map_err(|err| {
+        let query_vector = query_vector.inspect_err(|_| {
             self.engine.metrics().inc_embed_failure();
-            err
         })?;
         let allowed_ids = allowed_ids?;
         diagnostics.embedding_ms = embed_elapsed.as_millis() as u64;
@@ -521,9 +520,8 @@ impl LumaDatabase {
         diagnostics: &mut QueryDiagnostics,
     ) -> anyhow::Result<Vec<RankedDocument>> {
         let embed_start = std::time::Instant::now();
-        let query_vector = self.embeddings.embed(query).await.map_err(|err| {
+        let query_vector = self.embeddings.embed(query).await.inspect_err(|_| {
             self.engine.metrics().inc_embed_failure();
-            err
         })?;
         diagnostics.embedding_ms = embed_start.elapsed().as_millis() as u64;
         self.engine

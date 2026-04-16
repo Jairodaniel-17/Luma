@@ -137,6 +137,7 @@ impl GraphService {
     /// Expands from `seeds` following typed edges, scoring each node as
     /// `cosine_similarity * edge_factor * (1 + centrality)`.
     /// Returns scored nodes sorted descending by score.
+    #[allow(clippy::too_many_arguments)]
     pub async fn semantic_walk(
         &self,
         namespace: &str,
@@ -156,7 +157,11 @@ impl GraphService {
             let c = centrality.get(id).copied().unwrap_or(0.0);
             let score = base_score * (1.0 + c);
             if score >= config.min_similarity {
-                heap.push(ScoredNode { score, hop: 0, id: id.clone() });
+                heap.push(ScoredNode {
+                    score,
+                    hop: 0,
+                    id: id.clone(),
+                });
                 visited.insert(id.clone());
             }
         }
@@ -208,7 +213,11 @@ impl GraphService {
             }
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(results)
     }
 
@@ -238,13 +247,24 @@ impl GraphService {
         let mut all_nodes: HashSet<String> = HashSet::new();
 
         for row in &rows {
-            let src = row.get("source_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let tgt = row.get("target_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let src = row
+                .get("source_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tgt = row
+                .get("target_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let w = row.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
             if src.is_empty() || tgt.is_empty() {
                 continue;
             }
-            adjacency.entry(src.clone()).or_default().push((tgt.clone(), w));
+            adjacency
+                .entry(src.clone())
+                .or_default()
+                .push((tgt.clone(), w));
             all_nodes.insert(src);
             all_nodes.insert(tgt);
         }
@@ -341,7 +361,10 @@ impl GraphService {
                     serde_json::Value::String(history_id.clone()),
                     serde_json::Value::String(fact_key),
                     serde_json::Value::String(record.namespace.clone()),
-                    record.entity_id.clone().map(serde_json::Value::String)
+                    record
+                        .entity_id
+                        .clone()
+                        .map(serde_json::Value::String)
                         .unwrap_or(serde_json::Value::Null),
                     serde_json::Value::String(record.content.clone()),
                     serde_json::json!(record.confidence),
@@ -423,7 +446,10 @@ fn row_to_edge(row: serde_json::Value) -> anyhow::Result<MemoryEdge> {
             .and_then(|v| v.as_str())
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or(serde_json::Value::Null),
-        created_at_ms: row.get("created_at_ms").and_then(|v| v.as_u64()).unwrap_or_default(),
+        created_at_ms: row
+            .get("created_at_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
     })
 }
 
@@ -432,14 +458,29 @@ fn row_to_belief_version(row: serde_json::Value) -> anyhow::Result<BeliefVersion
         id: row_str(&row, "id")?,
         fact_key: row_str(&row, "fact_key")?,
         namespace: row_str(&row, "namespace")?,
-        entity_id: row.get("entity_id").and_then(|v| v.as_str()).map(str::to_string),
+        entity_id: row
+            .get("entity_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         content: row_str(&row, "content")?,
-        confidence: row.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+        confidence: row
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32,
         status: row_str(&row, "status")?,
-        superseded_by: row.get("superseded_by").and_then(|v| v.as_str()).map(str::to_string),
-        valid_from: row.get("valid_from").and_then(|v| v.as_u64()).unwrap_or_default(),
+        superseded_by: row
+            .get("superseded_by")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        valid_from: row
+            .get("valid_from")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
         valid_until: row.get("valid_until").and_then(|v| v.as_u64()),
-        created_at_ms: row.get("created_at_ms").and_then(|v| v.as_u64()).unwrap_or_default(),
+        created_at_ms: row
+            .get("created_at_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
     })
 }
 

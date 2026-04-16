@@ -32,7 +32,7 @@ impl MemoryService {
         Self {
             engine,
             sqlite,
-            consolidator: Consolidator::default(),
+            consolidator: Consolidator,
             embeddings,
             llm: init_inference_client(&config),
             config,
