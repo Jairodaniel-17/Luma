@@ -408,11 +408,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(128);
-        let memory_fact_promotion_threshold =
-            std::env::var("MEMORY_FACT_PROMOTION_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.85);
+        let memory_fact_promotion_threshold = std::env::var("MEMORY_FACT_PROMOTION_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.85);
         let memory_walk_max_hops = std::env::var("MEMORY_WALK_MAX_HOPS")
             .ok()
             .and_then(|v| v.parse().ok())

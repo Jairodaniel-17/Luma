@@ -54,7 +54,8 @@ impl MemoryService {
             .await?;
         sqlite
             .execute(
-                "DELETE FROM procedure_constraints WHERE namespace = ? AND procedure_id = ?".to_string(),
+                "DELETE FROM procedure_constraints WHERE namespace = ? AND procedure_id = ?"
+                    .to_string(),
                 vec![
                     serde_json::Value::String(namespace.to_string()),
                     serde_json::Value::String(request.procedure_id.clone()),
@@ -206,7 +207,7 @@ impl MemoryService {
             .filter(|edge| edge.from_node_id == current_id)
             .cloned()
             .collect::<Vec<_>>();
-        edges.sort_by(|a, b| b.priority.cmp(&a.priority));
+        edges.sort_by_key(|e| std::cmp::Reverse(e.priority));
 
         for edge in edges {
             if let Some(condition) = &edge.condition {

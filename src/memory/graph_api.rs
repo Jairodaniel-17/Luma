@@ -17,7 +17,12 @@ impl MemoryService {
         let now_ms = crate::memory::ingest::now_ms();
         let edge = MemoryEdge {
             id: request.id.unwrap_or_else(|| {
-                format!("edge::{}::{}::{}", request.source_id, request.target_id, Uuid::new_v4())
+                format!(
+                    "edge::{}::{}::{}",
+                    request.source_id,
+                    request.target_id,
+                    Uuid::new_v4()
+                )
             }),
             namespace: namespace.to_string(),
             source_id: request.source_id,

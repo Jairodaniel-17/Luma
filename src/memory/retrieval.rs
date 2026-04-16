@@ -29,7 +29,10 @@ impl MemoryService {
                     results: timeline
                         .events
                         .into_iter()
-                        .map(|record| MemoryResult { record, score: None })
+                        .map(|record| MemoryResult {
+                            record,
+                            score: None,
+                        })
                         .collect(),
                     evidence: None,
                     next_step: None,
@@ -47,10 +50,9 @@ impl MemoryService {
                 })
             }
             MemoryQueryMode::NextStep => {
-                let procedure_id = request
-                    .procedure_id
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("procedure_id is required for next_step mode"))?;
+                let procedure_id = request.procedure_id.clone().ok_or_else(|| {
+                    anyhow::anyhow!("procedure_id is required for next_step mode")
+                })?;
                 let next_step = self
                     .next_step(
                         namespace,
@@ -188,7 +190,10 @@ impl MemoryService {
         // ── Step 2: Semantic Walk (BFS expansion) ─────────────────────────
         let walk_results = if let Some(graph) = &self.graph {
             let centrality = if self.config.memory_centrality_enabled {
-                graph.load_centrality_scores(namespace).await.unwrap_or_default()
+                graph
+                    .load_centrality_scores(namespace)
+                    .await
+                    .unwrap_or_default()
             } else {
                 HashMap::new()
             };
@@ -255,20 +260,24 @@ impl MemoryService {
                     continue;
                 }
                 if request.include_evidence.unwrap_or(true) {
-                    let mut ev = evidence_by_id.remove(&node.id).unwrap_or_else(|| {
-                        MemoryEvidence {
-                            memory_id: record.id.clone(),
-                            kind: record.kind,
-                            score: node.score,
-                            source: record.source.clone(),
-                            snippet: record.content.chars().take(160).collect(),
-                        }
-                    });
+                    let mut ev =
+                        evidence_by_id
+                            .remove(&node.id)
+                            .unwrap_or_else(|| MemoryEvidence {
+                                memory_id: record.id.clone(),
+                                kind: record.kind,
+                                score: node.score,
+                                source: record.source.clone(),
+                                snippet: record.content.chars().take(160).collect(),
+                            });
                     ev.score = node.score;
                     ev.source = record.source.clone();
                     evidence.push(ev);
                 }
-                results.push(MemoryResult { record, score: Some(node.score) });
+                results.push(MemoryResult {
+                    record,
+                    score: Some(node.score),
+                });
             }
         }
 
@@ -323,7 +332,11 @@ impl MemoryService {
             .await?;
         let ids = rows
             .into_iter()
-            .filter_map(|row| row.get("id").and_then(|value| value.as_str()).map(str::to_string))
+            .filter_map(|row| {
+                row.get("id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
             .collect::<HashSet<_>>();
         if ids.is_empty() {
             return Ok(Some(HashSet::new()));
@@ -362,17 +375,40 @@ pub(crate) fn row_to_memory_record(row: serde_json::Value) -> anyhow::Result<Mem
     Ok(MemoryRecord {
         id: row_string(&row, "id")?,
         namespace: row_string(&row, "namespace")?,
-        entity_id: row.get("entity_id").and_then(|value| value.as_str()).map(str::to_string),
-        kind: parse_memory_kind(row.get("kind").and_then(|value| value.as_str()).unwrap_or("episodic")),
-        status: parse_memory_status(row.get("status").and_then(|value| value.as_str()).unwrap_or("active")),
+        entity_id: row
+            .get("entity_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        kind: parse_memory_kind(
+            row.get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("episodic"),
+        ),
+        status: parse_memory_status(
+            row.get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("active"),
+        ),
         content: row_string(&row, "content")?,
         metadata: parse_json_string(row.get("metadata")),
-        confidence: row.get("confidence").and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
+        confidence: row
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(1.0) as f32,
         source: row_string(&row, "source")?,
-        created_at_ms: row.get("created_at_ms").and_then(|value| value.as_u64()).unwrap_or_default(),
-        updated_at_ms: row.get("updated_at_ms").and_then(|value| value.as_u64()).unwrap_or_default(),
+        created_at_ms: row
+            .get("created_at_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default(),
+        updated_at_ms: row
+            .get("updated_at_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default(),
         expires_at_ms: row.get("expires_at_ms").and_then(|value| value.as_u64()),
-        embedding_ref: row.get("embedding_ref").and_then(|value| value.as_str()).map(str::to_string),
+        embedding_ref: row
+            .get("embedding_ref")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     })
 }
 

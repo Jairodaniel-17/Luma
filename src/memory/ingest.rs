@@ -280,9 +280,13 @@ fn truncate_snippet(content: &str) -> String {
 }
 
 fn opt_string(value: Option<String>) -> serde_json::Value {
-    value.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+    value
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_u64(value: Option<u64>) -> serde_json::Value {
-    value.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null)
+    value
+        .map(serde_json::Value::from)
+        .unwrap_or(serde_json::Value::Null)
 }

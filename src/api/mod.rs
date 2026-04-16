@@ -7,8 +7,8 @@ pub mod routes_doc;
 pub mod routes_docs;
 pub mod routes_events;
 pub mod routes_hub;
-pub mod routes_meta;
 pub mod routes_memory;
+pub mod routes_meta;
 pub mod routes_search;
 pub mod routes_sql;
 pub mod routes_state;
@@ -161,19 +161,31 @@ pub fn router(
         .route("/v1/sql/exec", post(routes_sql::exec))
         .route("/v1/db/:namespace/ingest", post(routes_hub::ingest))
         .route("/v1/db/:namespace/search", post(routes_hub::search))
-        .route("/v1/memory/:namespace/ingest_event", post(routes_memory::ingest_event))
-        .route("/v1/memory/:namespace/upsert_fact", post(routes_memory::upsert_fact))
+        .route(
+            "/v1/memory/:namespace/ingest_event",
+            post(routes_memory::ingest_event),
+        )
+        .route(
+            "/v1/memory/:namespace/upsert_fact",
+            post(routes_memory::upsert_fact),
+        )
         .route(
             "/v1/memory/:namespace/upsert_procedure",
             post(routes_memory::upsert_procedure),
         )
         .route("/v1/memory/:namespace/query", post(routes_memory::query))
-        .route("/v1/memory/:namespace/next_step", post(routes_memory::next_step))
+        .route(
+            "/v1/memory/:namespace/next_step",
+            post(routes_memory::next_step),
+        )
         .route(
             "/v1/memory/:namespace/timeline/:entity_id",
             get(routes_memory::timeline),
         )
-        .route("/v1/memory/:namespace/edges", post(routes_memory::upsert_edge))
+        .route(
+            "/v1/memory/:namespace/edges",
+            post(routes_memory::upsert_edge),
+        )
         .route(
             "/v1/memory/:namespace/edges/:memory_id",
             get(routes_memory::get_node_edges),
