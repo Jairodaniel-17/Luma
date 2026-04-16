@@ -2,11 +2,11 @@ use crate::memory::ingest::{parse_memory_kind, parse_memory_status};
 use crate::memory::service::MemoryService;
 use crate::memory::types::{
     MemoryEvidence, MemoryKind, MemoryQueryMode, MemoryQueryRequest, MemoryQueryResponse,
-    MemoryRecord, MemoryResult, TimelineResponse,
+    MemoryRecord, MemoryResult, SemanticWalkConfig, TimelineResponse,
 };
 use crate::vector::{SearchOptions, SearchRequest};
 use anyhow::Context;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 impl MemoryService {
     pub async fn query(
@@ -120,12 +120,16 @@ impl MemoryService {
     ) -> anyhow::Result<MemoryQueryResponse> {
         let query_vector = self.embeddings.embed(&request.query).await?;
         let limit = self.default_limit(request.limit);
+
+        // ── Step 1: Initial K-NN seeds ────────────────────────────────────
+        let seed_k = (limit * 3).min(self.config.memory_walk_max_nodes);
         let allowed_ids = self
             .fetch_allowed_memory_ids(namespace, request.entity_id.as_deref())
             .await?;
 
-        let mut evidence = Vec::new();
-        let mut results = Vec::new();
+        let mut seed_scores: HashMap<String, f32> = HashMap::new();
+        let mut seed_ids: Vec<String> = Vec::new();
+        let mut evidence_by_id: HashMap<String, MemoryEvidence> = HashMap::new();
 
         for kind in [MemoryKind::Semantic, MemoryKind::Episodic] {
             let collection = self.memory_collection(namespace, kind);
@@ -143,7 +147,7 @@ impl MemoryService {
                     &collection,
                     SearchRequest {
                         vector: query_vector.clone(),
-                        k: limit,
+                        k: seed_k,
                         options: SearchOptions {
                             filters: None,
                             include_meta: true,
@@ -152,46 +156,122 @@ impl MemoryService {
                     },
                 )
                 .context("memory vector search")?;
+
             for hit in hits {
-                if let Some(record) = self.get_memory_record(namespace, &hit.id).await? {
-                    if results.iter().any(|row: &MemoryResult| row.record.id == record.id) {
-                        continue;
-                    }
-                    if request.include_evidence.unwrap_or(true) {
-                        let snippet = hit
-                            .meta
-                            .as_ref()
-                            .and_then(|meta| meta.get("snippet"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or(&record.content)
-                            .to_string();
-                        evidence.push(MemoryEvidence {
-                            memory_id: record.id.clone(),
+                if seed_scores.contains_key(&hit.id) {
+                    continue;
+                }
+                seed_scores.insert(hit.id.clone(), hit.score);
+                seed_ids.push(hit.id.clone());
+                if request.include_evidence.unwrap_or(true) {
+                    let snippet = hit
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("snippet"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    evidence_by_id.insert(
+                        hit.id.clone(),
+                        MemoryEvidence {
+                            memory_id: hit.id.clone(),
                             kind,
                             score: hit.score,
-                            source: record.source.clone(),
+                            source: String::new(),
                             snippet,
-                        });
-                    }
-                    results.push(MemoryResult {
-                        record,
-                        score: Some(hit.score),
-                    });
+                        },
+                    );
                 }
             }
         }
 
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        evidence.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(limit);
+        // ── Step 2: Semantic Walk (BFS expansion) ─────────────────────────
+        let walk_results = if let Some(graph) = &self.graph {
+            let centrality = if self.config.memory_centrality_enabled {
+                graph.load_centrality_scores(namespace).await.unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+
+            // Closure to fetch a vector from the engine by memory_id
+            let engine = &self.engine;
+            let sem_col = self.memory_collection(namespace, MemoryKind::Semantic);
+            let epi_col = self.memory_collection(namespace, MemoryKind::Episodic);
+            let get_vector = |id: &str| -> Option<Vec<f32>> {
+                engine
+                    .vector_get(&sem_col, id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| engine.vector_get(&epi_col, id).ok().flatten())
+                    .map(|item| item.vector)
+            };
+
+            let walk_config = SemanticWalkConfig {
+                max_hops: self.config.memory_walk_max_hops,
+                min_similarity: self.config.memory_walk_min_similarity,
+                max_nodes: self.config.memory_walk_max_nodes,
+            };
+
+            graph
+                .semantic_walk(
+                    namespace,
+                    seed_ids,
+                    &seed_scores,
+                    &walk_config,
+                    &query_vector,
+                    &get_vector,
+                    &centrality,
+                )
+                .await
+                .unwrap_or_default()
+        } else {
+            // No graph service: fall back to seed scores as flat list
+            seed_ids
+                .iter()
+                .map(|id| crate::memory::graph::ScoredNode {
+                    score: seed_scores.get(id).copied().unwrap_or(0.0),
+                    hop: 0,
+                    id: id.clone(),
+                })
+                .collect()
+        };
+
+        // ── Step 3: Fetch records, filter, deduplicate ────────────────────
+        let mut results: Vec<MemoryResult> = Vec::new();
+        let mut evidence: Vec<MemoryEvidence> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for node in walk_results {
+            if results.len() >= limit {
+                break;
+            }
+            if seen.contains(&node.id) {
+                continue;
+            }
+            seen.insert(node.id.clone());
+
+            if let Some(record) = self.get_memory_record(namespace, &node.id).await? {
+                if !matches!(record.status, crate::memory::types::MemoryStatus::Active) {
+                    continue;
+                }
+                if request.include_evidence.unwrap_or(true) {
+                    let mut ev = evidence_by_id.remove(&node.id).unwrap_or_else(|| {
+                        MemoryEvidence {
+                            memory_id: record.id.clone(),
+                            kind: record.kind,
+                            score: node.score,
+                            source: record.source.clone(),
+                            snippet: record.content.chars().take(160).collect(),
+                        }
+                    });
+                    ev.score = node.score;
+                    ev.source = record.source.clone();
+                    evidence.push(ev);
+                }
+                results.push(MemoryResult { record, score: Some(node.score) });
+            }
+        }
+
         evidence.truncate(self.config.memory_max_evidence.max(1));
 
         Ok(MemoryQueryResponse {
@@ -201,15 +281,19 @@ impl MemoryService {
             next_step: None,
             plan: request.include_plan.unwrap_or(false).then(|| {
                 serde_json::json!({
-                    "strategy": "vector_recall",
+                    "strategy": "semantic_walk",
                     "namespace": namespace,
-                    "collections": ["semantic", "episodic"],
+                    "seeds": seed_scores.len(),
+                    "max_hops": self.config.memory_walk_max_hops,
+                    "min_similarity": self.config.memory_walk_min_similarity,
+                    "centrality_enabled": self.config.memory_centrality_enabled,
                 })
             }),
             diagnostics: request.include_diagnostics.unwrap_or(false).then(|| {
                 serde_json::json!({
                     "limit": limit,
                     "entity_filter": request.entity_id,
+                    "seed_count": seed_scores.len(),
                 })
             }),
         })
@@ -247,7 +331,7 @@ impl MemoryService {
         Ok(Some(ids))
     }
 
-    async fn get_memory_record(
+    pub(crate) async fn get_memory_record(
         &self,
         namespace: &str,
         memory_id: &str,

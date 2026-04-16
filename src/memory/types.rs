@@ -248,3 +248,111 @@ pub struct MemoryQueryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<serde_json::Value>,
 }
+
+// ─── Graph Layer ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeType {
+    Supports,
+    Contradicts,
+    Supersedes,
+    TriggeredBy,
+    RelatedTo,
+}
+
+impl std::fmt::Display for EdgeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            EdgeType::Supports => "supports",
+            EdgeType::Contradicts => "contradicts",
+            EdgeType::Supersedes => "supersedes",
+            EdgeType::TriggeredBy => "triggered_by",
+            EdgeType::RelatedTo => "related_to",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for EdgeType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "supports" => Ok(EdgeType::Supports),
+            "contradicts" => Ok(EdgeType::Contradicts),
+            "supersedes" => Ok(EdgeType::Supersedes),
+            "triggered_by" => Ok(EdgeType::TriggeredBy),
+            "related_to" => Ok(EdgeType::RelatedTo),
+            other => anyhow::bail!("unknown edge type: {other}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryEdge {
+    pub id: String,
+    pub namespace: String,
+    pub source_id: String,
+    pub target_id: String,
+    pub edge_type: EdgeType,
+    pub weight: f32,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BeliefVersion {
+    pub id: String,
+    pub fact_key: String,
+    pub namespace: String,
+    pub entity_id: Option<String>,
+    pub content: String,
+    pub confidence: f32,
+    pub status: String,
+    pub superseded_by: Option<String>,
+    pub valid_from: u64,
+    pub valid_until: Option<u64>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SemanticWalkConfig {
+    pub max_hops: usize,
+    pub min_similarity: f32,
+    pub max_nodes: usize,
+}
+
+impl Default for SemanticWalkConfig {
+    fn default() -> Self {
+        Self {
+            max_hops: 2,
+            min_similarity: 0.65,
+            max_nodes: 40,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpsertEdgeRequest {
+    pub id: Option<String>,
+    pub source_id: String,
+    pub target_id: String,
+    pub edge_type: EdgeType,
+    pub weight: Option<f32>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeEdgesResponse {
+    pub memory_id: String,
+    pub outgoing: Vec<MemoryEdge>,
+    pub incoming: Vec<MemoryEdge>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BeliefHistoryResponse {
+    pub fact_key: String,
+    pub versions: Vec<BeliefVersion>,
+}

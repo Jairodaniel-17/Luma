@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::engine::embeddings::EmbeddingClient;
 use crate::engine::Engine;
 use crate::memory::consolidator::Consolidator;
+use crate::memory::graph::GraphService;
 use crate::memory::llm::{InferenceClient, InferenceProvider};
 use crate::sqlite::memory_schema::ensure_memory_schema;
 use crate::sqlite::SqliteService;
@@ -17,6 +18,7 @@ pub struct MemoryService {
     pub(crate) config: Config,
     pub(crate) schema_ready: Arc<OnceCell<()>>,
     pub(crate) consolidator: Consolidator,
+    pub(crate) graph: Option<GraphService>,
 }
 
 impl MemoryService {
@@ -26,6 +28,7 @@ impl MemoryService {
         embeddings: EmbeddingClient,
         config: Config,
     ) -> Self {
+        let graph = sqlite.as_ref().map(|sq| GraphService::new(sq.clone()));
         Self {
             engine,
             sqlite,
@@ -34,6 +37,7 @@ impl MemoryService {
             llm: init_inference_client(&config),
             config,
             schema_ready: Arc::new(OnceCell::new()),
+            graph,
         }
     }
 

@@ -1,6 +1,7 @@
 use crate::memory::service::MemoryService;
 use crate::memory::types::{
-    IngestEventRequest, MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest,
+    EdgeType, IngestEventRequest, MemoryEdge, MemoryKind, MemoryRecord, MemoryStatus,
+    UpsertFactRequest,
 };
 use crate::vector::{Metric, VectorItem};
 use anyhow::Context;
@@ -53,9 +54,33 @@ impl MemoryService {
         });
         let now_ms = now_ms();
         let mut metadata = request.metadata;
-        if let Some(key) = request.fact_key {
-            metadata["fact_key"] = serde_json::Value::String(key);
+        if let Some(key) = &request.fact_key {
+            metadata["fact_key"] = serde_json::Value::String(key.clone());
         }
+
+        // ── Belief versioning: snapshot old record before overwriting ──────
+        if let Some(graph) = &self.graph {
+            if let Ok(Some(existing)) = self.get_memory_record(namespace, &memory_id).await {
+                // Append old version to history
+                if let Ok(history_id) = graph.append_belief_history(&existing, now_ms).await {
+                    // Create supersedes edge: new → old (target is the history snapshot id)
+                    let edge = MemoryEdge {
+                        id: format!("supersedes::{memory_id}::{history_id}"),
+                        namespace: namespace.to_string(),
+                        source_id: memory_id.clone(),
+                        target_id: existing.id.clone(),
+                        edge_type: EdgeType::Supersedes,
+                        weight: 1.0,
+                        metadata: serde_json::json!({"reason": "upsert_fact_overwrite"}),
+                        created_at_ms: now_ms,
+                    };
+                    let _ = graph.upsert_edge(&edge).await;
+                }
+                // Archive the old version in memory_records
+                let _ = self.archive_memory_record(namespace, &existing.id).await;
+            }
+        }
+
         let record = MemoryRecord {
             id: memory_id.clone(),
             namespace: namespace.to_string(),
@@ -74,6 +99,27 @@ impl MemoryService {
         self.persist_memory_record(&record).await?;
         self.index_memory_record(&record).await?;
         Ok(record)
+    }
+
+    pub(crate) async fn archive_memory_record(
+        &self,
+        namespace: &str,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(sqlite) = &self.sqlite else {
+            return Ok(());
+        };
+        sqlite
+            .execute(
+                "UPDATE memory_records SET status = 'archived' WHERE namespace = ? AND id = ?"
+                    .to_string(),
+                vec![
+                    serde_json::Value::String(namespace.to_string()),
+                    serde_json::Value::String(id.to_string()),
+                ],
+            )
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn persist_memory_record(&self, record: &MemoryRecord) -> anyhow::Result<()> {

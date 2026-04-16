@@ -105,6 +105,77 @@ pub async fn timeline(
     ))
 }
 
+pub async fn upsert_edge(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
+    Path(namespace): Path<String>,
+    Json(payload): Json<crate::memory::types::UpsertEdgeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let namespace = scope_namespace(&tenant, &namespace);
+    let response = state
+        .memory
+        .create_edge(&namespace, payload)
+        .await
+        .map_err(internal_error("memory_edge_error"))?;
+    Ok(Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null)))
+}
+
+pub async fn get_node_edges(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
+    Path((namespace, memory_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let namespace = scope_namespace(&tenant, &namespace);
+    let response = state
+        .memory
+        .node_edges(&namespace, &memory_id)
+        .await
+        .map_err(internal_error("memory_edges_error"))?;
+    Ok(Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null)))
+}
+
+pub async fn delete_edge(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
+    Path((namespace, edge_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let namespace = scope_namespace(&tenant, &namespace);
+    state
+        .memory
+        .remove_edge(&namespace, &edge_id)
+        .await
+        .map_err(internal_error("memory_edge_delete_error"))?;
+    Ok(Json(serde_json::json!({"deleted": true, "edge_id": edge_id})))
+}
+
+pub async fn belief_history(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
+    Path((namespace, fact_key)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let namespace = scope_namespace(&tenant, &namespace);
+    let response = state
+        .memory
+        .get_belief_history(&namespace, &fact_key)
+        .await
+        .map_err(internal_error("memory_history_error"))?;
+    Ok(Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null)))
+}
+
+pub async fn recompute_centrality(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantContext>,
+    Path(namespace): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let namespace = scope_namespace(&tenant, &namespace);
+    let updated = state
+        .memory
+        .refresh_centrality(&namespace)
+        .await
+        .map_err(internal_error("memory_centrality_error"))?;
+    Ok(Json(serde_json::json!({"updated_nodes": updated, "namespace": namespace})))
+}
+
 fn scope_namespace(tenant: &TenantContext, namespace: &str) -> String {
     match tenant.tenant_id.as_deref() {
         Some(tenant_id) => format!("tenant__{}__{}", tenant_id, namespace),

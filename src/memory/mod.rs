@@ -1,4 +1,6 @@
 pub mod consolidator;
+pub mod graph;
+pub mod graph_api;
 pub mod ingest;
 pub mod llm;
 pub mod planner;

@@ -1,5 +1,5 @@
 use crate::memory::service::MemoryService;
-use crate::memory::types::{MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest};
+use crate::memory::types::{EdgeType, MemoryEdge, MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest};
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
@@ -27,7 +27,8 @@ impl Consolidator {
             .await?;
 
         for candidate in candidates {
-            let status = if candidate.confidence >= service.config.memory_fact_promotion_threshold {
+            let confidence = candidate.confidence; // capture before move
+            let status = if confidence >= service.config.memory_fact_promotion_threshold {
                 MemoryStatus::Active
             } else {
                 MemoryStatus::Draft
@@ -36,24 +37,40 @@ impl Consolidator {
             metadata["derived_from_memory_id"] = serde_json::Value::String(record.id.clone());
             metadata["derived_from_kind"] = serde_json::Value::String("episodic".to_string());
 
+            let fact_id = format!(
+                "fact::{}::{}::{}",
+                record.namespace, entity_id, candidate.fact_key
+            );
             service
                 .upsert_fact(
                     &record.namespace,
                     UpsertFactRequest {
-                        id: Some(format!(
-                            "fact::{}::{}::{}",
-                            record.namespace, entity_id, candidate.fact_key
-                        )),
+                        id: Some(fact_id.clone()),
                         entity_id: Some(entity_id.clone()),
                         fact_key: Some(candidate.fact_key),
                         content: candidate.content,
                         metadata,
                         source: Some(format!("consolidator:{}", record.id)),
-                        confidence: Some(candidate.confidence),
+                        confidence: Some(confidence),
                         status: Some(status),
                     },
                 )
                 .await?;
+
+            // Auto-edge: episodic event → derived semantic fact
+            if let Some(graph) = &service.graph {
+                let edge = MemoryEdge {
+                    id: format!("triggered::{}::{}", record.id, fact_id),
+                    namespace: record.namespace.clone(),
+                    source_id: record.id.clone(),
+                    target_id: fact_id,
+                    edge_type: EdgeType::TriggeredBy,
+                    weight: confidence,
+                    metadata: serde_json::json!({"auto": true}),
+                    created_at_ms: crate::memory::ingest::now_ms(),
+                };
+                let _ = graph.upsert_edge(&edge).await;
+            }
         }
 
         service.emit_consolidation_event(record, &entity_id).await?;
