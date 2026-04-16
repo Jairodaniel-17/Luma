@@ -39,12 +39,21 @@ cargo bench --bench vector_mmap_bench
 
 ## Architecture
 
-The system has two API levels:
+The system has three API levels:
 
 - **Level 1** (`/v1/vector`, `/v1/state`, `/v1/doc`, `/v1/sql`, `/v1/events`): Primitive operations on individual subsystems.
 - **Level 2** (`/v1/db`): `LumaDatabase` hub that orchestrates auto-chunking, embedding generation, hybrid SQL+vector search, and auto-schema indexing.
+- **Level 3** (`/v1/memory/{namespace}/`): NS-Mem agent memory layer — `ingest_event`, `upsert_fact`, `query`, `timeline/{entity_id}`, `upsert_procedure`, `next_step`.
 
 ### Key Modules
+
+**`src/memory/`** — NS-Mem: agent memory layer built on top of Luma's primitives. Four memory types:
+- **episodic**: concrete events/interactions → vector store + `memory_records` SQLite table.
+- **semantic**: stable facts/preferences → vector store + `memory_records` (type `semantic`).
+- **procedural**: DAG-based procedures with typed edges and constraint evaluation → SQLite (`procedures`, `proc_nodes`, `proc_edges`, `proc_constraints`).
+- **working**: ephemeral session context → KV store with TTL.
+
+Consolidation pipeline: `ingest_event` → LLM (or local heuristic) extracts `FactCandidate` → persisted as `semantic` (`active` if confidence ≥ threshold, else `draft`). LLM providers: `none`, `mock`, `openai`, `ollama`. See `docs/NS_MEM.md` for full API reference.
 
 **`src/engine/mod.rs`** — Core `Engine` struct. Coordinates all subsystems, handles WAL replay on startup, TTL expiration, and periodic snapshots. All mutations are published as events with monotonic offsets (event sourcing pattern).
 
@@ -93,6 +102,7 @@ data/
 - **IVF**: `ivf_clusters`, `ivf_nprobe`, `q8_refine_topk`
 - **DiskANN**: `diskann_max_degree`, `diskann_build_threads`
 - **Embeddings**: `embedding_provider` (`none` | `ollama` | `openai` | `mock`), `embedding_model`, `embedding_dim`
+- **Memory / NS-Mem**: `memory_consolidation_enabled`, `memory_working_ttl_secs`, `memory_default_limit`, `memory_fact_promotion_threshold` (default 0.85), `llm_provider` (`none` | `mock` | `openai` | `ollama`), `llm_model`, `llm_url`, `llm_api_key`
 
 Config source: `src/config.rs`. Environment variables override TOML values.
 
@@ -116,3 +126,4 @@ Use the `mock` embedding provider in tests to avoid external service dependencie
 - Reviewed the PR1-PR8 series against code and tests, identified blocking issues in planner, batching, compaction, metrics, and release gates.
 - Hardened WAL replay with checksummed envelopes, corruption stop-at-tail semantics, and idempotent recovery paths for `state_db` plus vector replay.
 - Added range scans for KV (`start`/`end` end-exclusive), cached metrics rendering off the scrape path, and explicit SSE gap signaling when requested offsets are no longer retained.
+- Implemented NS-Mem (`src/memory/`): episodic/semantic/procedural/working memory layer with consolidation pipeline, LLM fact extraction, DAG procedure engine with constraint evaluation, and REST API at `/v1/memory/{namespace}/`. Full docs in `docs/NS_MEM.md`.

@@ -70,6 +70,16 @@ pub struct Config {
     pub memory_max_evidence: usize,
     pub memory_procedural_max_nodes: usize,
     pub memory_fact_promotion_threshold: f32,
+    /// Max BFS hops in semantic walk (default 2).
+    pub memory_walk_max_hops: usize,
+    /// Cosine similarity cutoff for semantic walk pruning (default 0.65).
+    pub memory_walk_min_similarity: f32,
+    /// Max nodes to explore per semantic walk query (default 40).
+    pub memory_walk_max_nodes: usize,
+    /// Enable PageRank centrality scoring in semantic walk (default true).
+    pub memory_centrality_enabled: bool,
+    /// How often to recompute centrality scores in seconds (default 300).
+    pub memory_centrality_update_interval_secs: u64,
     /// PR4: HNSW M parameter (connections per node). Default 16.
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Default 200.
@@ -154,6 +164,11 @@ impl Default for Config {
             memory_max_evidence: 10,
             memory_procedural_max_nodes: 128,
             memory_fact_promotion_threshold: 0.85,
+            memory_walk_max_hops: 2,
+            memory_walk_min_similarity: 0.65,
+            memory_walk_max_nodes: 40,
+            memory_centrality_enabled: true,
+            memory_centrality_update_interval_secs: 300,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
             hnsw_segment_compaction_enabled: false,
@@ -398,6 +413,24 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.85);
+        let memory_walk_max_hops = std::env::var("MEMORY_WALK_MAX_HOPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let memory_walk_min_similarity = std::env::var("MEMORY_WALK_MIN_SIMILARITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.65_f32);
+        let memory_walk_max_nodes = std::env::var("MEMORY_WALK_MAX_NODES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        let memory_centrality_enabled = parse_env_bool("MEMORY_CENTRALITY_ENABLED", true);
+        let memory_centrality_update_interval_secs =
+            std::env::var("MEMORY_CENTRALITY_UPDATE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300);
         let hnsw_m = std::env::var("HNSW_M")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -492,6 +525,11 @@ impl Config {
             memory_max_evidence,
             memory_procedural_max_nodes,
             memory_fact_promotion_threshold,
+            memory_walk_max_hops,
+            memory_walk_min_similarity,
+            memory_walk_max_nodes,
+            memory_centrality_enabled,
+            memory_centrality_update_interval_secs,
             hnsw_m,
             hnsw_ef_construction,
             hnsw_segment_compaction_enabled,
