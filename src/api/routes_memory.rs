@@ -20,7 +20,9 @@ pub async fn ingest_event(
         .ingest_event(&namespace, payload)
         .await
         .map_err(internal_error("memory_ingest_error"))?;
-    Ok(Json(serde_json::to_value(record).unwrap_or(serde_json::Value::Null)))
+    Ok(Json(
+        serde_json::to_value(record).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 pub async fn upsert_fact(
@@ -35,7 +37,9 @@ pub async fn upsert_fact(
         .upsert_fact(&namespace, payload)
         .await
         .map_err(internal_error("memory_fact_error"))?;
-    Ok(Json(serde_json::to_value(record).unwrap_or(serde_json::Value::Null)))
+    Ok(Json(
+        serde_json::to_value(record).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 pub async fn upsert_procedure(
@@ -117,7 +121,9 @@ pub async fn upsert_edge(
         .create_edge(&namespace, payload)
         .await
         .map_err(internal_error("memory_edge_error"))?;
-    Ok(Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null)))
+    Ok(Json(
+        serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 pub async fn get_node_edges(
@@ -131,7 +137,9 @@ pub async fn get_node_edges(
         .node_edges(&namespace, &memory_id)
         .await
         .map_err(internal_error("memory_edges_error"))?;
-    Ok(Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null)))
+    Ok(Json(
+        serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 pub async fn delete_edge(
@@ -145,7 +153,9 @@ pub async fn delete_edge(
         .remove_edge(&namespace, &edge_id)
         .await
         .map_err(internal_error("memory_edge_delete_error"))?;
-    Ok(Json(serde_json::json!({"deleted": true, "edge_id": edge_id})))
+    Ok(Json(
+        serde_json::json!({"deleted": true, "edge_id": edge_id}),
+    ))
 }
 
 pub async fn belief_history(
@@ -159,7 +169,9 @@ pub async fn belief_history(
         .get_belief_history(&namespace, &fact_key)
         .await
         .map_err(internal_error("memory_history_error"))?;
-    Ok(Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null)))
+    Ok(Json(
+        serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 pub async fn recompute_centrality(
@@ -173,7 +185,9 @@ pub async fn recompute_centrality(
         .refresh_centrality(&namespace)
         .await
         .map_err(internal_error("memory_centrality_error"))?;
-    Ok(Json(serde_json::json!({"updated_nodes": updated, "namespace": namespace})))
+    Ok(Json(
+        serde_json::json!({"updated_nodes": updated, "namespace": namespace}),
+    ))
 }
 
 fn scope_namespace(tenant: &TenantContext, namespace: &str) -> String {

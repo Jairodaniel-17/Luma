@@ -1,5 +1,7 @@
 use crate::memory::service::MemoryService;
-use crate::memory::types::{EdgeType, MemoryEdge, MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest};
+use crate::memory::types::{
+    EdgeType, MemoryEdge, MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest,
+};
 use uuid::Uuid;
 
 #[derive(Clone, Default)]

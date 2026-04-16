@@ -126,7 +126,11 @@ async fn test_edge_crud() {
         .unwrap();
     let edge_status = create_edge.status();
     let edge_body_text = create_edge.text().await.unwrap();
-    assert_eq!(edge_status, StatusCode::OK, "create edge failed: {edge_body_text}");
+    assert_eq!(
+        edge_status,
+        StatusCode::OK,
+        "create edge failed: {edge_body_text}"
+    );
     let edge_body: serde_json::Value = serde_json::from_str(&edge_body_text).unwrap();
     let edge_id = edge_body["id"].as_str().unwrap().to_string();
     assert_eq!(edge_body["edge_type"], "supports");
@@ -142,7 +146,11 @@ async fn test_edge_crud() {
         .unwrap();
     let ne_status = node_edges.status();
     let ne_body_text = node_edges.text().await.unwrap();
-    assert_eq!(ne_status, StatusCode::OK, "get node edges failed: {ne_body_text}");
+    assert_eq!(
+        ne_status,
+        StatusCode::OK,
+        "get node edges failed: {ne_body_text}"
+    );
     let ne_body: serde_json::Value = serde_json::from_str(&ne_body_text).unwrap();
     assert_eq!(ne_body["memory_id"], node_a_id);
     let outgoing = ne_body["outgoing"].as_array().unwrap();
@@ -161,7 +169,11 @@ async fn test_edge_crud() {
         .unwrap();
     let del_status = delete_edge.status();
     let del_body_text = delete_edge.text().await.unwrap();
-    assert_eq!(del_status, StatusCode::OK, "delete edge failed: {del_body_text}");
+    assert_eq!(
+        del_status,
+        StatusCode::OK,
+        "delete edge failed: {del_body_text}"
+    );
     let del_body: serde_json::Value = serde_json::from_str(&del_body_text).unwrap();
     assert_eq!(del_body["deleted"], true);
 
@@ -209,7 +221,11 @@ async fn test_triggered_by_on_consolidation() {
         .unwrap();
     let ingest_status = ingest.status();
     let ingest_body_text = ingest.text().await.unwrap();
-    assert_eq!(ingest_status, StatusCode::OK, "ingest failed: {ingest_body_text}");
+    assert_eq!(
+        ingest_status,
+        StatusCode::OK,
+        "ingest failed: {ingest_body_text}"
+    );
     let ingest_body: serde_json::Value = serde_json::from_str(&ingest_body_text).unwrap();
     let event_id = ingest_body["id"].as_str().unwrap().to_string();
 
@@ -222,7 +238,11 @@ async fn test_triggered_by_on_consolidation() {
         .unwrap();
     let ne_status = node_edges.status();
     let ne_body_text = node_edges.text().await.unwrap();
-    assert_eq!(ne_status, StatusCode::OK, "get node edges failed: {ne_body_text}");
+    assert_eq!(
+        ne_status,
+        StatusCode::OK,
+        "get node edges failed: {ne_body_text}"
+    );
     let ne_body: serde_json::Value = serde_json::from_str(&ne_body_text).unwrap();
 
     // The mock LLM extracts facts during consolidation; if it does, a triggered_by
@@ -269,7 +289,11 @@ async fn test_supersedes_on_upsert() {
         .unwrap();
     let f1_status = fact1.status();
     let f1_body_text = fact1.text().await.unwrap();
-    assert_eq!(f1_status, StatusCode::OK, "first upsert_fact failed: {f1_body_text}");
+    assert_eq!(
+        f1_status,
+        StatusCode::OK,
+        "first upsert_fact failed: {f1_body_text}"
+    );
     let f1_body: serde_json::Value = serde_json::from_str(&f1_body_text).unwrap();
     let fact_id = f1_body["id"].as_str().unwrap().to_string();
 
@@ -288,7 +312,11 @@ async fn test_supersedes_on_upsert() {
         .unwrap();
     let f2_status = fact2.status();
     let f2_body_text = fact2.text().await.unwrap();
-    assert_eq!(f2_status, StatusCode::OK, "second upsert_fact failed: {f2_body_text}");
+    assert_eq!(
+        f2_status,
+        StatusCode::OK,
+        "second upsert_fact failed: {f2_body_text}"
+    );
 
     // Check that edges exist for the fact node — should contain a supersedes edge
     let node_edges = client
@@ -299,7 +327,11 @@ async fn test_supersedes_on_upsert() {
         .unwrap();
     let ne_status = node_edges.status();
     let ne_body_text = node_edges.text().await.unwrap();
-    assert_eq!(ne_status, StatusCode::OK, "get node edges failed: {ne_body_text}");
+    assert_eq!(
+        ne_status,
+        StatusCode::OK,
+        "get node edges failed: {ne_body_text}"
+    );
     let ne_body: serde_json::Value = serde_json::from_str(&ne_body_text).unwrap();
 
     let outgoing = ne_body["outgoing"].as_array().unwrap();
@@ -363,7 +395,11 @@ async fn test_belief_history_endpoint() {
         .unwrap();
     let hist_status = history.status();
     let hist_body_text = history.text().await.unwrap();
-    assert_eq!(hist_status, StatusCode::OK, "belief history failed: {hist_body_text}");
+    assert_eq!(
+        hist_status,
+        StatusCode::OK,
+        "belief history failed: {hist_body_text}"
+    );
     let hist_body: serde_json::Value = serde_json::from_str(&hist_body_text).unwrap();
 
     assert_eq!(hist_body["fact_key"], fact_key);
@@ -428,7 +464,11 @@ async fn test_centrality_hub_nodes() {
             .unwrap();
         let e_status = edge.status();
         let e_body_text = edge.text().await.unwrap();
-        assert_eq!(e_status, StatusCode::OK, "create hub edge failed: {e_body_text}");
+        assert_eq!(
+            e_status,
+            StatusCode::OK,
+            "create hub edge failed: {e_body_text}"
+        );
     }
 
     // Trigger centrality recomputation
@@ -440,7 +480,11 @@ async fn test_centrality_hub_nodes() {
         .unwrap();
     let cent_status = centrality.status();
     let cent_body_text = centrality.text().await.unwrap();
-    assert_eq!(cent_status, StatusCode::OK, "centrality failed: {cent_body_text}");
+    assert_eq!(
+        cent_status,
+        StatusCode::OK,
+        "centrality failed: {cent_body_text}"
+    );
     let cent_body: serde_json::Value = serde_json::from_str(&cent_body_text).unwrap();
     assert!(
         cent_body["updated_nodes"].as_u64().unwrap_or(0) >= 2,
@@ -510,7 +554,12 @@ async fn test_semantic_walk_expands() {
         .send()
         .await
         .unwrap();
-    assert_eq!(edge.status(), StatusCode::OK, "{}", edge.text().await.unwrap());
+    assert_eq!(
+        edge.status(),
+        StatusCode::OK,
+        "{}",
+        edge.text().await.unwrap()
+    );
 
     // Query — at minimum the query must succeed without error
     let query = client
@@ -600,9 +649,9 @@ async fn test_semantic_walk_skips_archived() {
     // upsert_fact reuses the same id (fact::{ns}::{fact_key}) for both writes,
     // so the old record is archived in-place and replaced by the new active record
     // with the same id. Any result returned must have status "active".
-    let has_archived_status = results.iter().any(|r| {
-        r["record"]["status"].as_str() == Some("archived")
-    });
+    let has_archived_status = results
+        .iter()
+        .any(|r| r["record"]["status"].as_str() == Some("archived"));
     assert!(
         !has_archived_status,
         "archived records should not appear in query results; results: {results:?}"
