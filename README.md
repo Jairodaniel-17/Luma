@@ -96,11 +96,16 @@ Una capa de memoria completa para agentes autónomos, construida encima del stac
 
 **Endpoints** (`/v1/memory/{namespace}/`):
 - `POST ingest_event` — ingesta episódica con embedding + working memory opcional
-- `POST upsert_fact` — crea o actualiza un fact semántico
-- `POST query` — recall híbrido (episodic + semantic + procedural)
+- `POST upsert_fact` — crea o actualiza un fact semántico (versiona el anterior automáticamente)
+- `POST query` — recall híbrido con semantic walk BFS sobre grafo de memorias
 - `GET timeline/{entity_id}` — historial cronológico por entidad
 - `POST upsert_procedure` — registra/actualiza un DAG procedural
 - `POST next_step` — resuelve el siguiente nodo válido según contexto y constraints
+- `POST edges` — crear arista tipada entre memorias
+- `GET edges/{memory_id}` — aristas entrantes y salientes de un nodo
+- `POST edges/{edge_id}/delete` — eliminar arista
+- `GET beliefs/{fact_key}/history` — historial de versiones de un belief
+- `POST graph/centrality` — recomputar PageRank del namespace
 
 Proveedores LLM soportados: `none`, `mock`, `openai`, `ollama`. Ver `docs/NS_MEM.md`.
 
@@ -159,6 +164,22 @@ Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con b
 3.  **Eventos (Core):** Publica un evento `search_audit` que otros microservicios pueden escuchar en tiempo real.
 
 Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
+
+## 🚀 Novedades en v2.0.0 (NS-Mem Graph Layer)
+
+**Breaking change**: el recall de NS-Mem ya no es K-NN plano. Ahora usa un **semantic walk BFS** sobre un grafo de memorias tipado.
+
+*   **Graph Layer** (`src/memory/graph.rs`): motor de grafo sobre SQLite con aristas tipadas entre memorias (`supports`, `contradicts`, `supersedes`, `triggered_by`, `related_to`).
+*   **Semantic Walk BFS**: seeds K-NN → expansión por aristas con factor por tipo → corte si coseno < 0.65 → ranking por `coseno × edge_factor × (1 + PageRank)`.
+*   **PageRank centralidad**: 15 iteraciones sobre aristas positivas, normalizado `[0,1]`, almacenado en `memory_records.centrality_score`. Recomputable vía API.
+*   **Versionado de beliefs**: `upsert_fact` sobre fact existente archiva la versión anterior en `memory_history` (tabla append-only) y crea una arista `Supersedes`.
+*   **Aristas automáticas**: consolidación crea arista `TriggeredBy` (episodic → semantic) en cada extracción de fact.
+*   **Nuevos endpoints** en `/v1/memory/{namespace}/`:
+    *   `POST edges` — crear arista manual
+    *   `GET edges/{memory_id}` — aristas de un nodo
+    *   `POST edges/{edge_id}/delete` — eliminar arista
+    *   `GET beliefs/{fact_key}/history` — historial de versiones de un belief
+    *   `POST graph/centrality` — disparar recomputo PageRank
 
 ## 🚀 Novedades en v1.4.0 (NS-Mem — Agent Memory Layer)
 
