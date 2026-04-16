@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Luma API
-  version: 1.4.0
+  version: 2.0.0
   description: 'API documentation for **Luma**, a convergent data engine for AI applications.
 
 
@@ -18,6 +18,10 @@ info:
 
     - **NS-Mem (Level 3)**: Agent memory layer — episodic, semantic, procedural and
     working memory with LLM-based fact consolidation.
+
+    - **NS-Mem Graph Layer (v2.0.0)**: Typed edges between memories (supports, contradicts,
+    supersedes, triggered_by, related_to), PageRank centrality, belief versioning, and
+    Semantic Walk BFS recall replacing flat K-NN.
 
     - **Real-time**: SSE streaming of database events.
 
@@ -979,6 +983,154 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/MemoryRecord'
+    EdgeType:
+      type: string
+      enum:
+      - supports
+      - contradicts
+      - supersedes
+      - triggered_by
+      - related_to
+      description: Semantic relationship type between two memory records.
+    MemoryEdge:
+      type: object
+      required:
+      - id
+      - namespace
+      - source_id
+      - target_id
+      - edge_type
+      - weight
+      - created_at_ms
+      properties:
+        id:
+          type: string
+        namespace:
+          type: string
+        source_id:
+          type: string
+        target_id:
+          type: string
+        edge_type:
+          $ref: '#/components/schemas/EdgeType'
+        weight:
+          type: number
+          format: float
+          description: Edge weight in [0, 1]. Used to scale the score contribution during Semantic Walk BFS.
+        metadata:
+          type: object
+          nullable: true
+        created_at_ms:
+          type: integer
+          format: uint64
+    BeliefVersion:
+      type: object
+      required:
+      - id
+      - fact_key
+      - namespace
+      - content
+      - confidence
+      - status
+      - valid_from
+      - created_at_ms
+      properties:
+        id:
+          type: string
+        fact_key:
+          type: string
+        namespace:
+          type: string
+        entity_id:
+          type: string
+          nullable: true
+        content:
+          type: string
+        confidence:
+          type: number
+          format: float
+        status:
+          type: string
+        superseded_by:
+          type: string
+          nullable: true
+          description: ID of the newer MemoryRecord that replaced this version.
+        valid_from:
+          type: integer
+          format: uint64
+        valid_until:
+          type: integer
+          format: uint64
+          nullable: true
+        created_at_ms:
+          type: integer
+          format: uint64
+    UpsertEdgeRequest:
+      type: object
+      required:
+      - source_id
+      - target_id
+      - edge_type
+      properties:
+        id:
+          type: string
+          nullable: true
+          description: Optional idempotent edge ID. Auto-generated UUID if omitted.
+        source_id:
+          type: string
+        target_id:
+          type: string
+        edge_type:
+          $ref: '#/components/schemas/EdgeType'
+        weight:
+          type: number
+          format: float
+          nullable: true
+          default: 1.0
+        metadata:
+          type: object
+          nullable: true
+    NodeEdgesResponse:
+      type: object
+      required:
+      - memory_id
+      - outgoing
+      - incoming
+      properties:
+        memory_id:
+          type: string
+        outgoing:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryEdge'
+        incoming:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryEdge'
+    BeliefHistoryResponse:
+      type: object
+      required:
+      - fact_key
+      - versions
+      properties:
+        fact_key:
+          type: string
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/BeliefVersion'
+          description: Ordered from newest to oldest. The active version is first.
+    CentralityResponse:
+      type: object
+      required:
+      - namespace
+      - updated
+      properties:
+        namespace:
+          type: string
+        updated:
+          type: integer
+          description: Number of memory records whose centrality_score was recomputed.
 paths:
   /v1/health:
     get:
@@ -1996,6 +2148,177 @@ paths:
                 $ref: '#/components/schemas/TimelineResponse'
         '500':
           description: Timeline lookup failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/edges:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Create a typed edge between two memory records
+      description: 'Creates a directed, weighted edge of the graph layer. If an edge
+        with the same `id` already exists it is replaced (upsert semantics).
+
+        Auto-created edges: consolidation creates `triggered_by` (episodic → semantic);
+        `upsert_fact` on an existing fact creates `supersedes` (new → archived).'
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertEdgeRequest'
+      responses:
+        '200':
+          description: Edge created or replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryEdge'
+        '500':
+          description: Edge creation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/edges/{memory_id}:
+    get:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Get all edges for a memory node
+      description: Returns all outgoing and incoming edges of the specified memory record.
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: memory_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Outgoing and incoming edges
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeEdgesResponse'
+        '500':
+          description: Lookup failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/edges/{edge_id}/delete:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Delete a memory edge
+      description: Removes a specific edge by its ID. Idempotent — returns 200 even if
+        the edge did not exist.
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: edge_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Edge deleted (or was already absent)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+        '500':
+          description: Deletion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/beliefs/{fact_key}/history:
+    get:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Get belief version history for a fact key
+      description: Returns all historical versions of a semantic fact, ordered newest
+        first. Every `upsert_fact` that overwrites an existing key appends a new entry
+        to this history.
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: fact_key
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Version history for the belief
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeliefHistoryResponse'
+        '500':
+          description: History lookup failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/memory/{namespace}/graph/centrality:
+    post:
+      tags:
+      - NS-Mem
+      security:
+      - bearerAuth: []
+      summary: Recompute PageRank centrality for the namespace
+      description: 'Runs 15 iterations of PageRank (damping 0.85) over positive edges
+        (supports, triggered_by, related_to) and writes normalized [0,1] scores back
+        to `memory_records.centrality_score`. Scores are used during Semantic Walk BFS
+        to boost highly-connected nodes.
+
+        This operation is idempotent and safe to call at any time.'
+      parameters:
+      - in: path
+        name: namespace
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Centrality scores recomputed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CentralityResponse'
+        '500':
+          description: Centrality computation failed
           content:
             application/json:
               schema:
