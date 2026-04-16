@@ -9,34 +9,24 @@ pub enum MemoryKind {
     Working,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
     Draft,
+    #[default]
     Active,
     Archived,
 }
 
-impl Default for MemoryStatus {
-    fn default() -> Self {
-        Self::Active
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryQueryMode {
+    #[default]
     Auto,
     Recall,
     Timeline,
     NextStep,
     ConstraintCheck,
-}
-
-impl Default for MemoryQueryMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,18 +38,13 @@ pub enum ProcedureNodeKind {
     Goal,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcedureStatus {
     Draft,
+    #[default]
     Active,
     Archived,
-}
-
-impl Default for ProcedureStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

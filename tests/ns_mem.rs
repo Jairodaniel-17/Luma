@@ -106,13 +106,11 @@ async fn episodic_ingest_promotes_semantic_fact_when_consolidation_enabled() {
         .unwrap();
     assert_eq!(query.status(), StatusCode::OK);
     let body: serde_json::Value = query.json().await.unwrap();
-    assert!(
-        body["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["record"]["kind"] == "semantic")
-    );
+    assert!(body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["record"]["kind"] == "semantic"));
 
     let _ = app.shutdown.send(());
 }
@@ -170,8 +168,8 @@ async fn memory_recall_and_timeline_endpoints_work() {
     assert_eq!(query_status, StatusCode::OK, "{query_body}");
     let body: serde_json::Value = serde_json::from_str(&query_body).unwrap();
     assert_eq!(body["mode"], "recall");
-    assert!(body["results"].as_array().unwrap().len() >= 1);
-    assert!(body["evidence"].as_array().unwrap().len() >= 1);
+    assert!(!body["results"].as_array().unwrap().is_empty());
+    assert!(!body["evidence"].as_array().unwrap().is_empty());
 
     let timeline = client
         .get(format!("{}/v1/memory/agents/timeline/user-1", app.base))
