@@ -173,6 +173,23 @@ pub fn router(
             "/v1/memory/:namespace/timeline/:entity_id",
             get(routes_memory::timeline),
         )
+        .route("/v1/memory/:namespace/edges", post(routes_memory::upsert_edge))
+        .route(
+            "/v1/memory/:namespace/edges/:memory_id",
+            get(routes_memory::get_node_edges),
+        )
+        .route(
+            "/v1/memory/:namespace/edges/:edge_id/delete",
+            post(routes_memory::delete_edge),
+        )
+        .route(
+            "/v1/memory/:namespace/beliefs/:fact_key/history",
+            get(routes_memory::belief_history),
+        )
+        .route(
+            "/v1/memory/:namespace/graph/centrality",
+            post(routes_memory::recompute_centrality),
+        )
         .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/v1/config", get(routes_config::get_config))
         .route("/v1/config", put(routes_config::update_config))
