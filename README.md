@@ -62,14 +62,15 @@ Luma está construido sobre el ecosistema de **Rust**, priorizando la seguridad 
     *   `luma::engine::inner`: Contiene la lógica de sincronización y el bus de eventos.
 *   **`src/sqlite/`**: Contiene `SqliteService`, la abstracción que maneja el pool de conexiones y las consultas al motor SQL embebido.
 *   **`src/vector/`**: Lógica matemática pura y estructuras de datos para la indexación vectorial (DiskANN, IVF).
-*   **`src/api/`**: Controladores HTTP que exponen las capacidades de ambos motores al usuario final.
+*   **`src/api/`**: Controladores HTTP que exponen las capacidades de todos los motores al usuario final.
+*   **`src/memory/`**: NS-Mem — capa de memoria de agentes. Incluye ingesta episódica, facts semánticos, motor procedural DAG, consolidación LLM y retrieval híbrido.
 
 ---
 
 
 ---
 
-## 🧭 Paradigma de Uso: Dos Niveles (Nivel 1 y Nivel 2)
+## 🧭 Paradigma de Uso: Tres Niveles
 
 Luma está diseñado bajo una arquitectura "A la Carta", lo que significa que puedes usarlo como una base de datos simple de bajo nivel, o como un poderoso motor orquestador para flujos RAG completos.
 
@@ -79,6 +80,31 @@ Ideales para máxima velocidad y bajo overhead. Cada motor funciona de forma ais
 *   **Documentos:** `/v1/doc/...` (Almacenamiento de JSON, como un MongoDB ligero).
 *   **Clave-Valor:** `/v1/state/...` (Para locks, coordinación, configuración).
 *   **Relacional:** `/v1/sql/...` (Ejecución cruda de queries SQLite).
+
+### Nivel 3: NS-Mem — Memoria de Agentes
+
+Una capa de memoria completa para agentes autónomos, construida encima del stack convergente de Luma:
+
+| Tipo | Almacenamiento | Descripción |
+| :--- | :--- | :--- |
+| **episodic** | Vector + SQLite | Eventos e interacciones concretas indexadas para recall semántico |
+| **semantic** | Vector + SQLite | Hechos y preferencias estables, promovidos desde episodic vía LLM |
+| **procedural** | SQLite (DAG) | Flujos de trabajo con nodos, edges tipados y evaluación de constraints |
+| **working** | KV + TTL | Contexto efímero de sesión, expira automáticamente |
+
+**Pipeline de consolidación**: `ingest_event` → extracción de facts (LLM o heurística local) → `semantic` (`active` si confianza ≥ 0.85, else `draft`).
+
+**Endpoints** (`/v1/memory/{namespace}/`):
+- `POST ingest_event` — ingesta episódica con embedding + working memory opcional
+- `POST upsert_fact` — crea o actualiza un fact semántico
+- `POST query` — recall híbrido (episodic + semantic + procedural)
+- `GET timeline/{entity_id}` — historial cronológico por entidad
+- `POST upsert_procedure` — registra/actualiza un DAG procedural
+- `POST next_step` — resuelve el siguiente nodo válido según contexto y constraints
+
+Proveedores LLM soportados: `none`, `mock`, `openai`, `ollama`. Ver `docs/NS_MEM.md`.
+
+---
 
 ### Nivel 2: LumaDatabase Hub (Modo Híbrido RAG)
 El orquestador interno (`LumaDatabase`) fusiona el poder de todos los motores para hacer el trabajo pesado por ti. Segmenta documentos grandes (Chunking), se conecta a modelos de Embeddings (Ollama/OpenAI) de forma automática, y hace **Pre-filtrado SQL estricto** a la velocidad de la luz antes de realizar la búsqueda vectorial, evitando los problemas clásicos del "Post-filtrado" vectorial.
@@ -133,6 +159,15 @@ Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con b
 3.  **Eventos (Core):** Publica un evento `search_audit` que otros microservicios pueden escuchar en tiempo real.
 
 Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
+
+## 🚀 Novedades en v1.4.0 (NS-Mem — Agent Memory Layer)
+
+*   **NS-Mem**: Capa completa de memoria para agentes (`src/memory/`). Tipos: `episodic`, `semantic`, `procedural`, `working`. Pipeline de consolidación automática episodic → semantic vía LLM.
+*   **Motor procedural DAG**: Flujos de trabajo persistidos en SQLite con evaluación determinista de constraints en Rust (8 operadores).
+*   **LLM providers**: Extracción de facts vía `openai`, `ollama`, `mock` o heurísticas locales (`none`).
+*   **KV sharding**: Store fragmentado en 16 buckets independientes (menor contención).
+*   **WAL group commit**: Reducción de fsyncs en ingesta masiva.
+*   **Métricas con histogramas de latencia**: `/v1/metrics` con percentiles p50/p95/p99.
 
 ## 🚀 Novedades en v1.3.2 (Mmap & Zero-Copy Architecture)
 
