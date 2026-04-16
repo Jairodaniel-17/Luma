@@ -1,20 +1,23 @@
 openapi: 3.0.3
 info:
   title: Luma API
-  version: 1.2.0
-  description: 'API documentation for **Luma**, a lightweight, high-performance vector
-    database optimized for RAG (Retrieval-Augmented Generation).
+  version: 1.4.0
+  description: 'API documentation for **Luma**, a convergent data engine for AI applications.
 
 
     ## Features
 
-    - **Vector Operations**: Exact and ANN search.
+    - **Vector Operations**: Exact and ANN search (HNSW, IVF_FLAT_Q8, DiskANN).
 
-    - **State Management**: Key-Value store with optimistic locking (CAS).
+    - **State Management**: Key-Value store with optimistic locking (CAS) and range scans.
 
     - **Document Store**: Raw document storage linked to vectors.
 
-    - **RAG Search (Legacy)**: High-level semantic search with grouping.
+    - **LumaDatabase (Level 2)**: Auto-chunking, embedding generation, hybrid SQL+vector
+    search.
+
+    - **NS-Mem (Level 3)**: Agent memory layer — episodic, semantic, procedural and
+    working memory with LLM-based fact consolidation.
 
     - **Real-time**: SSE streaming of database events.
 
