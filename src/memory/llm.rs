@@ -135,7 +135,10 @@ impl InferenceClient {
             .context("openai fact extraction request")?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("OpenAI API error: {}", resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "OpenAI API error: {}",
+                resp.text().await.unwrap_or_default()
+            ));
         }
 
         let parsed: Resp = resp.json().await.context("parse openai fact extraction")?;
@@ -179,7 +182,10 @@ impl InferenceClient {
             .context("ollama fact extraction request")?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("Ollama API error: {}", resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "Ollama API error: {}",
+                resp.text().await.unwrap_or_default()
+            ));
         }
 
         let parsed: Resp = resp.json().await.context("parse ollama fact extraction")?;
@@ -215,7 +221,9 @@ fn parse_candidates_payload(payload: &str) -> Result<Vec<FactCandidate>> {
 fn normalize_candidates(candidates: Vec<FactCandidate>) -> Vec<FactCandidate> {
     candidates
         .into_iter()
-        .filter(|candidate| !candidate.fact_key.trim().is_empty() && !candidate.content.trim().is_empty())
+        .filter(|candidate| {
+            !candidate.fact_key.trim().is_empty() && !candidate.content.trim().is_empty()
+        })
         .map(|mut candidate| {
             candidate.confidence = candidate.confidence.clamp(0.0, 1.0);
             candidate
@@ -229,7 +237,10 @@ fn merge_candidates(
 ) -> Vec<FactCandidate> {
     let mut out = primary;
     for candidate in fallback {
-        if out.iter().any(|existing| existing.fact_key == candidate.fact_key) {
+        if out
+            .iter()
+            .any(|existing| existing.fact_key == candidate.fact_key)
+        {
             continue;
         }
         out.push(candidate);
@@ -237,10 +248,7 @@ fn merge_candidates(
     out
 }
 
-pub fn heuristic_extract_facts(
-    text: &str,
-    metadata: &serde_json::Value,
-) -> Vec<FactCandidate> {
+pub fn heuristic_extract_facts(text: &str, metadata: &serde_json::Value) -> Vec<FactCandidate> {
     let mut out = Vec::new();
     let lower = text.to_ascii_lowercase();
 
@@ -256,10 +264,9 @@ pub fn heuristic_extract_facts(
         });
     }
 
-    if let Some(preference) = extract_after_any(
-        text,
-        &["prefiere ", "prefers ", "wants ", "quiere "],
-    ) {
+    if let Some(preference) =
+        extract_after_any(text, &["prefiere ", "prefers ", "wants ", "quiere "])
+    {
         out.push(FactCandidate {
             fact_key: "user_preference".to_string(),
             content: format!("Prefiere {}", preference.trim()),
@@ -290,9 +297,7 @@ fn extract_after_any<'a>(text: &'a str, needles: &[&str]) -> Option<&'a str> {
         if let Some(idx) = lower.find(needle) {
             let start = idx + needle.len();
             let tail = &text[start..];
-            let end = tail
-                .find(['.', ',', ';', '\n'])
-                .unwrap_or(tail.len());
+            let end = tail.find(['.', ',', ';', '\n']).unwrap_or(tail.len());
             let value = tail[..end].trim();
             if !value.is_empty() {
                 return Some(value);
@@ -312,6 +317,8 @@ mod tests {
             "El usuario pidió activar alertas por correo",
             &serde_json::json!({ "channel": "chat" }),
         );
-        assert!(facts.iter().any(|fact| fact.fact_key == "notification_preference"));
+        assert!(facts
+            .iter()
+            .any(|fact| fact.fact_key == "notification_preference"));
     }
 }

@@ -42,7 +42,9 @@ fn compare_f64(
 fn contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
     match (actual, expected) {
         (serde_json::Value::Array(items), value) => items.iter().any(|item| item == value),
-        (serde_json::Value::String(text), serde_json::Value::String(needle)) => text.contains(needle),
+        (serde_json::Value::String(text), serde_json::Value::String(needle)) => {
+            text.contains(needle)
+        }
         _ => false,
     }
 }

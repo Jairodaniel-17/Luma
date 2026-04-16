@@ -205,7 +205,7 @@ impl LumaDatabase {
 
         let vector_stage = std::time::Instant::now();
         let mut inserted_ids = Vec::with_capacity(chunks.len());
-        for (i, (chunk, vector)) in chunks.iter().zip(vectors.into_iter()).enumerate() {
+        for (i, (chunk, vector)) in chunks.iter().zip(vectors).enumerate() {
             let chunk_id = format!("{}#{}", doc_id, i);
             let meta = ChunkMetadata {
                 parent_id: doc_id.to_string(),
