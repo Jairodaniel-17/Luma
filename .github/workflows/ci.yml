@@ -46,8 +46,28 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@1.75
+      - name: Check compilation on MSRV
+        run: cargo check --all-features
+
+  deny:
+    name: Dependency Audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Run cargo-deny
+        run: cargo deny check
+
   audit:
-    name: Security Audit
+    name: Security Audit (cargo-audit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

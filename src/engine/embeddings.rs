@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 type EmbedCache = Arc<Mutex<LruCache<String, Vec<f32>>>>;
 
@@ -33,6 +34,8 @@ pub struct EmbeddingClient {
     /// Metrics handle for tracking cache hits/misses (optional).
     metrics: Option<Arc<crate::engine::metrics::Metrics>>,
     max_inflight_requests: usize,
+    /// Bounds concurrent outbound HTTP requests to the embedding provider.
+    inflight_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl Default for EmbeddingClient {
@@ -43,6 +46,7 @@ impl Default for EmbeddingClient {
             cache: None,
             metrics: None,
             max_inflight_requests: 16,
+            inflight_semaphore: None,
         }
     }
 }
@@ -55,6 +59,7 @@ impl EmbeddingClient {
             cache: None,
             metrics: None,
             max_inflight_requests: 16,
+            inflight_semaphore: None,
         }
     }
 
@@ -64,14 +69,16 @@ impl EmbeddingClient {
         max_inflight_requests: usize,
         metrics: Option<Arc<crate::engine::metrics::Metrics>>,
     ) -> Self {
+        let n = max_inflight_requests.max(1);
         let cache = NonZeroUsize::new(cache_size)
-            .map(|n| Arc::new(Mutex::new(LruCache::new(n))));
+            .map(|cap| Arc::new(Mutex::new(LruCache::new(cap))));
         Self {
             provider,
             client: reqwest::Client::new(),
             cache,
             metrics,
-            max_inflight_requests: max_inflight_requests.max(1),
+            max_inflight_requests: n,
+            inflight_semaphore: Some(Arc::new(Semaphore::new(n))),
         }
     }
 
@@ -173,6 +180,11 @@ impl EmbeddingClient {
     }
 
     async fn embed_uncached(&self, text: &str) -> Result<Vec<f32>> {
+        let _permit = if let Some(sem) = &self.inflight_semaphore {
+            Some(sem.acquire().await.map_err(|e| anyhow!("semaphore closed: {e}"))?)
+        } else {
+            None
+        };
         match &self.provider {
             EmbeddingProvider::None => Err(anyhow::anyhow!("Embeddings are not configured")),
             EmbeddingProvider::OpenAI {
@@ -285,6 +297,11 @@ impl EmbeddingClient {
         let mut all_vecs: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
         for chunk in texts.chunks(OPENAI_BATCH_LIMIT) {
+            let _permit = if let Some(sem) = &self.inflight_semaphore {
+                Some(sem.acquire().await.map_err(|e| anyhow!("semaphore closed: {e}"))?)
+            } else {
+                None
+            };
             let resp = self
                 .client
                 .post(api_url)
