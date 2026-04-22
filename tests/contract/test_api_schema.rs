@@ -30,6 +30,7 @@ async fn test_health_check_contract() {
         std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
+        None,
     );
 
     let response = app
@@ -75,6 +76,7 @@ async fn test_error_schema_contract() {
         std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
+        None,
     );
 
     // Request with missing auth

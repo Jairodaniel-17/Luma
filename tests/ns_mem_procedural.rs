@@ -35,7 +35,15 @@ async fn start() -> TestApp {
     let embeddings = Arc::new(luma::engine::embeddings::EmbeddingClient::new(
         luma::engine::embeddings::EmbeddingProvider::Mock { dim: 4 },
     ));
-    let app = api::router(engine, config, Some(sqlite), search_engine, None, embeddings);
+    let app = api::router(
+        engine,
+        config,
+        Some(sqlite),
+        search_engine,
+        None,
+        embeddings,
+        None,
+    );
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -133,7 +141,10 @@ async fn linear_dag_steps_through_all_nodes() {
         serde_json::json!({ "procedure_id": "linear", "current_node_id": "g", "context": {} }),
     )
     .await;
-    assert!(!blocked["blocked_reason"].is_null(), "expected blocked at terminal node");
+    assert!(
+        !blocked["blocked_reason"].is_null(),
+        "expected blocked at terminal node"
+    );
 
     let _ = app.shutdown.send(());
 }
@@ -178,7 +189,11 @@ async fn conditional_branching_takes_correct_path() {
     .await;
 
     // Advance to decision node
-    next_step(&app, serde_json::json!({ "procedure_id": "branch", "context": {} })).await;
+    next_step(
+        &app,
+        serde_json::json!({ "procedure_id": "branch", "context": {} }),
+    )
+    .await;
 
     let high_path = next_step(
         &app,
@@ -430,7 +445,10 @@ async fn no_start_node_returns_blocked_with_reason() {
         serde_json::json!({ "procedure_id": "no_start", "context": {} }),
     )
     .await;
-    assert!(resp["blocked_reason"].as_str().unwrap_or("").contains("start"));
+    assert!(resp["blocked_reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("start"));
 
     let _ = app.shutdown.send(());
 }
@@ -597,7 +615,10 @@ async fn upsert_replaces_previous_definition() {
         serde_json::json!({ "procedure_id": "replace_me", "context": {} }),
     )
     .await;
-    assert_eq!(step["next_node"]["node_id"], "new_node", "old definition should be replaced");
+    assert_eq!(
+        step["next_node"]["node_id"], "new_node",
+        "old definition should be replaced"
+    );
 
     let _ = app.shutdown.send(());
 }

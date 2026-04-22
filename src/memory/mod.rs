@@ -1,4 +1,5 @@
 pub mod consolidator;
+pub mod decay;
 pub mod graph;
 pub mod graph_api;
 pub mod ingest;

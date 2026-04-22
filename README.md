@@ -144,14 +144,24 @@ Busca semánticamente usando un modelo de embeddings y filtra rígidamente (Pre-
 *Incluso si existe un contrato de compra-venta de 2023 muy parecido semánticamente a la pregunta, Luma lo descartará instantáneamente en la fase SQLite (usando el canal de concurrencia MPSC en memoria) antes de desperdiciar CPU en el motor vectorial.*
 
 ### 🔌 Configuración de Embeddings (BYOM - Bring Your Own Model)
-Para no engordar el binario con librerías pesadas de C++, Luma usa un cliente ligero HTTP integrado. Simplemente configúralo en tu código o entorno:
+Para no engordar el binario con librerías pesadas de C++, Luma usa un cliente ligero HTTP integrado. Soporta 6 providers con retry automático:
 
-```rust
-// Ejemplo para Ollama local
-luma::engine::embeddings::EmbeddingProvider::Ollama {
-    api_url: "http://localhost:11434".to_string(),
-    model: "granite-embedding:30m".to_string(),
-}
+| Provider | Variable | Notas |
+| :--- | :--- | :--- |
+| `ollama` | `EMBEDDING_URL`, `EMBEDDING_MODEL` | Local, sin API key |
+| `openai` | `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Batching ≤ 96 |
+| `azure` | `EMBEDDING_AZURE_API_BASE`, `EMBEDDING_AZURE_DEPLOYMENT` | API key header |
+| `cohere` | `EMBEDDING_API_KEY`, `EMBEDDING_COHERE_INPUT_TYPE` | `search_document` / `search_query` |
+| `huggingface` | `EMBEDDING_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Inference API |
+| `mock` | `EMBEDDING_DIM` | Tests/CI sin red |
+
+```bash
+# Ejemplo: Azure OpenAI
+EMBEDDING_PROVIDER=azure
+EMBEDDING_AZURE_API_BASE=https://mi-recurso.openai.azure.com
+EMBEDDING_AZURE_DEPLOYMENT=text-embedding-3-small
+EMBEDDING_API_KEY=sk-...
+EMBEDDING_RETRY_ATTEMPTS=3
 ```
 
 ## 💡 Flujos de Trabajo Híbridos
@@ -164,6 +174,36 @@ Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con b
 3.  **Eventos (Core):** Publica un evento `search_audit` que otros microservicios pueden escuchar en tiempo real.
 
 Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
+
+## 🚀 Novedades en v3.0.0 (Search, Observabilidad y NS-Mem Avanzado)
+
+### Búsqueda y exportación
+
+- **Batch search** (`POST /v1/vector/{collection}/search_batch`): hasta 100 queries ejecutadas en paralelo internamente (`rayon`). Reduce 100 round-trips a 1.
+- **Scroll / cursor API** (`GET /v1/vector/{collection}/scroll`): paginación lexicográfica con cursor opaco para exportar colecciones completas sin límite de `k`.
+- **Reranking por coseno** (`POST /v1/vector/{collection}/rerank`): recibe IDs + query (texto o vector), embebe si es texto, reordena por coseno real. Ideal para pipeline search-then-rerank.
+- **Aggregations** (`POST /v1/vector/{collection}/aggregate`): `{ "group_by": "campo", "filter": {...}, "limit": N }` — cuenta ítems por valor usando el keyword index. Fast path O(1) para campos indexados.
+- **Pre-filter threshold configurable** (`pre_filter_threshold`, default 10 000): brute-force automático sobre subconjuntos filtrados, más eficiente que HNSW + post-filter para corpus muy filtrados.
+
+### Embeddings
+
+- **4 nuevos providers**: `azure` (Azure OpenAI), `cohere` (v1/embed con input_type), `huggingface` (Inference API), añadidos a los existentes `openai`, `ollama`, `mock`.
+- **Retry con backoff exponencial + jitter**: `EMBEDDING_RETRY_ATTEMPTS` (default 3) y `EMBEDDING_RETRY_INITIAL_MS` (default 200). Resiste 429 y 503 transitorios sin fallar la request.
+
+### Observabilidad y operaciones
+
+- **Audit log** (`GET /v1/admin/audit`): cada request queda registrada en SQLite con `ts`, `api_key_id`, `ip`, `method`, `path`, `status`, `latency_ms`. Filtra por rango de tiempo, key e id.
+- **Backup endpoint** (`POST /v1/admin/backup`): dispara snapshot WAL y retorna `{ "ok": true, "offset": N }`. Ambos requieren rol `admin`.
+- **Bench CI**: `cargo bench --no-run` como job en GitHub Actions — bloquea merges que rompen compilación de benchmarks.
+- **RBAC tests** (`tests/auth_rbac.rs`): 7 tests de integración que cubren 401/403 en todas las combinaciones de token ausente, inválido, revocado y rol `user` vs `admin`.
+
+### NS-Mem — Memoria de agentes más inteligente
+
+- **Deduplicación de facts**: el consolidador verifica similitud semántica (cosine ≥ 0.95) antes de insertar. Facts redundantes extraídos de eventos distintos no se acumulan.
+- **Decay exponencial** (`memory_decay_enabled`): campo `decay_score` en cada fact semántico. Decae con semivida configurable (`memory_decay_half_life_days`, default 30d). Facts por debajo del umbral se archivan automáticamente.
+- **Detección de contradicciones**: al sobrescribir un fact (`upsert_fact`), si la similitud semántica entre el contenido viejo y el nuevo es < 0.55, se crea una arista `Contradicts` en lugar de `Supersedes` y se emite log de contradicción detectada.
+
+---
 
 ## 🚀 Novedades en v2.0.0 (NS-Mem Graph Layer)
 

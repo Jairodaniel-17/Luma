@@ -1,3 +1,4 @@
+use crate::api::audit::AuditKeyId;
 use crate::api::errors::ApiError;
 use crate::api::{AppState, TenantContext};
 use axum::extract::State;
@@ -52,6 +53,7 @@ pub async fn auth_middleware(
         match store.validate_key(&token).await {
             Ok(Some(record)) => {
                 let mut req = req;
+                req.extensions_mut().insert(AuditKeyId(record.id.clone()));
                 req.extensions_mut().insert(TenantContext {
                     tenant_id: record.tenant_id.clone(),
                     role: record.role,
@@ -77,6 +79,8 @@ pub async fn auth_middleware(
     // 2. Check Static Config
     if token == state.config.api_key {
         let mut req = req;
+        req.extensions_mut()
+            .insert(AuditKeyId("static".to_string()));
         req.extensions_mut().insert(TenantContext {
             tenant_id: None,
             role: "admin".to_string(),

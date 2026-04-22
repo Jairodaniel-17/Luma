@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## 🚀 Novedades en v3.0.0 (Search, Observabilidad y NS-Mem Avanzado)
+
+### Búsqueda y exportación
+
+- **Batch search** (`POST /v1/vector/{collection}/search_batch`): hasta 100 queries ejecutadas en paralelo internamente (`rayon`). Reduce 100 round-trips a 1.
+- **Scroll / cursor API** (`GET /v1/vector/{collection}/scroll`): paginación lexicográfica con cursor opaco para exportar colecciones completas sin límite de `k`.
+- **Reranking por coseno** (`POST /v1/vector/{collection}/rerank`): recibe IDs + query (texto o vector), embebe si es texto, reordena por coseno real. Ideal para pipeline search-then-rerank.
+- **Aggregations** (`POST /v1/vector/{collection}/aggregate`): `{ "group_by": "campo", "filter": {...}, "limit": N }` — cuenta ítems por valor usando el keyword index. Fast path O(1) para campos indexados.
+- **Pre-filter threshold configurable** (`pre_filter_threshold`, default 10 000): brute-force automático sobre subconjuntos filtrados, más eficiente que HNSW + post-filter para corpus muy filtrados.
+
+### Embeddings
+
+- **4 nuevos providers**: `azure` (Azure OpenAI), `cohere` (v1/embed con input_type), `huggingface` (Inference API), añadidos a los existentes `openai`, `ollama`, `mock`.
+- **Retry con backoff exponencial + jitter**: `EMBEDDING_RETRY_ATTEMPTS` (default 3) y `EMBEDDING_RETRY_INITIAL_MS` (default 200). Resiste 429 y 503 transitorios sin fallar la request.
+
+### Observabilidad y operaciones
+
+- **Audit log** (`GET /v1/admin/audit`): cada request queda registrada en SQLite con `ts`, `api_key_id`, `ip`, `method`, `path`, `status`, `latency_ms`. Filtra por rango de tiempo, key e id.
+- **Backup endpoint** (`POST /v1/admin/backup`): dispara snapshot WAL y retorna `{ "ok": true, "offset": N }`. Ambos requieren rol `admin`.
+- **Bench CI**: `cargo bench --no-run` como job en GitHub Actions — bloquea merges que rompen compilación de benchmarks.
+- **RBAC tests** (`tests/auth_rbac.rs`): 7 tests de integración que cubren 401/403 en todas las combinaciones de token ausente, inválido, revocado y rol `user` vs `admin`.
+
+### NS-Mem — Memoria de agentes más inteligente
+
+- **Deduplicación de facts**: el consolidador verifica similitud semántica (cosine ≥ 0.95) antes de insertar. Facts redundantes extraídos de eventos distintos no se acumulan.
+- **Decay exponencial** (`memory_decay_enabled`): campo `decay_score` en cada fact semántico. Decae con semivida configurable (`memory_decay_half_life_days`, default 30d). Facts por debajo del umbral se archivan automáticamente.
+- **Detección de contradicciones**: al sobrescribir un fact (`upsert_fact`), si la similitud semántica entre el contenido viejo y el nuevo es < 0.55, se crea una arista `Contradicts` en lugar de `Supersedes` y se emite log de contradicción detectada.
+
+## v2.1.0 (2026-04-22)
+
+### Added
+- **Typed `MetadataFilter` system** (`src/vector/filter.rs`): composable filter tree replacing the flat `{"field": "value"}` object.
+  - Operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `any_of`, `contains`, `starts_with`, `exists`.
+  - Logical combinators: `and`, `or`, `not` (arbitrarily nested).
+  - New `filter` field on `SearchOptions` (typed); legacy `filters` field kept for backward compatibility — both are merged with AND when both are present.
+- **`any_of` operator** for array-valued metadata fields: returns true when the field (JSON array) contains at least one of the query values. Example: `tax_system: ["suitetax","legacy"]` matches `any_of: ["suitetax"]`. Supports multi-system queries (`any_of: ["suitetax","v3"]`).
+- **Keyword index extended to array fields**: `add_meta_to_index` now indexes each string element of array-valued fields individually, enabling the keyword fast-path for `any_of` and `eq` queries on array fields without a full scan.
+- **Keyword index fast path for `any_of`**: resolves candidate ID sets directly from the index (union of all query values), same O(1) lookup as `eq`.
+- **SQL translation for hub pre-filtering** (`to_sql_where`): `any_of` maps to `EXISTS (SELECT 1 FROM json_each(metadata, '$.field') WHERE value IN (...))`.
+- **`from_legacy()`**: automatic conversion of old flat-object filters to typed `And([Eq(...)])` — no breaking change for existing API clients.
+
+### Internal
+- Removed `matches_filters()` free function and `Collection::keyword_candidates()` method; replaced by `filter::evaluate_filter()` and `filter::index_candidates()`.
+- 7 new tests for `any_of` covering: single-value match, multi-value OR semantics, scalar-field non-match, missing field, keyword index fast path, AND combination, SQL translation.
+
+---
+
 ## v2.0.1 (2026-04-22)
 
 ### Security

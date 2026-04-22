@@ -36,6 +36,8 @@ fn test_vector_collection_ops() {
         k: 1,
         options: SearchOptions {
             filters: None,
+            filter: None,
+            min_score: None,
             include_meta: true,
             allowed_ids: None,
         },
@@ -55,6 +57,8 @@ fn test_vector_collection_ops() {
                 k: 1,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },

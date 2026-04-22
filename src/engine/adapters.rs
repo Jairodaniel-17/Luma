@@ -18,7 +18,12 @@ impl BaseEngine for Engine {
         // Assume query is SearchRequest
         let req: SearchRequest = serde_json::from_value(query)?;
         let hits = self.vector_search(collection, req)?;
-        Ok(serde_json::to_value(hits)?.as_array().unwrap().clone())
+        let v = serde_json::to_value(hits)?;
+        let arr = v
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("vector search result is not a JSON array"))?
+            .clone();
+        Ok(arr)
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<bool> {

@@ -486,6 +486,8 @@ impl LumaDatabase {
                 k: plan.vector_k,
                 options: crate::vector::SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids,
                 },
@@ -538,6 +540,8 @@ impl LumaDatabase {
                 k: plan.vector_k,
                 options: crate::vector::SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids: None,
                 },

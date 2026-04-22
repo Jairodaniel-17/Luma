@@ -30,6 +30,7 @@ impl MemoryService {
             updated_at_ms: now_ms,
             expires_at_ms: request.expires_at_ms,
             embedding_ref: Some(memory_id.clone()),
+            decay_score: 1.0,
         };
 
         self.persist_memory_record(&record).await?;
@@ -59,22 +60,58 @@ impl MemoryService {
         }
 
         // ── Belief versioning: snapshot old record before overwriting ──────
+        // Also detect semantic contradictions: if the new content diverges
+        // significantly from the old (cosine < CONTRADICTION_THRESHOLD), create
+        // a Contradicts edge in addition to the Supersedes/archive path.
+        const CONTRADICTION_THRESHOLD: f32 = 0.55;
         if let Some(graph) = &self.graph {
             if let Ok(Some(existing)) = self.get_memory_record(namespace, &memory_id).await {
+                // Detect contradiction via embedding similarity
+                let is_contradiction = 'check: {
+                    let Ok(new_vec) = self.embeddings.embed(&request.content).await else {
+                        break 'check false;
+                    };
+                    let Ok(old_vec) = self.embeddings.embed(&existing.content).await else {
+                        break 'check false;
+                    };
+                    let dot: f32 = new_vec.iter().zip(old_vec.iter()).map(|(a, b)| a * b).sum();
+                    let n1: f32 = new_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let n2: f32 = old_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let cosine = if n1 > 0.0 && n2 > 0.0 {
+                        dot / (n1 * n2)
+                    } else {
+                        1.0
+                    };
+                    cosine < CONTRADICTION_THRESHOLD
+                };
+
                 // Append old version to history
                 if let Ok(history_id) = graph.append_belief_history(&existing, now_ms).await {
-                    // Create supersedes edge: new → old (target is the history snapshot id)
+                    let edge_type = if is_contradiction {
+                        EdgeType::Contradicts
+                    } else {
+                        EdgeType::Supersedes
+                    };
                     let edge = MemoryEdge {
-                        id: format!("supersedes::{memory_id}::{history_id}"),
+                        id: format!("{}::{memory_id}::{history_id}", edge_type),
                         namespace: namespace.to_string(),
                         source_id: memory_id.clone(),
                         target_id: existing.id.clone(),
-                        edge_type: EdgeType::Supersedes,
+                        edge_type,
                         weight: 1.0,
-                        metadata: serde_json::json!({"reason": "upsert_fact_overwrite"}),
+                        metadata: serde_json::json!({"reason": "upsert_fact_overwrite", "contradiction": is_contradiction}),
                         created_at_ms: now_ms,
                     };
-                    let _ = graph.upsert_edge(&edge).await;
+                    if let Err(e) = graph.upsert_edge(&edge).await {
+                        tracing::warn!("Failed to create belief edge: {}", e);
+                    }
+                    if is_contradiction {
+                        tracing::info!(
+                            namespace = %namespace,
+                            fact_id = %memory_id,
+                            "detected belief contradiction (cosine < {CONTRADICTION_THRESHOLD})"
+                        );
+                    }
                 }
                 // Archive the old version in memory_records
                 let _ = self.archive_memory_record(namespace, &existing.id).await;
@@ -95,6 +132,7 @@ impl MemoryService {
             updated_at_ms: now_ms,
             expires_at_ms: None,
             embedding_ref: Some(memory_id.clone()),
+            decay_score: 1.0,
         };
         self.persist_memory_record(&record).await?;
         self.index_memory_record(&record).await?;
@@ -130,8 +168,8 @@ impl MemoryService {
             .execute(
                 "INSERT OR REPLACE INTO memory_records (
                     id, namespace, entity_id, kind, status, content, metadata, confidence, source,
-                    created_at_ms, updated_at_ms, expires_at_ms, embedding_ref
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    created_at_ms, updated_at_ms, expires_at_ms, embedding_ref, decay_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     .to_string(),
                 vec![
                     serde_json::Value::String(record.id.clone()),
@@ -147,6 +185,7 @@ impl MemoryService {
                     serde_json::json!(record.updated_at_ms),
                     opt_u64(record.expires_at_ms),
                     opt_string(record.embedding_ref.clone()),
+                    serde_json::json!(record.decay_score),
                 ],
             )
             .await

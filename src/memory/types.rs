@@ -83,6 +83,13 @@ pub struct MemoryRecord {
     pub updated_at_ms: u64,
     pub expires_at_ms: Option<u64>,
     pub embedding_ref: Option<String>,
+    /// Exponential decay score [0.0, 1.0]. 1.0 = fresh. Decays toward 0 over time.
+    #[serde(default = "default_decay_score")]
+    pub decay_score: f32,
+}
+
+fn default_decay_score() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

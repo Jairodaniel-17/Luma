@@ -71,6 +71,8 @@ async fn ivf_centroids_persist_and_filter() {
                 k: 4,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids: None,
                 },
@@ -90,6 +92,8 @@ async fn ivf_centroids_persist_and_filter() {
                 k: 4,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids: None,
                 },
@@ -177,6 +181,8 @@ async fn ivf_retrain_updates_manifest_and_results() {
                 k: 2,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },
@@ -192,6 +198,8 @@ async fn ivf_retrain_updates_manifest_and_results() {
                 k: 2,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },
@@ -269,6 +277,8 @@ fn ivf_large_dataset_retrain_consistent() {
         k: 5,
         options: SearchOptions {
             filters: None,
+            filter: None,
+            min_score: None,
             include_meta: false,
             allowed_ids: None,
         },

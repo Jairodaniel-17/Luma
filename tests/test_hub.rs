@@ -26,7 +26,7 @@ async fn start() -> (String, oneshot::Sender<()>) {
     let embeddings = std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
         luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
     ));
-    let app = api::router(engine, config, None, search_engine, None, embeddings);
+    let app = api::router(engine, config, None, search_engine, None, embeddings, None);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

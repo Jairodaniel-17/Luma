@@ -93,7 +93,7 @@ impl MemoryService {
         let rows = sqlite
             .query(
                 "SELECT id, namespace, entity_id, kind, status, content, metadata, confidence, source,
-                    created_at_ms, updated_at_ms, expires_at_ms, embedding_ref
+                    created_at_ms, updated_at_ms, expires_at_ms, embedding_ref, decay_score
                  FROM memory_records
                  WHERE namespace = ? AND entity_id = ? AND kind = 'episodic'
                  ORDER BY created_at_ms DESC"
@@ -152,6 +152,8 @@ impl MemoryService {
                         k: seed_k,
                         options: SearchOptions {
                             filters: None,
+                            filter: None,
+                            min_score: None,
                             include_meta: true,
                             allowed_ids: allowed_ids.clone(),
                         },
@@ -355,7 +357,7 @@ impl MemoryService {
         let rows = sqlite
             .query(
                 "SELECT id, namespace, entity_id, kind, status, content, metadata, confidence, source,
-                    created_at_ms, updated_at_ms, expires_at_ms, embedding_ref
+                    created_at_ms, updated_at_ms, expires_at_ms, embedding_ref, decay_score
                  FROM memory_records WHERE namespace = ? AND id = ? LIMIT 1"
                     .to_string(),
                 vec![
@@ -409,6 +411,10 @@ pub(crate) fn row_to_memory_record(row: serde_json::Value) -> anyhow::Result<Mem
             .get("embedding_ref")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        decay_score: row
+            .get("decay_score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(1.0) as f32,
     })
 }
 

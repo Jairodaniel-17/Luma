@@ -3,7 +3,8 @@ use crate::api::AppState;
 use crate::engine::EngineError;
 use crate::vector::index::{DiskAnnBuildParams, DiskIndexStatus};
 use crate::vector::{
-    Metric, SearchHit, SearchRequest, VectorCollectionInfo, VectorError, VectorItem,
+    AggregateRequest, AggregationBucket, Metric, ScrollItem, SearchHit, SearchRequest,
+    VectorCollectionInfo, VectorError, VectorItem,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -695,6 +696,16 @@ pub async fn search(
             ));
         }
     }
+    if let Some(f) = &body.options.filter {
+        let estimated = serde_json::to_vec(f).map(|v| v.len()).unwrap_or(0);
+        if estimated > state.config.max_json_bytes {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "filter too large",
+            ));
+        }
+    }
     let hits = state
         .engine
         .vector_search(&collection, body)
@@ -734,6 +745,11 @@ fn map_vector_error(err: VectorError) -> ApiError {
             StatusCode::NOT_IMPLEMENTED,
             "not_supported",
             "vector operation not supported",
+        ),
+        VectorError::StorageQuotaExceeded => ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "storage_quota_exceeded",
+            "collection has reached its maximum vector limit",
         ),
     }
 }
@@ -852,4 +868,273 @@ impl From<DiskIndexStatus> for DiskAnnStatusResponse {
             params: value.params,
         }
     }
+}
+
+// ── Batch search ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SearchBatchBody {
+    pub queries: Vec<SearchRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchQueryResult {
+    pub hits: Vec<SearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchBatchResponse {
+    pub results: Vec<BatchQueryResult>,
+}
+
+pub async fn search_batch(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<SearchBatchBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_collection_len(&collection, &state)?;
+    if body.queries.is_empty() {
+        return Ok(axum::Json(SearchBatchResponse { results: vec![] }));
+    }
+    if body.queries.len() > 100 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "too many queries (max 100)",
+        ));
+    }
+    for q in &body.queries {
+        if q.k == 0 || q.k > state.config.max_k {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_argument",
+                "invalid k",
+            ));
+        }
+        if q.vector.len() > state.config.max_vector_dim {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_argument",
+                "vector too large",
+            ));
+        }
+    }
+    let engine = state.engine.clone();
+    let coll = collection.clone();
+    let raw = tokio::task::spawn_blocking(move || engine.vector_search_batch(&coll, body.queries))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+
+    let results = raw
+        .into_iter()
+        .map(|r| match r {
+            Ok(hits) => BatchQueryResult { hits, error: None },
+            Err(e) => BatchQueryResult {
+                hits: vec![],
+                error: Some(e.to_string()),
+            },
+        })
+        .collect();
+    Ok(axum::Json(SearchBatchResponse { results }))
+}
+
+// ── Scroll / cursor ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ScrollParams {
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+    pub include_vectors: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScrollResponse {
+    pub items: Vec<ScrollItem>,
+    pub next_cursor: Option<String>,
+    pub count: usize,
+}
+
+pub async fn scroll(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    Query(params): Query<ScrollParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_collection_len(&collection, &state)?;
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+    let include_vectors = params.include_vectors.unwrap_or(false);
+    let engine = state.engine.clone();
+    let coll = collection.clone();
+    let cursor = params.cursor.clone();
+    let (items, next_cursor) = tokio::task::spawn_blocking(move || {
+        engine.vector_scroll(&coll, cursor.as_deref(), limit, include_vectors)
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+    .map_err(map_vector_error)?;
+
+    let count = items.len();
+    Ok(axum::Json(ScrollResponse {
+        items,
+        next_cursor,
+        count,
+    }))
+}
+
+// ── Rerank ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RerankBody {
+    /// Pre-computed query vector (optional if `query` is provided).
+    pub query_vector: Option<Vec<f32>>,
+    /// Text query to embed (used when `query_vector` is not provided).
+    pub query: Option<String>,
+    /// IDs to rerank. Must exist in the collection.
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerankResult {
+    pub id: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerankResponse {
+    pub results: Vec<RerankResult>,
+}
+
+pub async fn rerank(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<RerankBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_collection_len(&collection, &state)?;
+    if body.ids.is_empty() {
+        return Ok(axum::Json(RerankResponse { results: vec![] }));
+    }
+
+    // Resolve query vector
+    let query_vector = if let Some(v) = body.query_vector {
+        v
+    } else if let Some(text) = body.query {
+        state.embeddings.embed(&text).await.map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "embedding_error",
+                e.to_string(),
+            )
+        })?
+    } else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "either query or query_vector is required",
+        ));
+    };
+
+    if query_vector.len() > state.config.max_vector_dim {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "vector too large",
+        ));
+    }
+
+    // Fetch stored vectors and score them
+    let engine = state.engine.clone();
+    let coll = collection.clone();
+    let ids = body.ids.clone();
+    let mut results = tokio::task::spawn_blocking(move || {
+        ids.into_iter()
+            .filter_map(|id| {
+                engine
+                    .vector_get(&coll, &id)
+                    .ok()
+                    .flatten()
+                    .map(|item| (id, item.vector))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+
+    // Compute cosine similarity
+    let qnorm: f32 = query_vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mut ranked: Vec<RerankResult> = results
+        .iter_mut()
+        .map(|(id, vec)| {
+            let dot: f32 = query_vector
+                .iter()
+                .zip(vec.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            let vnorm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let score = if qnorm > 0.0 && vnorm > 0.0 {
+                dot / (qnorm * vnorm)
+            } else {
+                0.0
+            };
+            RerankResult {
+                id: id.clone(),
+                score,
+            }
+        })
+        .collect();
+
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(axum::Json(RerankResponse { results: ranked }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AggregateBody {
+    pub group_by: String,
+    pub filter: Option<crate::vector::filter::MetadataFilter>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AggregateResponse {
+    pub buckets: Vec<AggregationBucket>,
+}
+
+pub async fn aggregate(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<AggregateBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if collection.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection too long",
+        ));
+    }
+    if body.group_by.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "group_by must not be empty",
+        ));
+    }
+    let req = AggregateRequest {
+        group_by: body.group_by,
+        filter: body.filter,
+        limit: body.limit,
+    };
+    let buckets = state
+        .engine
+        .vector_aggregate(&collection, req)
+        .map_err(|e| match e {
+            VectorError::CollectionNotFound => {
+                ApiError::new(StatusCode::NOT_FOUND, "not_found", "collection not found")
+            }
+            _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
+        })?;
+    Ok(axum::Json(AggregateResponse { buckets }))
 }
