@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub(super) const DEFAULT_RUN_TARGET_BYTES: u64 = 134_217_728;
 pub(super) const DEFAULT_RUN_RETENTION: usize = 8;
-pub(super) const DEFAULT_COMPACTION_TRIGGER_TOMBSTONE_RATIO: f32 = 0.2;
+pub(super) const DEFAULT_COMPACTION_TRIGGER_TOMBSTONE_RATIO: f32 = 0.5;
 pub(super) const DEFAULT_COMPACTION_MAX_BYTES_PER_PASS: u64 = 1_073_741_824;
 const DEFAULT_IVF_CLUSTERS: usize = 1_024;
 const DEFAULT_IVF_NPROBE: usize = 8;

@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
 use lru::LruCache;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::Arc;
 
-type EmbedCache = std::sync::Arc<Mutex<LruCache<String, Vec<f32>>>>;
+type EmbedCache = Arc<Mutex<LruCache<String, Vec<f32>>>>;
 
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
@@ -30,7 +31,7 @@ pub struct EmbeddingClient {
     /// Optional LRU cache: key = provider/model/dim/text namespace.
     cache: Option<EmbedCache>,
     /// Metrics handle for tracking cache hits/misses (optional).
-    metrics: Option<std::sync::Arc<crate::engine::metrics::Metrics>>,
+    metrics: Option<Arc<crate::engine::metrics::Metrics>>,
     max_inflight_requests: usize,
 }
 
@@ -61,10 +62,10 @@ impl EmbeddingClient {
         provider: EmbeddingProvider,
         cache_size: usize,
         max_inflight_requests: usize,
-        metrics: Option<std::sync::Arc<crate::engine::metrics::Metrics>>,
+        metrics: Option<Arc<crate::engine::metrics::Metrics>>,
     ) -> Self {
         let cache = NonZeroUsize::new(cache_size)
-            .map(|n| std::sync::Arc::new(Mutex::new(LruCache::new(n))));
+            .map(|n| Arc::new(Mutex::new(LruCache::new(n))));
         Self {
             provider,
             client: reqwest::Client::new(),
@@ -78,7 +79,7 @@ impl EmbeddingClient {
     pub fn with_cache(
         provider: EmbeddingProvider,
         cache_size: usize,
-        metrics: Option<std::sync::Arc<crate::engine::metrics::Metrics>>,
+        metrics: Option<Arc<crate::engine::metrics::Metrics>>,
     ) -> Self {
         Self::with_limits(provider, cache_size, 16, metrics)
     }
@@ -88,7 +89,7 @@ impl EmbeddingClient {
         if let Some(cache) = &self.cache {
             let key = self.cache_key(text);
             {
-                let mut guard = cache.lock().unwrap();
+                let mut guard = cache.lock();
                 if let Some(cached) = cache_lookup(&mut guard, &key) {
                     if let Some(m) = &self.metrics {
                         m.inc_embed_cache_hit();
@@ -100,7 +101,7 @@ impl EmbeddingClient {
                 m.inc_embed_cache_miss();
             }
             let vec = self.embed_uncached(text).await?;
-            cache_store(&mut cache.lock().unwrap(), key, vec.clone());
+            cache_store(&mut cache.lock(), key, vec.clone());
             return Ok(vec);
         }
         self.embed_uncached(text).await
@@ -119,7 +120,7 @@ impl EmbeddingClient {
             let mut missing_indices: Vec<usize> = Vec::new();
 
             {
-                let mut guard = cache.lock().unwrap();
+                let mut guard = cache.lock();
                 for (i, text) in texts.iter().enumerate() {
                     let key = self.cache_key(text);
                     if let Some(cached) = cache_lookup(&mut guard, &key) {
@@ -151,7 +152,7 @@ impl EmbeddingClient {
 
             // Update cache and fill result
             {
-                let mut guard = cache.lock().unwrap();
+                let mut guard = cache.lock();
                 for (&idx, vec) in missing_indices.iter().zip(missing_vecs.iter()) {
                     if let Some(m) = &self.metrics {
                         m.inc_embed_cache_miss();
@@ -256,7 +257,7 @@ impl EmbeddingClient {
         Ok(parsed.data.remove(0).embedding)
     }
 
-    /// PR3: OpenAI batch — `input` accepts an array, one HTTP request for N texts.
+    /// OpenAI batch — splits into chunks of at most 96 texts to stay within API limits.
     async fn embed_batch_openai(
         &self,
         api_url: &str,
@@ -264,27 +265,13 @@ impl EmbeddingClient {
         model: &str,
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>> {
+        const OPENAI_BATCH_LIMIT: usize = 96;
+
         #[derive(Serialize)]
         struct Req<'a> {
             model: &'a str,
             input: &'a [String],
         }
-
-        let resp = self
-            .client
-            .post(api_url)
-            .bearer_auth(api_key)
-            .json(&Req {
-                model,
-                input: texts,
-            })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow::anyhow!("OpenAI API error: {}", resp.text().await?));
-        }
-
         #[derive(Deserialize)]
         struct Resp {
             data: Vec<Data>,
@@ -295,16 +282,38 @@ impl EmbeddingClient {
             index: usize,
         }
 
-        let parsed: Resp = resp.json().await?;
-        if parsed.data.is_empty() {
-            return Err(anyhow!("No embeddings returned from OpenAI"));
+        let mut all_vecs: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+
+        for chunk in texts.chunks(OPENAI_BATCH_LIMIT) {
+            let resp = self
+                .client
+                .post(api_url)
+                .bearer_auth(api_key)
+                .json(&Req {
+                    model,
+                    input: chunk,
+                })
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!("OpenAI API error: {}", resp.text().await?));
+            }
+
+            let parsed: Resp = resp.json().await?;
+            if parsed.data.is_empty() {
+                return Err(anyhow!("No embeddings returned from OpenAI"));
+            }
+            let rows: Vec<(usize, Vec<f32>)> = parsed
+                .data
+                .into_iter()
+                .map(|row| (row.index, row.embedding))
+                .collect();
+            let ordered = reorder_openai_embeddings(rows, chunk.len())?;
+            all_vecs.extend(ordered);
         }
-        let rows = parsed
-            .data
-            .into_iter()
-            .map(|row| (row.index, row.embedding))
-            .collect();
-        reorder_openai_embeddings(rows, texts.len())
+
+        Ok(all_vecs)
     }
 
     async fn embed_ollama(&self, api_url: &str, model: &str, text: &str) -> Result<Vec<f32>> {

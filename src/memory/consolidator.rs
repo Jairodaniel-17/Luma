@@ -65,13 +65,20 @@ impl Consolidator {
                     id: format!("triggered::{}::{}", record.id, fact_id),
                     namespace: record.namespace.clone(),
                     source_id: record.id.clone(),
-                    target_id: fact_id,
+                    target_id: fact_id.clone(),
                     edge_type: EdgeType::TriggeredBy,
                     weight: confidence,
                     metadata: serde_json::json!({"auto": true}),
                     created_at_ms: crate::memory::ingest::now_ms(),
                 };
-                let _ = graph.upsert_edge(&edge).await;
+                if let Err(e) = graph.upsert_edge(&edge).await {
+                    tracing::warn!(
+                        "Failed to create TriggeredBy edge {} → {}: {}",
+                        record.id,
+                        fact_id,
+                        e
+                    );
+                }
             }
         }
 

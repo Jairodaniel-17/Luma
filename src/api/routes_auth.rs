@@ -1,6 +1,6 @@
 use crate::api::errors::ApiError;
-use crate::api::AppState;
-use axum::extract::{Path, State};
+use crate::api::{AppState, TenantContext};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,17 @@ pub struct CreateKeyBody {
     pub quotas: Option<serde_json::Value>,
 }
 
-pub async fn list_keys(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+pub async fn list_keys(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    if ctx.role != "admin" {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "admin role required",
+        ));
+    }
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -40,8 +50,16 @@ pub async fn list_keys(State(state): State<AppState>) -> Result<impl IntoRespons
 
 pub async fn create_key(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     axum::Json(body): axum::Json<CreateKeyBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if ctx.role != "admin" {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "admin role required",
+        ));
+    }
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -49,11 +67,6 @@ pub async fn create_key(
             "auth store not enabled",
         ));
     };
-
-    // TODO: Verify current user is admin (requires pulling context from request extension)
-    // For now, assuming only admins have access or we trust the bearer token holder if they have admin role?
-    // We haven't implemented context injection in auth middleware yet.
-    // Let's assume for this MVP that any valid key can manage keys (or we lock it down later).
 
     let plain_key = store.generate_api_key();
     let role = body.role.unwrap_or_else(|| "user".to_string());
@@ -87,8 +100,16 @@ pub async fn create_key(
 
 pub async fn revoke_key(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if ctx.role != "admin" {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "admin role required",
+        ));
+    }
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,

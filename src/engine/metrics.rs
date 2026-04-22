@@ -1,5 +1,5 @@
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 // Histogram bucket upper bounds in milliseconds
 const BUCKET_BOUNDS_MS: &[u64] = &[1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
@@ -247,7 +247,7 @@ impl Metrics {
         self.hnsw_compaction_total.fetch_add(1, Ordering::Relaxed);
     }
     pub fn cached_render(&self) -> String {
-        self.last_metrics_render.lock().unwrap().clone()
+        self.last_metrics_render.lock().clone()
     }
 
     /// Render Prometheus-format metrics. Active collection/vector counts and RSS
@@ -471,7 +471,7 @@ impl Metrics {
             ));
         }
 
-        *self.last_metrics_render.lock().unwrap() = out.clone();
+        *self.last_metrics_render.lock() = out.clone();
         out
     }
 }
