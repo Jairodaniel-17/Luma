@@ -40,25 +40,11 @@ pub async fn auth_middleware(
     } else if let Some(h) = req.headers().get("x-api-key").and_then(|h| h.to_str().ok()) {
         h.to_string()
     } else {
-        // Query param fallback
-        if let Some(q) = req.uri().query() {
-            let params: Vec<(String, String)> = serde_urlencoded::from_str(q).unwrap_or_default();
-            if let Some((_, v)) = params.iter().find(|(k, _)| k == "api_key") {
-                v.clone()
-            } else {
-                return Err(ApiError::new(
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "unauthorized",
-                    "missing authorization header",
-                ));
-            }
-        } else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "missing authorization header",
-            ));
-        }
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing authorization header",
+        ));
     };
 
     // 1. Check AuthStore (DB)
