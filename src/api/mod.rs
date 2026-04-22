@@ -1,6 +1,8 @@
+pub mod audit;
 pub mod auth;
 pub mod auth_store;
 pub mod errors;
+pub mod routes_admin;
 pub mod routes_auth;
 pub mod routes_config;
 pub mod routes_doc;
@@ -39,6 +41,7 @@ pub struct AppState {
     pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
     pub hub: Arc<crate::engine::hub::LumaDatabase>,
     pub memory: Arc<crate::memory::MemoryService>,
+    pub audit_log: Option<Arc<audit::AuditLog>>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +59,7 @@ pub fn router(
     search_engine: Arc<SearchEngine>,
     auth_store: Option<Arc<AuthStore>>,
     embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
+    audit_log: Option<Arc<audit::AuditLog>>,
 ) -> Router {
     let memory = Arc::new(crate::memory::MemoryService::new(
         Arc::new(engine.clone()),
@@ -80,6 +84,7 @@ pub fn router(
         embeddings,
         hub,
         memory,
+        audit_log,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -146,6 +151,16 @@ pub fn router(
         .route("/v1/vector/:collection/get", get(routes_vector::get))
         .route("/v1/vector/:collection/search", post(routes_vector::search))
         .route(
+            "/v1/vector/:collection/search_batch",
+            post(routes_vector::search_batch),
+        )
+        .route("/v1/vector/:collection/scroll", get(routes_vector::scroll))
+        .route("/v1/vector/:collection/rerank", post(routes_vector::rerank))
+        .route(
+            "/v1/vector/:collection/aggregate",
+            post(routes_vector::aggregate),
+        )
+        .route(
             "/v1/vector/:collection/diskann/build",
             post(routes_vector::diskann_build),
         )
@@ -205,6 +220,8 @@ pub fn router(
         .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/v1/config", get(routes_config::get_config))
         .route("/v1/config", put(routes_config::update_config))
+        .route("/v1/admin/backup", post(routes_admin::backup))
+        .route("/v1/admin/audit", get(routes_admin::get_audit_log))
         .route("/search", post(routes_search::search))
         .route("/search/ingest", post(routes_search::ingest))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
@@ -214,6 +231,10 @@ pub fn router(
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit::audit_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,

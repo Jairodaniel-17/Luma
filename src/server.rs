@@ -65,6 +65,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    let audit_log = if let Some(svc) = &sqlite {
+        let log = Arc::new(luma::api::audit::AuditLog::new(Arc::new(svc.clone())));
+        log.init().await?;
+        Some(log)
+    } else {
+        None
+    };
+
     let shutdown_token = CancellationToken::new();
     let engine = Engine::new(config.clone(), shutdown_token.clone())?;
 
@@ -83,6 +91,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         search_engine,
         auth_store,
         embeddings,
+        audit_log,
     );
     let addr = SocketAddr::new(config.bind_addr, config.port);
 
@@ -141,18 +150,50 @@ fn init_embeddings(
             api_key: config.embedding_api_key.clone(),
             model: config.embedding_model.clone(),
         },
+        "azure" | "azure_openai" | "azure-openai" => EmbeddingProvider::AzureOpenAI {
+            api_base: config.embedding_azure_api_base.clone(),
+            deployment: config.embedding_azure_deployment.clone(),
+            api_key: config.embedding_api_key.clone(),
+            api_version: config.embedding_azure_api_version.clone(),
+        },
+        "cohere" => EmbeddingProvider::Cohere {
+            api_url: if config.embedding_url.is_empty() {
+                "https://api.cohere.ai".to_string()
+            } else {
+                config.embedding_url.clone()
+            },
+            api_key: config.embedding_api_key.clone(),
+            model: config.embedding_model.clone(),
+            input_type: config.embedding_cohere_input_type.clone(),
+        },
+        "huggingface" | "hf" => EmbeddingProvider::HuggingFace {
+            api_url: if config.embedding_url.is_empty() {
+                "https://api-inference.huggingface.co".to_string()
+            } else {
+                config.embedding_url.clone()
+            },
+            api_key: config.embedding_api_key.clone(),
+            model: config.embedding_model.clone(),
+        },
         "mock" => EmbeddingProvider::Mock {
             dim: config.embedding_dim,
         },
         _ => EmbeddingProvider::None,
     };
 
-    Arc::new(EmbeddingClient::with_limits(
-        provider,
-        config.embedding_cache_size,
-        config.embedding_max_inflight_requests,
-        Some(metrics),
-    ))
+    Arc::new(
+        EmbeddingClient::with_limits_and_dim(
+            provider,
+            config.embedding_cache_size,
+            config.embedding_max_inflight_requests,
+            Some(metrics),
+            config.embedding_dim,
+        )
+        .with_retry(
+            config.embedding_retry_attempts,
+            config.embedding_retry_initial_ms,
+        ),
+    )
 }
 
 async fn shutdown_signal(token: CancellationToken) {

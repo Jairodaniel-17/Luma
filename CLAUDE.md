@@ -82,7 +82,9 @@ Collections are split into segments (~8,192 vectors each). Active segment receiv
 
 **`src/api/mod.rs`** — Axum HTTP router with Bearer token auth, CORS, request timeouts, and body size limits. Routes split by concern into `routes_vector.rs`, `routes_state.rs`, `routes_doc.rs`, `routes_sql.rs`, `routes_hub.rs`, `routes_events.rs`.
 
-**`src/engine/embeddings.rs`** — Embedding provider abstraction supporting Ollama, OpenAI, and Mock (for tests/CI).
+**`src/engine/embeddings.rs`** — Embedding provider abstraction supporting Ollama, OpenAI, Azure OpenAI, Cohere, HuggingFace, and Mock (for tests/CI). Includes LRU cache keyed by `provider::model::dim::text`, bounded concurrency semaphore, and configurable exponential-backoff retry with jitter.
+
+**`src/memory/decay.rs`** — Background decay task for NS-Mem semantic facts. Applies exponential decay (`exp(-λt)`) to `decay_score` field; archives facts below threshold automatically. Opt-in via `memory_decay_enabled`.
 
 ### Data Layout on Disk
 
@@ -111,26 +113,71 @@ data/
 - **Vector**: `index_kind` (`HNSW` | `IVF_FLAT_Q8` | `DiskANN`), `max_vector_dim`, `simd_enabled`
 - **IVF**: `ivf_clusters`, `ivf_nprobe`, `q8_refine_topk`
 - **DiskANN**: `diskann_max_degree`, `diskann_build_threads`
-- **Embeddings**: `embedding_provider` (`none` | `ollama` | `openai` | `mock`), `embedding_model`, `embedding_dim`
+- **Embeddings**: `embedding_provider` (`none` | `ollama` | `openai` | `azure` | `cohere` | `huggingface` | `mock`), `embedding_model`, `embedding_dim`, `embedding_retry_attempts` (default 3), `embedding_retry_initial_ms` (default 200)
+- **Azure OpenAI**: `embedding_azure_api_base`, `embedding_azure_deployment`, `embedding_azure_api_version` (default `2024-02-01`)
+- **Cohere**: `embedding_cohere_input_type` (`search_document` | `search_query`)
+- **Search**: `pre_filter_threshold` (default 10 000) — filtered candidate sets ≤ this size use brute-force instead of HNSW + post-filter
 - **Memory / NS-Mem**: `memory_consolidation_enabled`, `memory_working_ttl_secs`, `memory_default_limit`, `memory_fact_promotion_threshold` (default 0.85), `llm_provider` (`none` | `mock` | `openai` | `ollama`), `llm_model`, `llm_url`, `llm_api_key`
 - **Graph / Semantic Walk**: `memory_walk_max_hops` (default 2), `memory_walk_min_similarity` (default 0.65), `memory_walk_max_nodes` (default 40), `memory_centrality_enabled` (default true), `memory_centrality_update_interval_secs` (default 300)
+- **NS-Mem Decay**: `memory_decay_enabled` (default false), `memory_decay_half_life_days` (default 30.0), `memory_decay_archive_threshold` (default 0.1), `memory_decay_interval_secs` (default 3600)
 
 Config source: `src/config.rs`. Environment variables override TOML values.
 
 ## CI
 
-CI runs: rustfmt check → clippy (strict, `-D warnings`) → tests → `cargo-audit`. Releases trigger on `v*` tags and produce cross-platform binaries (Linux, Windows, macOS).
+CI runs: rustfmt check → clippy (strict, `-D warnings`) → tests → `cargo-audit` → `cargo-deny` → MSRV check (1.75) → `cargo bench --no-run` (bench compilation gate). Releases trigger on `v*` tags and produce cross-platform binaries (Linux, Windows, macOS).
 
 Use the `mock` embedding provider in tests to avoid external service dependencies.
 
 ## Work Log
 
-### In Progress
+### Done — v3.0.0
 
-- Harden planner execution so `sql_first` and `vector_first` use different code paths, with `_plan` exposed only when explicitly requested.
-- Add embedding provider guardrails: bounded non-batch concurrency and cache keys namespaced by provider/model.
-- Make HNSW segment compaction conservative by default and avoid long write locks during rebuild.
-- Make `/v1/metrics` cheaper by caching RSS outside the scrape path.
+**Fase 2 — Calidad de resultados y completitud funcional**
+
+- **Batch search** (`POST /v1/vector/{collection}/search_batch`): hasta 100 queries en paralelo vía `rayon::par_iter()`. Devuelve `{ "results": [{ "hits": [...] }] }`.
+- **Scroll / cursor API** (`GET /v1/vector/{collection}/scroll?cursor=&limit=&include_vectors=`): paginación lexicográfica por ID con cursor opaco. Permite exportar colecciones completas.
+- **Reranking por coseno** (`POST /v1/vector/{collection}/rerank`): recibe `{ "query_text" | "query_vector", "ids": [...] }`, embebe la query (si es texto), recupera vectores almacenados y devuelve IDs reordenados por coseno.
+- **Aggregations** (`POST /v1/vector/{collection}/aggregate`): `{ "group_by": "field", "filter": {...}, "limit": 100 }` — cuenta ítems por valor de campo usando `keyword_index`. Soporta filtro tipado con fast path por índice.
+- **Nuevos providers de embedding**:
+  - `AzureOpenAI`: endpoint propio, `api-key` header, batching ≤ 96.
+  - `Cohere`: `/v1/embed` con `input_type` configurable (`search_document` / `search_query`).
+  - `HuggingFace`: `pipeline/feature-extraction/{model}`, maneja respuesta `[f32]` y `[[f32]]`.
+- **Retry con backoff exponencial + jitter** en `EmbeddingClient`: `embedding_retry_attempts` (default 3), `embedding_retry_initial_ms` (default 200). Jitter basado en `subsec_millis` para evitar thundering herd.
+- **Pre-filter threshold configurable** (`pre_filter_threshold`, default 10 000): reemplaza el hardcoded 512. Cuando el conjunto filtrado tiene ≤ threshold candidatos, se usa brute-force en lugar de HNSW + post-filter.
+- **Audit log completo** (`src/api/audit.rs`): middleware que registra `ts, api_key_id, ip, method, path, status, latency_ms` en SQLite. `AuditKeyId` propagado desde `auth_middleware` vía extensions. Endpoint `GET /v1/admin/audit?from_ms=&to_ms=&key=&limit=`.
+- **Backup endpoint** (`POST /v1/admin/backup`): dispara `engine.force_snapshot()` y retorna `{ "ok": true, "offset": u64 }`. Requiere rol admin.
+- **`routes_admin.rs`**: módulo dedicado para handlers admin (backup + audit). Patrón consistente con `routes_*.rs` existentes.
+- **`server.rs`** actualizado: inicializa `AuditLog` con `init().await` antes del router; wiring de los 3 nuevos providers de embedding.
+
+**Fase 3 — Robustez operacional**
+
+- **NS-Mem deduplicación de facts** (`src/memory/consolidator.rs`): antes de `upsert_fact()`, el consolidador busca facts semánticamente equivalentes (cosine ≥ 0.95) en la colección semántica del namespace. Si existe un duplicado distinto al fact que se crearía, lo omite y loguea en `DEBUG`.
+- **NS-Mem decay** (`src/memory/decay.rs`): campo `decay_score: f32` (default 1.0) en `MemoryRecord` y `memory_records`. Decay exponencial `exp(-ln(2)/half_life_days * elapsed_days)`. Facts por debajo de `archive_threshold` se archivan automáticamente. Background task opt-in (`memory_decay_enabled`). Migración via `ALTER TABLE` en schema.
+- **NS-Mem detección de contradicciones** (`src/memory/ingest.rs`): en `upsert_fact()`, si hay un fact existente con el mismo ID, compara embeddings del contenido viejo y nuevo. Si coseno < 0.55, crea arista `Contradicts` en lugar de `Supersedes` y emite `tracing::info!`. Threshold: 0.55 (separación semántica significativa).
+- **Bench CI** (`.github/workflows/ci.yml`): nuevo job `bench-compile` — `cargo bench --no-run` — bloquea merges que rompen la compilación de benchmarks sin ejecutarlos en CI.
+- **RBAC tests** (`tests/auth_rbac.rs`): 7 tests de integración — token ausente → 401, token inválido → 401, rol `user` → 403 en `list_keys`/`create_key`/`revoke_key`, rol `admin` → 200, key revocada → 401.
+
+### Done — v2.1.0
+
+- **Typed MetadataFilter** (`src/vector/filter.rs`): composable filter tree with `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `any_of`, `contains`, `starts_with`, `exists` and logical `and`/`or`/`not`.
+- **`any_of` operator**: array-field membership — `tax_system AnyOf ["suitetax"]` matches `["suitetax","legacy"]`. Useful for multi-tenant documents shared across systems.
+- **Keyword index extended**: arrays are now indexed per-element; `any_of` resolves via keyword index fast path (union of sets), no full scan.
+- **`SearchOptions.filter`** field (typed, alongside legacy `filters`); `effective_filter()` merges both with AND.
+- **SQL hub pre-filter**: `any_of` → `json_each(metadata, '$.field')` for SQLite.
+- Legacy `filters: {"field": "value"}` still works — converted transparently via `from_legacy()`.
+
+### Done — v2.0.1
+
+- CVE fix: `rustls-webpki` 0.103.12 → 0.103.13 (RUSTSEC-2026-0104).
+- Removed API key via query param (credential leakage in logs).
+- Admin role enforcement on `/v1/auth/keys` endpoints.
+- `parking_lot::Mutex` in `EmbeddingClient` and `Metrics` (no poison panics).
+- Bounded concurrency semaphore for embedding providers; OpenAI batch chunked to ≤ 96 texts.
+- `tracing::warn!` on `TriggeredBy` edge failures in consolidator.
+- HNSW compaction tombstone ratio default 0.2 → 0.5.
+- CI: removed `continue-on-error`, added MSRV (1.75) and `cargo-deny` jobs.
+- 20 procedural DAG tests (`tests/ns_mem_procedural.rs`).
 
 ### Done — v2.0.0
 

@@ -15,6 +15,23 @@ pub enum EmbeddingProvider {
         api_key: String,
         model: String,
     },
+    AzureOpenAI {
+        api_base: String,
+        deployment: String,
+        api_key: String,
+        api_version: String,
+    },
+    Cohere {
+        api_url: String,
+        api_key: String,
+        model: String,
+        input_type: String,
+    },
+    HuggingFace {
+        api_url: String,
+        api_key: String,
+        model: String,
+    },
     Ollama {
         api_url: String,
         model: String,
@@ -36,6 +53,14 @@ pub struct EmbeddingClient {
     max_inflight_requests: usize,
     /// Bounds concurrent outbound HTTP requests to the embedding provider.
     inflight_semaphore: Option<Arc<Semaphore>>,
+    /// Expected output dimension — included in cache keys to prevent collisions
+    /// when the same model is used at different dims (e.g. text-embedding-3-large
+    /// supports variable dimensions via the `dimensions` API parameter).
+    dim: usize,
+    /// Max retry attempts for transient provider errors (min 1 = no retry).
+    retry_attempts: u32,
+    /// Initial backoff delay in ms; doubles each retry.
+    retry_initial_ms: u64,
 }
 
 impl Default for EmbeddingClient {
@@ -47,6 +72,9 @@ impl Default for EmbeddingClient {
             metrics: None,
             max_inflight_requests: 16,
             inflight_semaphore: None,
+            dim: 0,
+            retry_attempts: 1,
+            retry_initial_ms: 200,
         }
     }
 }
@@ -60,6 +88,9 @@ impl EmbeddingClient {
             metrics: None,
             max_inflight_requests: 16,
             inflight_semaphore: None,
+            dim: 0,
+            retry_attempts: 1,
+            retry_initial_ms: 200,
         }
     }
 
@@ -69,9 +100,19 @@ impl EmbeddingClient {
         max_inflight_requests: usize,
         metrics: Option<Arc<crate::engine::metrics::Metrics>>,
     ) -> Self {
+        Self::with_limits_and_dim(provider, cache_size, max_inflight_requests, metrics, 0)
+    }
+
+    pub fn with_limits_and_dim(
+        provider: EmbeddingProvider,
+        cache_size: usize,
+        max_inflight_requests: usize,
+        metrics: Option<Arc<crate::engine::metrics::Metrics>>,
+        dim: usize,
+    ) -> Self {
         let n = max_inflight_requests.max(1);
-        let cache = NonZeroUsize::new(cache_size)
-            .map(|cap| Arc::new(Mutex::new(LruCache::new(cap))));
+        let cache =
+            NonZeroUsize::new(cache_size).map(|cap| Arc::new(Mutex::new(LruCache::new(cap))));
         Self {
             provider,
             client: reqwest::Client::new(),
@@ -79,7 +120,16 @@ impl EmbeddingClient {
             metrics,
             max_inflight_requests: n,
             inflight_semaphore: Some(Arc::new(Semaphore::new(n))),
+            dim,
+            retry_attempts: 1,
+            retry_initial_ms: 200,
         }
+    }
+
+    pub fn with_retry(mut self, attempts: u32, initial_ms: u64) -> Self {
+        self.retry_attempts = attempts.max(1);
+        self.retry_initial_ms = initial_ms;
+        self
     }
 
     /// Backward-compatible helper for tests/callers that only care about cache size.
@@ -181,10 +231,52 @@ impl EmbeddingClient {
 
     async fn embed_uncached(&self, text: &str) -> Result<Vec<f32>> {
         let _permit = if let Some(sem) = &self.inflight_semaphore {
-            Some(sem.acquire().await.map_err(|e| anyhow!("semaphore closed: {e}"))?)
+            Some(
+                sem.acquire()
+                    .await
+                    .map_err(|e| anyhow!("semaphore closed: {e}"))?,
+            )
         } else {
             None
         };
+        let is_network = !matches!(
+            &self.provider,
+            EmbeddingProvider::None | EmbeddingProvider::Mock { .. }
+        );
+        let max_attempts = if is_network {
+            self.retry_attempts.max(1)
+        } else {
+            1
+        };
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                let base_ms = self.retry_initial_ms << (attempt - 1).min(5);
+                let jitter_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_millis() as u64)
+                    .unwrap_or(0)
+                    % (base_ms / 4 + 1);
+                tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+            }
+            let result = self.call_provider_single(text).await;
+            match result {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = max_attempts,
+                        error = %e,
+                        "embedding attempt failed"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("embedding failed after {max_attempts} attempts")))
+    }
+
+    async fn call_provider_single(&self, text: &str) -> Result<Vec<f32>> {
         match &self.provider {
             EmbeddingProvider::None => Err(anyhow::anyhow!("Embeddings are not configured")),
             EmbeddingProvider::OpenAI {
@@ -192,6 +284,32 @@ impl EmbeddingClient {
                 api_key,
                 model,
             } => self.embed_openai(api_url, api_key, model, text).await,
+            EmbeddingProvider::AzureOpenAI {
+                api_base,
+                deployment,
+                api_key,
+                api_version,
+            } => {
+                self.embed_azure(api_base, deployment, api_key, api_version, text)
+                    .await
+            }
+            EmbeddingProvider::Cohere {
+                api_url,
+                api_key,
+                model,
+                input_type,
+            } => {
+                self.embed_cohere_single(api_url, api_key, model, input_type, text)
+                    .await
+            }
+            EmbeddingProvider::HuggingFace {
+                api_url,
+                api_key,
+                model,
+            } => {
+                self.embed_huggingface_single(api_url, api_key, model, text)
+                    .await
+            }
             EmbeddingProvider::Ollama { api_url, model } => {
                 self.embed_ollama(api_url, model, text).await
             }
@@ -208,6 +326,32 @@ impl EmbeddingClient {
                 model,
             } => {
                 self.embed_batch_openai(api_url, api_key, model, texts)
+                    .await
+            }
+            EmbeddingProvider::AzureOpenAI {
+                api_base,
+                deployment,
+                api_key,
+                api_version,
+            } => {
+                self.embed_batch_azure(api_base, deployment, api_key, api_version, texts)
+                    .await
+            }
+            EmbeddingProvider::Cohere {
+                api_url,
+                api_key,
+                model,
+                input_type,
+            } => {
+                self.embed_batch_cohere(api_url, api_key, model, input_type, texts)
+                    .await
+            }
+            EmbeddingProvider::HuggingFace {
+                api_url,
+                api_key,
+                model,
+            } => {
+                self.embed_batch_huggingface(api_url, api_key, model, texts)
                     .await
             }
             EmbeddingProvider::Ollama { api_url, model } => {
@@ -298,7 +442,11 @@ impl EmbeddingClient {
 
         for chunk in texts.chunks(OPENAI_BATCH_LIMIT) {
             let _permit = if let Some(sem) = &self.inflight_semaphore {
-                Some(sem.acquire().await.map_err(|e| anyhow!("semaphore closed: {e}"))?)
+                Some(
+                    sem.acquire()
+                        .await
+                        .map_err(|e| anyhow!("semaphore closed: {e}"))?,
+                )
             } else {
                 None
             };
@@ -385,7 +533,7 @@ impl EmbeddingClient {
     }
 
     fn cache_key(&self, text: &str) -> String {
-        format!("{}::{text}", self.provider_cache_namespace())
+        format!("{}::{}::{text}", self.provider_cache_namespace(), self.dim)
     }
 
     fn provider_cache_namespace(&self) -> String {
@@ -393,11 +541,269 @@ impl EmbeddingClient {
             EmbeddingProvider::OpenAI { api_url, model, .. } => {
                 format!("openai::{api_url}::{model}")
             }
+            EmbeddingProvider::AzureOpenAI {
+                api_base,
+                deployment,
+                ..
+            } => {
+                format!("azure::{api_base}::{deployment}")
+            }
+            EmbeddingProvider::Cohere { api_url, model, .. } => {
+                format!("cohere::{api_url}::{model}")
+            }
+            EmbeddingProvider::HuggingFace { api_url, model, .. } => {
+                format!("huggingface::{api_url}::{model}")
+            }
             EmbeddingProvider::Ollama { api_url, model } => {
                 format!("ollama::{api_url}::{model}")
             }
             EmbeddingProvider::Mock { dim } => format!("mock::{dim}"),
             EmbeddingProvider::None => "none".to_string(),
+        }
+    }
+
+    // ── Azure OpenAI ─────────────────────────────────────────────────────────
+
+    async fn embed_azure(
+        &self,
+        api_base: &str,
+        deployment: &str,
+        api_key: &str,
+        api_version: &str,
+        text: &str,
+    ) -> Result<Vec<f32>> {
+        let url = format!(
+            "{}/openai/deployments/{}/embeddings?api-version={}",
+            api_base.trim_end_matches('/'),
+            deployment,
+            api_version
+        );
+        #[derive(Serialize)]
+        struct Req<'a> {
+            input: &'a str,
+        }
+        let resp = self
+            .client
+            .post(&url)
+            .header("api-key", api_key)
+            .json(&Req { input: text })
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Azure OpenAI error: {}", resp.text().await?));
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            data: Vec<Data>,
+        }
+        #[derive(Deserialize)]
+        struct Data {
+            embedding: Vec<f32>,
+        }
+        let mut parsed: Resp = resp.json().await?;
+        parsed
+            .data
+            .pop()
+            .map(|d| d.embedding)
+            .ok_or_else(|| anyhow!("Azure OpenAI returned no embeddings"))
+    }
+
+    async fn embed_batch_azure(
+        &self,
+        api_base: &str,
+        deployment: &str,
+        api_key: &str,
+        api_version: &str,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>> {
+        let url = format!(
+            "{}/openai/deployments/{}/embeddings?api-version={}",
+            api_base.trim_end_matches('/'),
+            deployment,
+            api_version
+        );
+        const AZURE_BATCH_LIMIT: usize = 96;
+        #[derive(Serialize)]
+        struct Req<'a> {
+            input: &'a [String],
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            data: Vec<Data>,
+        }
+        #[derive(Deserialize)]
+        struct Data {
+            embedding: Vec<f32>,
+            index: usize,
+        }
+
+        let mut all: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(AZURE_BATCH_LIMIT) {
+            let _permit = if let Some(sem) = &self.inflight_semaphore {
+                Some(
+                    sem.acquire()
+                        .await
+                        .map_err(|e| anyhow!("semaphore closed: {e}"))?,
+                )
+            } else {
+                None
+            };
+            let resp = self
+                .client
+                .post(&url)
+                .header("api-key", api_key)
+                .json(&Req { input: chunk })
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Err(anyhow!("Azure OpenAI batch error: {}", resp.text().await?));
+            }
+            let parsed: Resp = resp.json().await?;
+            let rows: Vec<(usize, Vec<f32>)> = parsed
+                .data
+                .into_iter()
+                .map(|d| (d.index, d.embedding))
+                .collect();
+            all.extend(reorder_openai_embeddings(rows, chunk.len())?);
+        }
+        Ok(all)
+    }
+
+    // ── Cohere ───────────────────────────────────────────────────────────────
+
+    async fn embed_cohere_single(
+        &self,
+        api_url: &str,
+        api_key: &str,
+        model: &str,
+        input_type: &str,
+        text: &str,
+    ) -> Result<Vec<f32>> {
+        let vecs = self
+            .embed_batch_cohere(api_url, api_key, model, input_type, &[text.to_string()])
+            .await?;
+        vecs.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Cohere returned no embeddings"))
+    }
+
+    async fn embed_batch_cohere(
+        &self,
+        api_url: &str,
+        api_key: &str,
+        model: &str,
+        input_type: &str,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>> {
+        let url = format!("{}/v1/embed", api_url.trim_end_matches('/'));
+        #[derive(Serialize)]
+        struct Req<'a> {
+            texts: &'a [String],
+            model: &'a str,
+            input_type: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            embeddings: Vec<Vec<f32>>,
+        }
+
+        let _permit = if let Some(sem) = &self.inflight_semaphore {
+            Some(
+                sem.acquire()
+                    .await
+                    .map_err(|e| anyhow!("semaphore closed: {e}"))?,
+            )
+        } else {
+            None
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&Req {
+                texts,
+                model,
+                input_type,
+            })
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Cohere error: {}", resp.text().await?));
+        }
+        let parsed: Resp = resp.json().await?;
+        Ok(parsed.embeddings)
+    }
+
+    // ── HuggingFace Inference API ─────────────────────────────────────────────
+
+    async fn embed_huggingface_single(
+        &self,
+        api_url: &str,
+        api_key: &str,
+        model: &str,
+        text: &str,
+    ) -> Result<Vec<f32>> {
+        let vecs = self
+            .embed_batch_huggingface(api_url, api_key, model, &[text.to_string()])
+            .await?;
+        vecs.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("HuggingFace returned no embeddings"))
+    }
+
+    async fn embed_batch_huggingface(
+        &self,
+        api_url: &str,
+        api_key: &str,
+        model: &str,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>> {
+        let url = format!(
+            "{}/pipeline/feature-extraction/{}",
+            api_url.trim_end_matches('/'),
+            model
+        );
+        let _permit = if let Some(sem) = &self.inflight_semaphore {
+            Some(
+                sem.acquire()
+                    .await
+                    .map_err(|e| anyhow!("semaphore closed: {e}"))?,
+            )
+        } else {
+            None
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(texts)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("HuggingFace error: {}", resp.text().await?));
+        }
+        // HF returns [[f32]] for batch or [f32] for single
+        let body: serde_json::Value = resp.json().await?;
+        if let Some(arr) = body.as_array() {
+            if arr.is_empty() {
+                return Ok(Vec::new());
+            }
+            if arr[0].is_array() {
+                // batch: [[f32]]
+                arr.iter()
+                    .map(|row| {
+                        serde_json::from_value::<Vec<f32>>(row.clone())
+                            .map_err(|e| anyhow!("HuggingFace parse error: {e}"))
+                    })
+                    .collect()
+            } else {
+                // single text returned as [f32]
+                let vec = serde_json::from_value::<Vec<f32>>(body)
+                    .map_err(|e| anyhow!("HuggingFace parse error: {e}"))?;
+                Ok(vec![vec])
+            }
+        } else {
+            Err(anyhow!("HuggingFace returned unexpected response format"))
         }
     }
 }

@@ -56,6 +56,8 @@ async fn vector_roundtrip_matrix_dims() {
                     k: 5,
                     options: SearchOptions {
                         filters: None,
+                        filter: None,
+                        min_score: None,
                         include_meta: true,
                         allowed_ids: None,
                     },

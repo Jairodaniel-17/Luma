@@ -1,13 +1,15 @@
 openapi: 3.0.3
 info:
   title: Luma API
-  version: 2.0.0
+  version: 3.0.0
   description: 'API documentation for **Luma**, a convergent data engine for AI applications.
 
 
     ## Features
 
-    - **Vector Operations**: Exact and ANN search (HNSW, IVF_FLAT_Q8, DiskANN).
+    - **Vector Operations**: Exact and ANN search (HNSW, IVF_FLAT_Q8, DiskANN). Includes
+    batch search (up to 100 parallel queries), cursor-based scroll/export, cosine reranking,
+    and group-by aggregations.
 
     - **State Management**: Key-Value store with optimistic locking (CAS) and range scans.
 
@@ -17,11 +19,22 @@ info:
     search.
 
     - **NS-Mem (Level 3)**: Agent memory layer — episodic, semantic, procedural and
-    working memory with LLM-based fact consolidation.
+    working memory with LLM-based fact consolidation. v3.0.0 adds semantic deduplication
+    (cosine ≥ 0.95), exponential decay scoring, and automatic contradiction detection
+    (cosine < 0.55 → Contradicts edge).
 
     - **NS-Mem Graph Layer (v2.0.0)**: Typed edges between memories (supports, contradicts,
     supersedes, triggered_by, related_to), PageRank centrality, belief versioning, and
     Semantic Walk BFS recall replacing flat K-NN.
+
+    - **Embedding Providers**: OpenAI, Azure OpenAI, Cohere, HuggingFace Inference API,
+    Ollama, Mock. All providers support exponential-backoff retry with jitter.
+
+    - **Observability**: Audit log middleware (every authenticated request logged to SQLite),
+    query via `GET /v1/admin/audit`. Force snapshots via `POST /v1/admin/backup`.
+
+    - **Access Control**: RBAC API key management — admin and user roles. Keys created,
+    listed and revoked via `/v1/auth/keys`.
 
     - **Real-time**: SSE streaming of database events.
 
@@ -51,6 +64,10 @@ tags:
     and multi-engine coordination.
 - name: NS-Mem
   description: Memory layer for episodic, semantic, procedural and working-memory flows.
+- name: Admin
+  description: Backup, audit log and operational endpoints. Require admin role.
+- name: Access Control
+  description: API key management — create, list and revoke keys. Require admin role.
 components:
   securitySchemes:
     bearerAuth:
@@ -686,6 +703,15 @@ components:
         embedding_ref:
           type: string
           nullable: true
+        decay_score:
+          type: number
+          format: float
+          default: 1.0
+          description: >
+            Exponential decay score in [0, 1]. Decreases over time according to
+            `exp(-ln(2)/half_life_days * elapsed_days)`. Facts below
+            `memory_decay_archive_threshold` are archived automatically by the
+            background decay task (opt-in via `memory_decay_enabled`).
     MemoryEvidence:
       type: object
       required:
@@ -1131,6 +1157,608 @@ components:
         updated:
           type: integer
           description: Number of memory records whose centrality_score was recomputed.
+
+    # ── v3.0.0 schemas ────────────────────────────────────────────────────────
+
+    VectorSearchBatchRequest:
+      type: object
+      required:
+      - queries
+      properties:
+        queries:
+          type: array
+          items:
+            $ref: '#/components/schemas/VectorSearchRequest'
+          minItems: 1
+          maxItems: 100
+          description: Up to 100 search queries executed in parallel via rayon.
+    VectorSearchBatchResponse:
+      type: object
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/VectorSearchResponse'
+          description: One result per query in the same order as the request.
+
+    ScrollItem:
+      type: object
+      required:
+      - id
+      - meta
+      properties:
+        id:
+          type: string
+        meta:
+          type: object
+          nullable: true
+        vector:
+          type: array
+          items:
+            type: number
+            format: float
+          nullable: true
+          description: Present only when `include_vectors=true`.
+    ScrollResponse:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScrollItem'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for the next page. Null when there are no more items.
+
+    RerankRequest:
+      type: object
+      required:
+      - ids
+      properties:
+        query_text:
+          type: string
+          nullable: true
+          description: Natural-language query. Embedded on the server side. Mutually exclusive with `query_vector`.
+        query_vector:
+          type: array
+          items:
+            type: number
+            format: float
+          nullable: true
+          description: Pre-computed query vector. Mutually exclusive with `query_text`.
+        ids:
+          type: array
+          items:
+            type: string
+          description: IDs to rerank. Must exist in the collection.
+    RerankResponse:
+      type: object
+      required:
+      - ranked
+      properties:
+        ranked:
+          type: array
+          items:
+            type: object
+            required:
+            - id
+            - score
+            properties:
+              id:
+                type: string
+              score:
+                type: number
+                format: float
+          description: IDs sorted by cosine similarity descending.
+
+    AggregateRequest:
+      type: object
+      required:
+      - group_by
+      properties:
+        group_by:
+          type: string
+          description: Metadata field name to group by.
+          example: tax_system
+        filter:
+          description: Optional typed metadata filter applied before grouping.
+          nullable: true
+          $ref: '#/components/schemas/MetadataFilter'
+        limit:
+          type: integer
+          nullable: true
+          default: 100
+          maximum: 1000
+          description: Max number of buckets returned.
+    AggregationBucket:
+      type: object
+      required:
+      - value
+      - count
+      properties:
+        value:
+          type: string
+          description: Field value for this bucket.
+        count:
+          type: integer
+          description: Number of vectors in this bucket (after applying filter).
+    AggregateResponse:
+      type: object
+      required:
+      - buckets
+      properties:
+        buckets:
+          type: array
+          items:
+            $ref: '#/components/schemas/AggregationBucket'
+          description: Buckets sorted by count descending.
+
+    MetadataFilter:
+      description: >
+        Composable typed filter tree. Leaf operators: `eq`, `neq`, `gt`, `gte`, `lt`,
+        `lte`, `in`, `not_in`, `any_of`, `contains`, `starts_with`, `exists`.
+        Logical combinators: `and`, `or`, `not`.
+      type: object
+      example:
+        field: tax_system
+        op: eq
+        value: suitetax
+
+    BackupResponse:
+      type: object
+      required:
+      - ok
+      - offset
+      properties:
+        ok:
+          type: boolean
+        offset:
+          type: integer
+          format: uint64
+          description: WAL offset at the time the snapshot was taken.
+
+    AuditEntry:
+      type: object
+      required:
+      - ts_ms
+      - method
+      - path
+      - status_code
+      - latency_ms
+      properties:
+        ts_ms:
+          type: integer
+          format: uint64
+        api_key_id:
+          type: string
+          nullable: true
+        ip:
+          type: string
+          nullable: true
+        method:
+          type: string
+          example: POST
+        path:
+          type: string
+          example: /v1/vector/my-col/search
+        status_code:
+          type: integer
+          example: 200
+        latency_ms:
+          type: integer
+          format: uint64
+
+    ApiKeyRecord:
+      type: object
+      required:
+      - id
+      - name
+      - role
+      - created_at_ms
+      properties:
+        id:
+          type: string
+          description: Opaque key identifier (UUID).
+        name:
+          type: string
+        role:
+          type: string
+          enum:
+          - admin
+          - user
+        created_at_ms:
+          type: integer
+          format: uint64
+    CreateApiKeyRequest:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          example: Production backend
+        role:
+          type: string
+          enum:
+          - admin
+          - user
+          default: user
+    CreateApiKeyResponse:
+      type: object
+      required:
+      - id
+      - name
+      - role
+      - key
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        key:
+          type: string
+          description: The raw API key value. Shown only once — store securely.
+          example: rk_live_abc123…
+    # ── DiskANN schemas ───────────────────────────────────────────────────────
+
+    DiskAnnBuildParams:
+      type: object
+      required:
+      - max_degree
+      - build_threads
+      - search_list_size
+      properties:
+        max_degree:
+          type: integer
+          description: Maximum out-degree per node in the Vamana graph. Clamped to [4, 1024].
+          default: 64
+          example: 32
+        build_threads:
+          type: integer
+          description: Number of threads used during index construction.
+          default: 4
+          example: 4
+        search_list_size:
+          type: integer
+          description: >
+            Candidate list size during greedy graph traversal. Larger values improve
+            recall at the cost of build time. Clamped to [8, 65535].
+          default: 128
+          example: 128
+
+    DiskAnnBuildRequest:
+      type: object
+      description: >
+        All fields are optional. Omitted fields fall back to the server's
+        `diskann_*` configuration values.
+      properties:
+        max_degree:
+          type: integer
+          nullable: true
+          example: 32
+        build_threads:
+          type: integer
+          nullable: true
+          example: 4
+        search_list_size:
+          type: integer
+          nullable: true
+          example: 128
+
+    DiskAnnStatusResponse:
+      type: object
+      required:
+      - available
+      - last_built_ms
+      - graph_files
+      - params
+      properties:
+        available:
+          type: boolean
+          description: True when a built DiskANN graph is loaded and ready for queries.
+        last_built_ms:
+          type: integer
+          format: uint64
+          description: Unix timestamp (ms) of the last successful build. 0 if never built.
+        graph_files:
+          type: array
+          items:
+            type: string
+          description: Relative paths of the graph segment files on disk.
+        params:
+          $ref: '#/components/schemas/DiskAnnBuildParams'
+
+    DiskAnnMutationResponse:
+      type: object
+      required:
+      - ok
+      - params
+      - status
+      properties:
+        ok:
+          type: boolean
+        params:
+          $ref: '#/components/schemas/DiskAnnBuildParams'
+          description: Effective parameters used for this build/tune operation.
+        status:
+          $ref: '#/components/schemas/DiskAnnStatusResponse'
+
+    # ── State secondary-index schemas ────────────────────────────────────────
+
+    CreateStateIndexRequest:
+      type: object
+      required:
+      - field
+      properties:
+        field:
+          type: string
+          description: >
+            JSON field name inside the `value` object to index.
+            Must be non-empty and within `max_key_len`.
+          example: user_id
+
+    CreateStateIndexResponse:
+      type: object
+      required:
+      - status
+      - field
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+        field:
+          type: string
+          example: user_id
+
+    # ── Config schemas ────────────────────────────────────────────────────────
+
+    ServerConfig:
+      type: object
+      description: >
+        Full server configuration. All fields are optional on PUT — omitted fields
+        keep their current value. A server restart is required for changes to take
+        effect. Fields whose names contain `api_key` or `llm_api_key` are sensitive
+        and should be treated accordingly.
+      properties:
+        port:
+          type: integer
+          default: 8080
+          example: 9917
+        bind_addr:
+          type: string
+          example: 0.0.0.0
+        api_key:
+          type: string
+          description: Master bearer token. Write-only — returned masked on GET.
+          example: dev
+        data_dir:
+          type: string
+          nullable: true
+          example: data
+        snapshot_interval_secs:
+          type: integer
+          format: uint64
+          default: 30
+        wal_segment_max_bytes:
+          type: integer
+          format: uint64
+          default: 67108864
+        wal_retention_segments:
+          type: integer
+          default: 10
+        wal_sync_mode:
+          type: string
+          enum:
+          - per_write
+          - group
+          default: group
+        wal_flush_interval_ms:
+          type: integer
+          format: uint64
+          default: 10
+        wal_batch_size:
+          type: integer
+          default: 64
+        request_timeout_secs:
+          type: integer
+          format: uint64
+          default: 30
+        max_body_bytes:
+          type: integer
+          default: 10485760
+        index_kind:
+          type: string
+          enum:
+          - HNSW
+          - IVF_FLAT_Q8
+          - DiskANN
+          default: HNSW
+        simd_enabled:
+          type: boolean
+          default: true
+        search_threads:
+          type: integer
+          default: 0
+          description: 0 = use all available cores.
+        pre_filter_threshold:
+          type: integer
+          default: 10000
+        hnsw_m:
+          type: integer
+          default: 16
+        hnsw_ef_construction:
+          type: integer
+          default: 200
+        hnsw_segment_compaction_enabled:
+          type: boolean
+          default: false
+        hnsw_segment_compaction_threshold:
+          type: number
+          format: float
+          default: 0.5
+        hnsw_segment_compaction_interval_secs:
+          type: integer
+          format: uint64
+          default: 60
+        ivf_clusters:
+          type: integer
+          default: 256
+        ivf_nprobe:
+          type: integer
+          default: 32
+        q8_refine_topk:
+          type: integer
+          default: 100
+        diskann_max_degree:
+          type: integer
+          default: 64
+        diskann_build_threads:
+          type: integer
+          default: 4
+        diskann_search_list_size:
+          type: integer
+          default: 128
+        embedding_provider:
+          type: string
+          enum:
+          - none
+          - mock
+          - openai
+          - azure
+          - cohere
+          - huggingface
+          - ollama
+          default: none
+        embedding_model:
+          type: string
+          example: text-embedding-3-small
+        embedding_url:
+          type: string
+          example: http://localhost:11434
+        embedding_dim:
+          type: integer
+          default: 1536
+        embedding_cache_size:
+          type: integer
+          default: 1024
+        embedding_retry_attempts:
+          type: integer
+          default: 3
+        embedding_retry_initial_ms:
+          type: integer
+          format: uint64
+          default: 200
+        embedding_azure_api_base:
+          type: string
+          example: https://my-resource.openai.azure.com
+        embedding_azure_deployment:
+          type: string
+          example: text-embedding-3-small
+        embedding_azure_api_version:
+          type: string
+          default: 2024-02-01
+        embedding_cohere_input_type:
+          type: string
+          enum:
+          - search_document
+          - search_query
+          default: search_document
+        llm_provider:
+          type: string
+          enum:
+          - none
+          - mock
+          - openai
+          - ollama
+          default: none
+        llm_model:
+          type: string
+          example: gpt-4o-mini
+        llm_url:
+          type: string
+          example: http://localhost:11434
+        memory_consolidation_enabled:
+          type: boolean
+          default: false
+        memory_working_ttl_secs:
+          type: integer
+          format: uint64
+          default: 3600
+        memory_default_limit:
+          type: integer
+          default: 10
+        memory_fact_promotion_threshold:
+          type: number
+          format: float
+          default: 0.85
+        memory_walk_max_hops:
+          type: integer
+          default: 2
+        memory_walk_min_similarity:
+          type: number
+          format: float
+          default: 0.65
+        memory_walk_max_nodes:
+          type: integer
+          default: 40
+        memory_centrality_enabled:
+          type: boolean
+          default: true
+        memory_centrality_update_interval_secs:
+          type: integer
+          format: uint64
+          default: 300
+        memory_decay_enabled:
+          type: boolean
+          default: false
+        memory_decay_half_life_days:
+          type: number
+          format: double
+          default: 30.0
+        memory_decay_archive_threshold:
+          type: number
+          format: float
+          default: 0.1
+        memory_decay_interval_secs:
+          type: integer
+          format: uint64
+          default: 3600
+        slow_query_threshold_ms:
+          type: integer
+          format: uint64
+          default: 0
+          description: Emit a warning log for searches exceeding this latency. 0 = disabled.
+        max_collection_vectors:
+          type: integer
+          default: 0
+          description: Maximum vectors per collection. 0 = unlimited.
+        cors_allowed_origins:
+          type: string
+          nullable: true
+          description: Comma-separated origin list, or `*`. Null disables CORS headers.
+
+    ConfigUpdateResponse:
+      type: object
+      required:
+      - status
+      - message
+      properties:
+        status:
+          type: string
+          enum:
+          - success
+        message:
+          type: string
+          example: Configuration saved to luma.toml. A server restart is required for changes to take effect.
+
 paths:
   /v1/health:
     get:
@@ -2319,6 +2947,627 @@ paths:
                 $ref: '#/components/schemas/CentralityResponse'
         '500':
           description: Centrality computation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  # ── v3.0.0 vector endpoints ───────────────────────────────────────────────
+
+  /v1/vector/{collection}/search_batch:
+    post:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Batch vector search (up to 100 queries in parallel)
+      description: >
+        Executes up to 100 `SearchRequest` objects in parallel using `rayon::par_iter()`.
+        Returns one result array per query in the same order as the input.
+        Useful for RAG pipelines that fan out many queries in a single round-trip.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VectorSearchBatchRequest'
+      responses:
+        '200':
+          description: One result set per query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VectorSearchBatchResponse'
+        '400':
+          description: Invalid request (e.g. more than 100 queries)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /v1/vector/{collection}/scroll:
+    get:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Scroll / cursor-based pagination
+      description: >
+        Iterates over all vectors in a collection using an opaque lexicographic cursor.
+        Use `next_cursor` from the previous response as the `cursor` parameter of the
+        next request. Returns an empty `items` array and `next_cursor: null` when
+        the collection is exhausted. Suitable for full collection exports.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: cursor
+        required: false
+        description: Opaque cursor from a previous response. Omit to start from the beginning.
+        schema:
+          type: string
+      - in: query
+        name: limit
+        required: false
+        description: Number of items per page.
+        schema:
+          type: integer
+          default: 100
+          minimum: 1
+          maximum: 1000
+      - in: query
+        name: include_vectors
+        required: false
+        description: Include the raw vector data in each item.
+        schema:
+          type: boolean
+          default: false
+      responses:
+        '200':
+          description: Page of items with optional next cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScrollResponse'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /v1/vector/{collection}/rerank:
+    post:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Rerank vectors by cosine similarity
+      description: >
+        Retrieves the stored vectors for the given IDs and re-scores them against
+        the query (text or pre-computed vector) using cosine similarity.
+        Returns the same IDs sorted by score descending. Useful as a second-stage
+        ranker after an ANN search.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RerankRequest'
+      responses:
+        '200':
+          description: IDs sorted by cosine similarity descending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RerankResponse'
+        '400':
+          description: Invalid request (e.g. both query_text and query_vector provided)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /v1/vector/{collection}/aggregate:
+    post:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Aggregate / group-by on metadata fields
+      description: >
+        Groups vectors by a metadata field and returns bucket counts.
+        Uses the keyword index fast path (O(1) per bucket) when the field is
+        indexed. Falls back to a full scan with `evaluate_filter` for complex
+        filter expressions. Supports the same typed `MetadataFilter` as search.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AggregateRequest'
+            example:
+              group_by: tax_system
+              filter:
+                field: status
+                op: eq
+                value: active
+              limit: 20
+      responses:
+        '200':
+          description: Buckets sorted by count descending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AggregateResponse'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  # ── v3.0.0 admin endpoints ────────────────────────────────────────────────
+
+  /v1/admin/backup:
+    post:
+      tags:
+      - Admin
+      security:
+      - bearerAuth: []
+      summary: Force a WAL snapshot
+      description: >
+        Triggers `engine.force_snapshot()` synchronously, rotating the current WAL
+        segment and writing a new `snapshot.json`. Returns the WAL offset at the
+        time of the snapshot. Requires admin role.
+      responses:
+        '200':
+          description: Snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Admin role required
+
+  /v1/admin/audit:
+    get:
+      tags:
+      - Admin
+      security:
+      - bearerAuth: []
+      summary: Query the audit log
+      description: >
+        Returns audit log entries from SQLite, ordered by timestamp descending.
+        Every authenticated API request is recorded with timestamp, API key ID,
+        client IP, HTTP method, path, status code, and latency. Requires admin role.
+      parameters:
+      - in: query
+        name: from_ms
+        required: false
+        description: Start of the time range (Unix ms, inclusive).
+        schema:
+          type: integer
+          format: uint64
+      - in: query
+        name: to_ms
+        required: false
+        description: End of the time range (Unix ms, inclusive).
+        schema:
+          type: integer
+          format: uint64
+      - in: query
+        name: key
+        required: false
+        description: Filter by API key ID (exact match).
+        schema:
+          type: string
+      - in: query
+        name: limit
+        required: false
+        description: Maximum number of entries to return.
+        schema:
+          type: integer
+          default: 100
+          maximum: 1000
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditEntry'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Admin role required
+
+  # ── v3.0.0 access-control endpoints ──────────────────────────────────────
+
+  /v1/auth/keys:
+    get:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: List all API keys
+      description: Returns all non-revoked API keys. The raw key value is never returned after creation. Requires admin role.
+      responses:
+        '200':
+          description: List of API key records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyRecord'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Admin role required
+    post:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Create an API key
+      description: >
+        Creates a new API key with the given name and role. The raw key is returned
+        **only once** in the response — it cannot be retrieved later. Requires admin role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '200':
+          description: Key created — save the `key` value now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateApiKeyResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Admin role required
+
+  /v1/auth/keys/{id}:
+    delete:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Revoke an API key
+      description: >
+        Permanently revokes the key with the given ID. Any subsequent request
+        using that key returns 401. Idempotent — returns 204 even if the key
+        was already revoked. Requires admin role.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        description: Key ID (UUID) as returned by the list or create endpoint.
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Key revoked
+        '401':
+          description: Unauthorized
+        '403':
+          description: Admin role required
+
+  # ── DiskANN endpoints ─────────────────────────────────────────────────────
+
+  /v1/vector/{collection}/diskann/build:
+    post:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Build DiskANN index
+      description: >
+        Triggers a full Vamana graph build for the collection. The build runs
+        synchronously and may take seconds to minutes depending on collection size
+        and `build_threads`. Once complete the index is immediately active for
+        approximate search queries.
+
+
+        All body fields are optional — omitted values fall back to the server's
+        `diskann_*` configuration defaults.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiskAnnBuildRequest'
+            example:
+              max_degree: 32
+              build_threads: 4
+              search_list_size: 128
+      responses:
+        '200':
+          description: Index built successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiskAnnMutationResponse'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '500':
+          description: Build failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /v1/vector/{collection}/diskann/tune:
+    post:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Tune DiskANN search parameters
+      description: >
+        Updates DiskANN search parameters (`search_list_size`, `max_degree`)
+        without rebuilding the graph from scratch. Useful to adjust recall/latency
+        tradeoffs on an already-built index. A full rebuild is not triggered.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiskAnnBuildRequest'
+            example:
+              search_list_size: 200
+      responses:
+        '200':
+          description: Parameters applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiskAnnMutationResponse'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  /v1/vector/{collection}/diskann/status:
+    get:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Get DiskANN index status
+      description: >
+        Returns whether a DiskANN graph is built and loaded for this collection,
+        its build timestamp, the list of graph segment files, and the effective
+        build parameters.
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiskAnnStatusResponse'
+        '404':
+          description: Collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+
+  # ── State secondary-index endpoints ──────────────────────────────────────
+
+  /v1/state/indexes:
+    post:
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
+      summary: Create a secondary index on a state field
+      description: >
+        Registers a secondary in-memory index on a JSON field inside state values.
+        Once created, `GET /v1/state/index/{field}/{value}` performs O(1) lookups
+        instead of a full key scan. Indexes survive as long as the server is running
+        but are not persisted to disk — recreate them after a restart.
+
+
+        Creating an index on an already-indexed field is a no-op.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStateIndexRequest'
+            example:
+              field: user_id
+      responses:
+        '200':
+          description: Index created (or already existed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateStateIndexResponse'
+        '400':
+          description: Invalid field name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '401':
+          description: Unauthorized
+
+  /v1/state/index/{field}/{value}:
+    get:
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
+      summary: Query state by secondary index
+      description: >
+        Returns all state items whose `value.{field}` equals `{value}`.
+        Requires a prior call to `POST /v1/state/indexes` for this field.
+        Results are unordered. Use `limit` to cap the result set (max 1000).
+      parameters:
+      - in: path
+        name: field
+        required: true
+        description: The JSON field name that was indexed.
+        schema:
+          type: string
+        example: user_id
+      - in: path
+        name: value
+        required: true
+        description: The exact value to match.
+        schema:
+          type: string
+        example: "42"
+      - in: query
+        name: limit
+        required: false
+        schema:
+          type: integer
+          default: 100
+          maximum: 1000
+      responses:
+        '200':
+          description: Matching state items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StateItem'
+        '401':
+          description: Unauthorized
+
+  # ── Config endpoints ──────────────────────────────────────────────────────
+
+  /v1/config:
+    get:
+      tags:
+      - System
+      security:
+      - bearerAuth: []
+      summary: Get current server configuration
+      description: >
+        Returns the full running configuration of the server. Sensitive fields
+        (`api_key`, `llm_api_key`, `embedding_api_key`) are included in the
+        response — restrict access to admin users.
+      responses:
+        '200':
+          description: Current configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerConfig'
+        '401':
+          description: Unauthorized
+    put:
+      tags:
+      - System
+      security:
+      - bearerAuth: []
+      summary: Update server configuration
+      description: >
+        Writes the supplied configuration to `luma.toml`. A **server restart**
+        is required for changes to take effect — the running process is not
+        reconfigured in-place. Only fields present in the body are written;
+        however the full `Config` struct is always serialised, so omitting a
+        field resets it to its default value. Send `GET /v1/config` first,
+        modify the fields you need, then `PUT` the whole object back.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerConfig'
+            example:
+              diskann_max_degree: 48
+              diskann_search_list_size: 160
+              embedding_provider: openai
+              embedding_model: text-embedding-3-small
+      responses:
+        '200':
+          description: Configuration saved — restart required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigUpdateResponse'
+        '400':
+          description: Invalid configuration payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '401':
+          description: Unauthorized
+        '500':
+          description: Failed to write luma.toml
           content:
             application/json:
               schema:

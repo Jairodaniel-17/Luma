@@ -2,12 +2,60 @@ use crate::memory::service::MemoryService;
 use crate::memory::types::{
     EdgeType, MemoryEdge, MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest,
 };
+use crate::vector::{SearchOptions, SearchRequest};
 use uuid::Uuid;
+
+const DEDUP_SIMILARITY_THRESHOLD: f32 = 0.95;
 
 #[derive(Clone, Default)]
 pub struct Consolidator;
 
 impl Consolidator {
+    /// Returns the ID of an existing semantic fact that is semantically equivalent
+    /// (cosine > DEDUP_SIMILARITY_THRESHOLD) to `content` in the given namespace.
+    async fn find_duplicate_fact(
+        &self,
+        service: &MemoryService,
+        namespace: &str,
+        content: &str,
+    ) -> Option<String> {
+        let vector = service.embeddings.embed(content).await.ok()?;
+        let collection = service.memory_collection(namespace, MemoryKind::Semantic);
+        let exists = service
+            .engine
+            .list_vector_collections()
+            .iter()
+            .any(|c| c.collection == collection);
+        if !exists {
+            return None;
+        }
+        let hits = service
+            .engine
+            .vector_search(
+                &collection,
+                SearchRequest {
+                    vector,
+                    k: 1,
+                    options: SearchOptions {
+                        filters: None,
+                        filter: None,
+                        min_score: Some(DEDUP_SIMILARITY_THRESHOLD),
+                        include_meta: true,
+                        allowed_ids: None,
+                    },
+                },
+            )
+            .ok()?;
+        hits.into_iter().next().map(|h| {
+            h.meta
+                .as_ref()
+                .and_then(|m| m.get("memory_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(&h.id)
+                .to_string()
+        })
+    }
+
     pub async fn process(
         &self,
         service: &MemoryService,
@@ -29,6 +77,27 @@ impl Consolidator {
             .await?;
 
         for candidate in candidates {
+            // Skip duplicate facts — if a semantically equivalent fact already
+            // exists (cosine > 0.95), avoid creating a redundant entry.
+            if let Some(dup_id) = self
+                .find_duplicate_fact(service, &record.namespace, &candidate.content)
+                .await
+            {
+                let fact_id = format!(
+                    "fact::{}::{}::{}",
+                    record.namespace, entity_id, candidate.fact_key
+                );
+                // Only skip if the duplicate is not the same fact we would create
+                if dup_id != fact_id {
+                    tracing::debug!(
+                        namespace = %record.namespace,
+                        duplicate_id = %dup_id,
+                        "consolidator: skipping duplicate fact (cosine >= {DEDUP_SIMILARITY_THRESHOLD})"
+                    );
+                    continue;
+                }
+            }
+
             let confidence = candidate.confidence; // capture before move
             let status = if confidence >= service.config.memory_fact_promotion_threshold {
                 MemoryStatus::Active

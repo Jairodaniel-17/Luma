@@ -50,6 +50,7 @@ async fn start_with_config(mut f: impl FnMut(Config) -> Config) -> TestApp {
         search_engine,
         None,
         embeddings,
+        None,
     );
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))

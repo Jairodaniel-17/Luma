@@ -109,6 +109,7 @@ pub async fn ensure_memory_schema(sqlite: &SqliteService) -> anyhow::Result<()> 
         "CREATE INDEX IF NOT EXISTS idx_memory_history_entity
             ON memory_history(namespace, entity_id)",
         "ALTER TABLE memory_records ADD COLUMN centrality_score REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE memory_records ADD COLUMN decay_score REAL NOT NULL DEFAULT 1.0",
     ];
 
     for statement in statements {

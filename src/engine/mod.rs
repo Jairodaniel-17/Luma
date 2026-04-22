@@ -947,6 +947,39 @@ impl Engine {
         self.0.vectors.search(collection, req)
     }
 
+    pub fn vector_search_batch(
+        &self,
+        collection: &str,
+        requests: Vec<SearchRequest>,
+    ) -> Vec<Result<Vec<SearchHit>, VectorError>> {
+        use rayon::prelude::*;
+        self.metrics().inc_vector_op();
+        requests
+            .into_par_iter()
+            .map(|req| self.0.vectors.search(collection, req))
+            .collect()
+    }
+
+    pub fn vector_scroll(
+        &self,
+        collection: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        include_vectors: bool,
+    ) -> Result<(Vec<crate::vector::ScrollItem>, Option<String>), VectorError> {
+        self.0
+            .vectors
+            .scroll(collection, cursor, limit, include_vectors)
+    }
+
+    pub fn vector_aggregate(
+        &self,
+        collection: &str,
+        req: crate::vector::AggregateRequest,
+    ) -> Result<Vec<crate::vector::AggregationBucket>, VectorError> {
+        self.0.vectors.aggregate(collection, req)
+    }
+
     fn expire_due_keys(&self, limit: usize) -> Result<usize, EngineError> {
         self.expire_due_keys_locked(now_ms(), limit)
     }

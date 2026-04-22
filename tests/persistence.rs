@@ -163,6 +163,8 @@ async fn vector_state_replays_without_state_db_snapshot() {
                 k: 5,
                 options: luma::vector::SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },

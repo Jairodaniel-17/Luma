@@ -33,6 +33,7 @@ async fn test_api_vector_flow() {
         std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
+        None,
     );
 
     // 1. Create Collection
@@ -137,6 +138,7 @@ async fn test_api_sql_flow() {
         std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
+        None,
     );
 
     // 1. Create Table (Exec)

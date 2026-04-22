@@ -54,6 +54,8 @@ fn bench_vector_ops(c: &mut Criterion) {
         k: 10,
         options: SearchOptions {
             filters: None,
+            filter: None,
+            min_score: None,
             include_meta: false,
             allowed_ids: None,
         },

@@ -103,6 +103,8 @@ async fn vector_persistence_restart_search() {
                 k: 1,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids: None,
                 },
@@ -149,6 +151,8 @@ async fn vector_rebuild_handles_many_vectors() {
                 k: 3,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },
@@ -207,6 +211,8 @@ async fn vector_delete_update_persisted() {
                 k: 1,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },
@@ -260,6 +266,8 @@ async fn vector_runs_tail_truncation_safe() {
                 k: 5,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },
@@ -391,6 +399,8 @@ async fn vector_q8_run_roundtrip() {
                 k: 1,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids: None,
                 },
@@ -650,6 +660,8 @@ async fn vector_compaction_budget_multiple_passes() {
                 k: 1,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: false,
                     allowed_ids: None,
                 },
@@ -803,6 +815,8 @@ async fn vector_diskann_search_roundtrip() {
                 k: 1,
                 options: SearchOptions {
                     filters: None,
+                    filter: None,
+                    min_score: None,
                     include_meta: true,
                     allowed_ids: None,
                 },

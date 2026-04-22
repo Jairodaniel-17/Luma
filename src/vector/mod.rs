@@ -1,4 +1,5 @@
 mod diskann;
+pub mod filter;
 pub mod index;
 mod ivf;
 pub mod mmap;
@@ -65,6 +66,13 @@ pub struct VectorSettings {
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Applies to new collections.
     pub hnsw_ef_construction: usize,
+    /// Maximum vectors per collection. 0 = unlimited.
+    pub max_vectors: usize,
+    /// Emit tracing::warn! for searches exceeding this latency in ms. 0 = disabled.
+    pub slow_query_threshold_ms: u64,
+    /// Max filtered candidates for brute-force pre-search (vs. HNSW + post-filter).
+    /// When `filter_candidates.len() <= threshold`, search runs on the subset only.
+    pub pre_filter_threshold: usize,
 }
 
 impl Default for VectorSettings {
@@ -96,6 +104,9 @@ impl Default for VectorSettings {
                 .unwrap_or(1),
             hnsw_m: 16,
             hnsw_ef_construction: 200,
+            max_vectors: 0,
+            slow_query_threshold_ms: 0,
+            pre_filter_threshold: 10_000,
         }
     }
 }
@@ -138,6 +149,9 @@ impl VectorSettings {
             diskann_build_threads: config.diskann_build_threads.max(1),
             hnsw_m: config.hnsw_m.clamp(2, 128),
             hnsw_ef_construction: config.hnsw_ef_construction.clamp(16, 2048),
+            max_vectors: config.max_collection_vectors,
+            slow_query_threshold_ms: config.slow_query_threshold_ms,
+            pre_filter_threshold: config.pre_filter_threshold.max(1),
         }
     }
 
@@ -202,6 +216,8 @@ pub enum VectorError {
     Persistence,
     #[error("operation not supported")]
     UnsupportedOperation,
+    #[error("storage quota exceeded")]
+    StorageQuotaExceeded,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -214,9 +230,30 @@ pub struct SearchRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SearchOptions {
+    /// Legacy flat-object filter: `{"field": "value", ...}` (AND of exact equality).
+    /// Kept for backward compatibility. Prefer `filter` for new callers.
     pub filters: Option<serde_json::Value>,
+    /// Typed composable filter. When both `filters` and `filter` are set they are
+    /// combined with AND.
+    pub filter: Option<filter::MetadataFilter>,
+    /// Discard hits with score strictly below this threshold. When `None` all
+    /// hits are returned (up to `k`). Useful for RAG to avoid injecting
+    /// low-relevance context into the prompt.
+    pub min_score: Option<f32>,
     pub include_meta: bool,
     pub allowed_ids: Option<HashSet<String>>,
+}
+
+impl SearchOptions {
+    /// Merge `filters` (legacy) and `filter` (typed) into a single `MetadataFilter`.
+    pub fn effective_filter(&self) -> Option<filter::MetadataFilter> {
+        let legacy = self.filters.as_ref().and_then(filter::from_legacy);
+        match (legacy, self.filter.clone()) {
+            (None, f) => f,
+            (f, None) => f,
+            (Some(a), Some(b)) => Some(filter::MetadataFilter::And { and: vec![a, b] }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -224,6 +261,26 @@ pub struct SearchHit {
     pub id: String,
     pub score: f32,
     pub meta: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScrollItem {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<Vec<f32>>,
+    pub meta: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AggregationBucket {
+    pub value: String,
+    pub count: usize,
+}
+
+pub struct AggregateRequest {
+    pub group_by: String,
+    pub filter: Option<filter::MetadataFilter>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -602,6 +659,110 @@ impl VectorStore {
         c.update_diskann_params(params)
     }
 
+    pub fn scroll(
+        &self,
+        collection: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        include_vectors: bool,
+    ) -> Result<(Vec<ScrollItem>, Option<String>), VectorError> {
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        let c = c_arc.read();
+
+        let mut ids: Vec<String> = c.items.keys().cloned().collect();
+        ids.sort();
+
+        let start = if let Some(cursor_id) = cursor {
+            match ids.binary_search(&cursor_id.to_string()) {
+                Ok(pos) => pos + 1,
+                Err(pos) => pos,
+            }
+        } else {
+            0
+        };
+        let end = (start + limit).min(ids.len());
+        let has_more = end < ids.len();
+
+        let items: Vec<ScrollItem> = ids[start..end]
+            .iter()
+            .filter_map(|id| {
+                c.items.get(id).map(|item| ScrollItem {
+                    id: id.clone(),
+                    vector: include_vectors.then(|| item.vector.clone()),
+                    meta: item.meta.clone(),
+                })
+            })
+            .collect();
+
+        let next_cursor = if has_more {
+            items.last().map(|item| item.id.clone())
+        } else {
+            None
+        };
+
+        Ok((items, next_cursor))
+    }
+
+    pub fn aggregate(
+        &self,
+        collection: &str,
+        req: AggregateRequest,
+    ) -> Result<Vec<AggregationBucket>, VectorError> {
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        let c = c_arc.read();
+
+        let limit = req.limit.unwrap_or(100).min(1_000);
+
+        let candidates: Option<HashSet<String>> = if let Some(ref f) = req.filter {
+            if let Some(ids) = filter::index_candidates(f, &c.keyword_index) {
+                Some(ids)
+            } else {
+                let ids = c
+                    .items
+                    .iter()
+                    .filter(|(_, item)| filter::evaluate_filter(&item.meta, f))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                Some(ids)
+            }
+        } else {
+            None
+        };
+
+        let by_value = match c.keyword_index.get(&req.group_by) {
+            Some(bv) => bv,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut buckets: Vec<AggregationBucket> = by_value
+            .iter()
+            .map(|(value, ids)| {
+                let count = if let Some(ref cands) = candidates {
+                    ids.iter().filter(|id| cands.contains(*id)).count()
+                } else {
+                    ids.len()
+                };
+                AggregationBucket {
+                    value: value.clone(),
+                    count,
+                }
+            })
+            .filter(|b| b.count > 0)
+            .collect();
+
+        buckets.sort_by(|a, b| b.count.cmp(&a.count));
+        buckets.truncate(limit);
+        Ok(buckets)
+    }
+
     pub fn get(&self, collection: &str, id: &str) -> Result<Option<VectorItem>, VectorError> {
         let c_arc = self
             .0
@@ -747,6 +908,10 @@ impl VectorStore {
         if item.vector.len() != c.dim {
             return Err(VectorError::DimMismatch);
         }
+        let max = c.settings.max_vectors;
+        if max > 0 && c.manifest.live_count >= max {
+            return Err(VectorError::StorageQuotaExceeded);
+        }
         let record = Record {
             offset: 0,
             op: RecordOp::Upsert,
@@ -768,6 +933,11 @@ impl VectorStore {
         let mut c = c_arc.write();
         if item.vector.len() != c.dim {
             return Err(VectorError::DimMismatch);
+        }
+        // Only check quota on new inserts, not on overwrites of existing IDs.
+        let max = c.settings.max_vectors;
+        if max > 0 && !c.items.contains_key(id) && c.manifest.live_count >= max {
+            return Err(VectorError::StorageQuotaExceeded);
         }
         let record = Record {
             offset: 0,
@@ -839,8 +1009,12 @@ impl VectorStore {
         collection: &str,
         req: SearchRequest,
     ) -> Result<Vec<SearchHit>, VectorError> {
+        let min_score = req.options.min_score;
         self.search_with_stats(collection, req)
-            .map(|(hits, _)| hits)
+            .map(|(hits, _)| match min_score {
+                Some(threshold) => hits.into_iter().filter(|h| h.score >= threshold).collect(),
+                None => hits,
+            })
     }
 
     pub fn search_with_stats(
@@ -854,7 +1028,21 @@ impl VectorStore {
             .get(collection)
             .ok_or(VectorError::CollectionNotFound)?;
         let c = c_arc.read();
-        c.search(req)
+        let threshold_ms = c.settings.slow_query_threshold_ms;
+        let started = (threshold_ms > 0).then(std::time::Instant::now);
+        let result = c.search(req);
+        if let Some(t) = started {
+            let elapsed_ms = t.elapsed().as_millis() as u64;
+            if elapsed_ms >= threshold_ms {
+                tracing::warn!(
+                    collection,
+                    elapsed_ms,
+                    "slow vector search (threshold {}ms)",
+                    threshold_ms
+                );
+            }
+        }
+        result
     }
 
     fn layout_for(&self, collection: &str) -> Option<CollectionLayout> {
@@ -1361,15 +1549,21 @@ impl Collection {
             return;
         };
         for (k, v) in obj {
-            let Some(value) = v.as_str() else {
+            let by_field = self.keyword_index.entry(k.clone()).or_default();
+            // Index scalar strings and each string element of an array.
+            let values: Vec<&str> = if let Some(s) = v.as_str() {
+                vec![s]
+            } else if let Some(arr) = v.as_array() {
+                arr.iter().filter_map(|e| e.as_str()).collect()
+            } else {
                 continue;
             };
-            self.keyword_index
-                .entry(k.clone())
-                .or_default()
-                .entry(value.to_string())
-                .or_default()
-                .insert(id.to_string());
+            for value in values {
+                by_field
+                    .entry(value.to_string())
+                    .or_default()
+                    .insert(id.to_string());
+            }
         }
     }
 
@@ -1377,14 +1571,20 @@ impl Collection {
         let Some(meta) = meta else { return };
         let Some(obj) = meta.as_object() else { return };
         for (k, v) in obj {
-            let Some(value) = v.as_str() else {
+            let values: Vec<&str> = if let Some(s) = v.as_str() {
+                vec![s]
+            } else if let Some(arr) = v.as_array() {
+                arr.iter().filter_map(|e| e.as_str()).collect()
+            } else {
                 continue;
             };
             if let Some(by_value) = self.keyword_index.get_mut(k) {
-                if let Some(set) = by_value.get_mut(value) {
-                    set.remove(id);
-                    if set.is_empty() {
-                        by_value.remove(value);
+                for value in values {
+                    if let Some(set) = by_value.get_mut(value) {
+                        set.remove(id);
+                        if set.is_empty() {
+                            by_value.remove(value);
+                        }
                     }
                 }
                 if by_value.is_empty() {
@@ -1392,29 +1592,6 @@ impl Collection {
                 }
             }
         }
-    }
-
-    fn keyword_candidates(&self, filters: &serde_json::Value) -> Option<HashSet<String>> {
-        let obj = filters.as_object()?;
-        let mut current: Option<HashSet<String>> = None;
-        for (k, v) in obj {
-            let value = v.as_str()?;
-            let Some(by_value) = self.keyword_index.get(k) else {
-                return Some(HashSet::new());
-            };
-            let Some(ids) = by_value.get(value) else {
-                return Some(HashSet::new());
-            };
-            let ids_cloned: HashSet<String> = ids.iter().cloned().collect();
-            current = match current {
-                None => Some(ids_cloned),
-                Some(mut acc) => {
-                    acc.retain(|id| ids.contains(id));
-                    Some(acc)
-                }
-            };
-        }
-        current
     }
 
     fn apply_record(
@@ -1665,13 +1842,11 @@ impl Collection {
         let include_meta = req.options.include_meta;
         let k = req.k.max(1);
         let query = normalize_if_needed(self.metric, req.vector);
+        let eff_filter = req.options.effective_filter();
         if self.items.is_empty() {
             return Ok((Vec::new(), stats));
         }
-        if self.items.len() < 100
-            && req.options.filters.is_none()
-            && req.options.allowed_ids.is_none()
-        {
+        if self.items.len() < 100 && eff_filter.is_none() && req.options.allowed_ids.is_none() {
             let mut scored = Vec::new();
             for (id, item) in self.items.iter() {
                 let score = exact_score(
@@ -1693,11 +1868,9 @@ impl Collection {
             stats.recall_estimate = 1.0;
             return Ok((scored, stats));
         }
-        let mut filter_candidates = req
-            .options
-            .filters
+        let mut filter_candidates = eff_filter
             .as_ref()
-            .and_then(|f| self.keyword_candidates(f));
+            .and_then(|f| filter::index_candidates(f, &self.keyword_index));
 
         if let Some(ref allowed) = req.options.allowed_ids {
             let mut resolved_allowed = HashSet::new();
@@ -1738,7 +1911,7 @@ impl Collection {
             if let Some(hits) = self.search_diskann(
                 query.as_slice(),
                 include_meta,
-                req.options.filters.as_ref(),
+                eff_filter.as_ref(),
                 filter_candidates.as_ref(),
                 k,
             )? {
@@ -1754,12 +1927,12 @@ impl Collection {
             if set_ref.is_empty() {
                 return Ok((Vec::new(), stats));
             }
-            if set_ref.len() <= 512 {
+            if set_ref.len() <= self.settings.pre_filter_threshold {
                 let hits = self.search_subset_bruteforce(
                     query.as_slice(),
                     include_meta,
                     set_ref,
-                    req.options.filters.as_ref(),
+                    eff_filter.as_ref(),
                     k,
                     ivf_probes.as_ref(),
                 );
@@ -1773,7 +1946,7 @@ impl Collection {
             let hits = self.search_ivf_flat(
                 query.as_slice(),
                 include_meta,
-                req.options.filters.as_ref(),
+                eff_filter.as_ref(),
                 filter_candidates.as_ref(),
                 k,
                 probes,
@@ -1809,7 +1982,7 @@ impl Collection {
             let hits = self.filtered_hits_from_candidates(
                 &combined,
                 include_meta,
-                req.options.filters.as_ref(),
+                eff_filter.as_ref(),
                 filter_candidates.as_ref(),
                 ivf_probes.as_ref(),
                 k,
@@ -1840,7 +2013,7 @@ impl Collection {
         &self,
         combined: &[(String, f32)],
         include_meta: bool,
-        filters: Option<&serde_json::Value>,
+        eff_filter: Option<&filter::MetadataFilter>,
         filter_candidates: Option<&HashSet<String>>,
         ivf_probes: Option<&HashSet<usize>>,
         k: usize,
@@ -1867,7 +2040,7 @@ impl Collection {
             let Some(item) = self.items.get(id) else {
                 continue;
             };
-            if !matches_filters(&item.meta, filters) {
+            if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
                 continue;
             }
             hits.push(SearchHit {
@@ -1899,7 +2072,7 @@ impl Collection {
         query: &[f32],
         include_meta: bool,
         candidates: &HashSet<String>,
-        filters: Option<&serde_json::Value>,
+        eff_filter: Option<&filter::MetadataFilter>,
         k: usize,
         cluster_filter: Option<&HashSet<usize>>,
     ) -> Vec<SearchHit> {
@@ -1916,7 +2089,7 @@ impl Collection {
                     continue;
                 }
             }
-            if !matches_filters(&item.meta, filters) {
+            if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
                 continue;
             }
             let score = exact_score(
@@ -1945,7 +2118,7 @@ impl Collection {
         &self,
         query: &[f32],
         include_meta: bool,
-        filters: Option<&serde_json::Value>,
+        eff_filter: Option<&filter::MetadataFilter>,
         filter_candidates: Option<&HashSet<String>>,
         k: usize,
         probes: &HashSet<usize>,
@@ -1965,7 +2138,7 @@ impl Collection {
                 let Some(item) = self.items.get(id) else {
                     continue;
                 };
-                if !matches_filters(&item.meta, filters) {
+                if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
                     continue;
                 }
                 let Some(qvec) = self.q8_store.get(id) else {
@@ -2010,7 +2183,7 @@ impl Collection {
         &self,
         query: &[f32],
         include_meta: bool,
-        filters: Option<&serde_json::Value>,
+        eff_filter: Option<&filter::MetadataFilter>,
         filter_candidates: Option<&HashSet<String>>,
         k: usize,
     ) -> Result<Option<Vec<SearchHit>>, VectorError> {
@@ -2047,7 +2220,7 @@ impl Collection {
             let Some(item) = self.items.get(&id) else {
                 continue;
             };
-            if !matches_filters(&item.meta, filters) {
+            if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
                 continue;
             }
             let exact = exact_score(
@@ -2205,24 +2378,6 @@ fn should_stop_expansion(
         return true;
     }
     recall_estimate >= 0.92
-}
-
-fn matches_filters(meta: &serde_json::Value, filters: Option<&serde_json::Value>) -> bool {
-    let Some(filters) = filters else { return true };
-    let serde_json::Value::Object(f) = filters else {
-        return false;
-    };
-    let serde_json::Value::Object(m) = meta else {
-        return false;
-    };
-
-    for (k, v) in f.iter() {
-        match m.get(k) {
-            Some(mv) if mv == v => {}
-            _ => return false,
-        }
-    }
-    true
 }
 
 fn compare_scores_desc(a: &(String, f32), b: &(String, f32)) -> Ordering {
@@ -2414,6 +2569,8 @@ mod tests {
                     k: 5,
                     options: SearchOptions {
                         filters: None,
+                        filter: None,
+                        min_score: None,
                         include_meta: false,
                         allowed_ids: None,
                     },
@@ -2484,6 +2641,8 @@ mod tests {
                     k: 8,
                     options: SearchOptions {
                         filters: None,
+                        filter: None,
+                        min_score: None,
                         include_meta: false,
                         allowed_ids: None,
                     },

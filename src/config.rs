@@ -80,6 +80,14 @@ pub struct Config {
     pub memory_centrality_enabled: bool,
     /// How often to recompute centrality scores in seconds (default 300).
     pub memory_centrality_update_interval_secs: u64,
+    /// Enable exponential decay of semantic facts (default false).
+    pub memory_decay_enabled: bool,
+    /// Half-life in days for semantic fact decay (default 30.0).
+    pub memory_decay_half_life_days: f64,
+    /// Archive facts whose decay_score drops below this threshold (default 0.1).
+    pub memory_decay_archive_threshold: f32,
+    /// How often to run the decay background task in seconds (default 3600).
+    pub memory_decay_interval_secs: u64,
     /// PR4: HNSW M parameter (connections per node). Default 16.
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Default 200.
@@ -96,6 +104,25 @@ pub struct Config {
     pub wal_flush_interval_ms: u64,
     /// PR5: Group commit batch size (flush after N events). Default 64.
     pub wal_batch_size: usize,
+    /// Maximum vectors per collection (0 = unlimited). Applies to add and upsert.
+    pub max_collection_vectors: usize,
+    /// Emit a tracing::warn! for vector searches that exceed this threshold in ms (0 = disabled).
+    pub slow_query_threshold_ms: u64,
+    /// Max filtered candidates to use brute-force pre-search instead of HNSW + post-filter.
+    /// Default 10000. Higher values trade accuracy for speed on filtered corpora.
+    pub pre_filter_threshold: usize,
+    /// Max embedding retry attempts for transient provider errors (default 3, min 1).
+    pub embedding_retry_attempts: u32,
+    /// Initial backoff delay in ms for embedding retries (default 200).
+    pub embedding_retry_initial_ms: u64,
+    /// Azure OpenAI: base URL (e.g. https://my.openai.azure.com).
+    pub embedding_azure_api_base: String,
+    /// Azure OpenAI: deployment name.
+    pub embedding_azure_deployment: String,
+    /// Azure OpenAI: API version (e.g. 2024-02-01).
+    pub embedding_azure_api_version: String,
+    /// Cohere embed input_type: "search_document" (upsert) or "search_query" (query).
+    pub embedding_cohere_input_type: String,
 }
 
 impl Default for Config {
@@ -169,6 +196,10 @@ impl Default for Config {
             memory_walk_max_nodes: 40,
             memory_centrality_enabled: true,
             memory_centrality_update_interval_secs: 300,
+            memory_decay_enabled: false,
+            memory_decay_half_life_days: 30.0,
+            memory_decay_archive_threshold: 0.1,
+            memory_decay_interval_secs: 3600,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
             hnsw_segment_compaction_enabled: false,
@@ -177,6 +208,15 @@ impl Default for Config {
             wal_sync_mode: "per_write".to_string(),
             wal_flush_interval_ms: 10,
             wal_batch_size: 64,
+            max_collection_vectors: 0,
+            slow_query_threshold_ms: 0,
+            pre_filter_threshold: 10_000,
+            embedding_retry_attempts: 3,
+            embedding_retry_initial_ms: 200,
+            embedding_azure_api_base: String::new(),
+            embedding_azure_deployment: String::new(),
+            embedding_azure_api_version: "2024-02-01".to_string(),
+            embedding_cohere_input_type: "search_document".to_string(),
         }
     }
 }
@@ -430,6 +470,19 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300);
+        let memory_decay_enabled = parse_env_bool("MEMORY_DECAY_ENABLED", false);
+        let memory_decay_half_life_days = std::env::var("MEMORY_DECAY_HALF_LIFE_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30.0_f64);
+        let memory_decay_archive_threshold = std::env::var("MEMORY_DECAY_ARCHIVE_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.1_f32);
+        let memory_decay_interval_secs = std::env::var("MEMORY_DECAY_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600_u64);
         let hnsw_m = std::env::var("HNSW_M")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -529,6 +582,10 @@ impl Config {
             memory_walk_max_nodes,
             memory_centrality_enabled,
             memory_centrality_update_interval_secs,
+            memory_decay_enabled,
+            memory_decay_half_life_days,
+            memory_decay_archive_threshold,
+            memory_decay_interval_secs,
             hnsw_m,
             hnsw_ef_construction,
             hnsw_segment_compaction_enabled,
@@ -537,6 +594,33 @@ impl Config {
             wal_sync_mode,
             wal_flush_interval_ms,
             wal_batch_size,
+            max_collection_vectors: std::env::var("MAX_COLLECTION_VECTORS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            slow_query_threshold_ms: std::env::var("SLOW_QUERY_THRESHOLD_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            pre_filter_threshold: std::env::var("PRE_FILTER_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10_000),
+            embedding_retry_attempts: std::env::var("EMBEDDING_RETRY_ATTEMPTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+            embedding_retry_initial_ms: std::env::var("EMBEDDING_RETRY_INITIAL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
+            embedding_azure_api_base: std::env::var("EMBEDDING_AZURE_API_BASE").unwrap_or_default(),
+            embedding_azure_deployment: std::env::var("EMBEDDING_AZURE_DEPLOYMENT")
+                .unwrap_or_default(),
+            embedding_azure_api_version: std::env::var("EMBEDDING_AZURE_API_VERSION")
+                .unwrap_or_else(|_| "2024-02-01".to_string()),
+            embedding_cohere_input_type: std::env::var("EMBEDDING_COHERE_INPUT_TYPE")
+                .unwrap_or_else(|_| "search_document".to_string()),
         })
     }
 }
