@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::Response;
+use subtle::ConstantTimeEq;
 
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -77,7 +78,20 @@ pub async fn auth_middleware(
     }
 
     // 2. Check Static Config
-    if token == state.config.api_key {
+    if state.config.api_key.is_empty() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "server requires an api key but none is configured",
+        ));
+    }
+
+    if token
+        .as_bytes()
+        .ct_eq(state.config.api_key.as_bytes())
+        .unwrap_u8()
+        == 1
+    {
         let mut req = req;
         req.extensions_mut()
             .insert(AuditKeyId("static".to_string()));
