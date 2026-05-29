@@ -12,7 +12,6 @@ pub mod routes_hub;
 pub mod routes_memory;
 pub mod routes_meta;
 pub mod routes_search;
-pub mod routes_sql;
 pub mod routes_state;
 pub mod routes_ui;
 pub mod routes_vector;
@@ -172,8 +171,6 @@ pub fn router(
             "/v1/vector/:collection/diskann/status",
             get(routes_vector::diskann_status),
         )
-        .route("/v1/sql/query", post(routes_sql::query))
-        .route("/v1/sql/exec", post(routes_sql::exec))
         .route("/v1/db/:namespace/ingest", post(routes_hub::ingest))
         .route("/v1/db/:namespace/search", post(routes_hub::search))
         .route(

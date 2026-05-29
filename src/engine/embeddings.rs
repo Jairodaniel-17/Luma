@@ -192,7 +192,10 @@ impl EmbeddingClient {
             }
 
             if missing_indices.is_empty() {
-                return Ok(result.into_iter().map(|v| v.unwrap()).collect());
+                return Ok(result
+                    .into_iter()
+                    .map(|v| v.expect("all values are present"))
+                    .collect());
             }
 
             // Embed the missing ones in batch

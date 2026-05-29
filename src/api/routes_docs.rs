@@ -19,7 +19,12 @@ pub async fn openapi_yaml() -> impl IntoResponse {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/yaml; charset=utf-8")
         .body(axum::body::Body::from(OPENAPI_SPEC))
-        .unwrap()
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::from("Internal Server Error"))
+                .unwrap()
+        })
 }
 
 /// Handler that serves the beautiful Scalar API documentation UI.

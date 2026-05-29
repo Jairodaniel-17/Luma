@@ -9,11 +9,14 @@ use tokio::sync::{mpsc, oneshot};
 
 mod actor;
 pub mod memory_schema;
+mod pool;
 use actor::{SqliteActor, SqliteCommand};
+use pool::SqliteReaderPool;
 
 #[derive(Clone)]
 pub struct SqliteService {
     sender: mpsc::Sender<SqliteCommand>,
+    reader_pool: Arc<SqliteReaderPool>,
     path: PathBuf,
     planner_stats: Arc<Mutex<HashMap<String, CachedCount>>>,
 }
@@ -42,8 +45,12 @@ impl SqliteService {
             actor.run();
         });
 
+        // Concurrency improvement: 10 readers
+        let reader_pool = Arc::new(SqliteReaderPool::new(db_path.clone(), 10)?);
+
         Ok(Self {
             sender,
+            reader_pool,
             path: db_path,
             planner_stats: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -54,19 +61,8 @@ impl SqliteService {
         sql: String,
         params: Vec<serde_json::Value>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let (respond_to, receiver) = oneshot::channel();
         let values = json_params_to_values(params)?;
-        let msg = SqliteCommand::Query {
-            sql,
-            params: values,
-            respond_to,
-        };
-        if self.sender.send(msg).await.is_err() {
-            return Err(anyhow::anyhow!("sqlite actor channel closed"));
-        }
-        receiver
-            .await
-            .map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
+        self.reader_pool.query(sql, values).await
     }
 
     pub async fn execute(
