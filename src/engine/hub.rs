@@ -366,7 +366,11 @@ impl LumaDatabase {
         }
 
         let inspection = self
-            .inspect_sql_filter(namespace, sql_filter.unwrap(), collection_size)
+            .inspect_sql_filter(
+                namespace,
+                sql_filter.expect("sql_filter is checked to be some"),
+                collection_size,
+            )
             .await?;
         if inspection.estimated_matches == 0 {
             return Ok(QueryPlan {
@@ -698,9 +702,13 @@ impl LumaDatabase {
     }
 
     fn rollback_ingest(&self, namespace: &str, doc_key: &str, inserted_ids: &[String]) {
-        let _ = self.engine.delete_state(doc_key);
+        if let Err(e) = self.engine.delete_state(doc_key) {
+            tracing::error!("Rollback failed for state doc_key {}: {}", doc_key, e);
+        }
         for chunk_id in inserted_ids {
-            let _ = self.engine.vector_delete(namespace, chunk_id);
+            if let Err(e) = self.engine.vector_delete(namespace, chunk_id) {
+                tracing::error!("Rollback failed for vector chunk {}: {}", chunk_id, e);
+            }
         }
     }
 

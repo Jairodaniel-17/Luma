@@ -251,7 +251,7 @@ impl Config {
 
         let api_key = std::env::var("LUMA_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
-            .unwrap_or_else(|_| "dev".to_string());
+            .unwrap_or_else(|_| "".to_string());
         let data_dir = resolve_data_dir();
 
         let snapshot_interval_secs = std::env::var("SNAPSHOT_INTERVAL_SECS")
