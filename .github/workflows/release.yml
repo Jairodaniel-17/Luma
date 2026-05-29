@@ -35,11 +35,10 @@ jobs:
             asset_name: luma-macos-amd64
 
           # --- macOS (Apple Silicon - Nativo M1/M2/M3) ---
-          # Opcional: Descomenta si quieres binario nativo ARM64
-          # - os: macos-latest
-          #   target: aarch64-apple-darwin
-          #   artifact_name: luma
-          #   asset_name: luma-macos-arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: luma
+            asset_name: luma-macos-arm64
 
     steps:
       - name: Checkout code
