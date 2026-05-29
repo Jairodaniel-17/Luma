@@ -110,4 +110,3 @@ async fn test_api_vector_flow() {
     // Search returns {"hits": [...]}
     assert_eq!(body["hits"][0]["id"], "vec1");
 }
-
