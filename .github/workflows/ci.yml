@@ -47,12 +47,12 @@ jobs:
         run: cargo test --verbose --locked
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install MSRV toolchain
-        uses: dtolnay/rust-toolchain@1.85
+        uses: dtolnay/rust-toolchain@1.88
       - name: Check compilation on MSRV
         run: cargo check --all-features --locked
 
