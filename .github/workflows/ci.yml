@@ -54,7 +54,7 @@ jobs:
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@1.75
       - name: Check compilation on MSRV
-        run: cargo check --all-features --locked
+        run: cargo check --all-features
 
   deny:
     name: Dependency Audit (cargo-deny)

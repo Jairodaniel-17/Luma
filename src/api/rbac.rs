@@ -36,10 +36,7 @@ pub fn require_role(ctx: &TenantContext, min_role: &str) -> Result<(), ApiError>
         .iter()
         .position(|&r| r == ctx.role.as_str())
         .unwrap_or(usize::MAX); // custom role: assume sufficient
-    let min_level = ROLE_TIERS
-        .iter()
-        .position(|&r| r == min_role)
-        .unwrap_or(0);
+    let min_level = ROLE_TIERS.iter().position(|&r| r == min_role).unwrap_or(0);
     if caller_level >= min_level {
         Ok(())
     } else {

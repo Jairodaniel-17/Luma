@@ -198,7 +198,10 @@ async fn serve_tls(
 
     let tls_cfg = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, rustls::pki_types::PrivateKeyDer::Pkcs8(keys.remove(0)))?;
+        .with_single_cert(
+            certs,
+            rustls::pki_types::PrivateKeyDer::Pkcs8(keys.remove(0)),
+        )?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_cfg));
     let listener = TcpListener::bind(addr).await?;
 

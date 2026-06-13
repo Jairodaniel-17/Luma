@@ -58,7 +58,10 @@ pub struct TenantContext {
 
 async fn security_headers(mut response: axum::response::Response) -> axum::response::Response {
     let headers = response.headers_mut();
-    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert(
         "referrer-policy",
@@ -150,18 +153,12 @@ pub fn router(deps: RouterDeps) -> Router<()> {
             get(routes_auth::list_keys).post(routes_auth::create_key),
         )
         .route("/v1/auth/keys/:id", delete(routes_auth::revoke_key))
-        .route(
-            "/v1/auth/keys/:id/role",
-            put(routes_auth::update_key_role),
-        )
+        .route("/v1/auth/keys/:id/role", put(routes_auth::update_key_role))
         .route(
             "/v1/auth/roles",
             get(routes_rbac::list_roles).post(routes_rbac::create_role),
         )
-        .route(
-            "/v1/auth/roles/:id",
-            delete(routes_rbac::delete_role),
-        )
+        .route("/v1/auth/roles/:id", delete(routes_rbac::delete_role))
         .route(
             "/v1/auth/roles/:id/permissions",
             get(routes_rbac::list_permissions)
