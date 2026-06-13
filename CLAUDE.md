@@ -125,7 +125,7 @@ Config source: `src/config.rs`. Environment variables override TOML values.
 
 ## CI
 
-CI runs: rustfmt check → clippy (strict, `-D warnings`) → tests → `cargo-audit` → `cargo-deny` → MSRV check (1.75) → `cargo bench --no-run` (bench compilation gate). Releases trigger on `v*` tags and produce cross-platform binaries (Linux, Windows, macOS).
+CI runs: rustfmt check → clippy (strict, `-D warnings`) → tests → `cargo-audit` → `cargo-deny` → MSRV check (1.85) → `cargo bench --no-run` (bench compilation gate). Releases trigger on `v*` tags and produce cross-platform binaries (Linux, Windows, macOS).
 
 Use the `mock` embedding provider in tests to avoid external service dependencies.
 
@@ -176,7 +176,7 @@ Use the `mock` embedding provider in tests to avoid external service dependencie
 - Bounded concurrency semaphore for embedding providers; OpenAI batch chunked to ≤ 96 texts.
 - `tracing::warn!` on `TriggeredBy` edge failures in consolidator.
 - HNSW compaction tombstone ratio default 0.2 → 0.5.
-- CI: removed `continue-on-error`, added MSRV (1.75) and `cargo-deny` jobs.
+- CI: removed `continue-on-error`, added MSRV (1.85) and `cargo-deny` jobs.
 - 20 procedural DAG tests (`tests/ns_mem_procedural.rs`).
 
 ### Done — v2.0.0
