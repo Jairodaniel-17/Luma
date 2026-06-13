@@ -61,7 +61,10 @@ impl SqliteService {
         let reader_pool = Arc::new(SqliteReaderPool::new(db_path.clone(), 10)?);
 
         Ok(Self {
-            inner: Arc::new(ServiceInner::Local { sender, reader_pool }),
+            inner: Arc::new(ServiceInner::Local {
+                sender,
+                reader_pool,
+            }),
             path: db_path,
             planner_stats: Arc::new(Mutex::new(HashMap::new())),
         })

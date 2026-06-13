@@ -97,7 +97,7 @@ pub struct HranaService {
 
 struct HranaInner {
     client: Client,
-    url: String,  // e.g. "https://db-name.turso.io"
+    url: String, // e.g. "https://db-name.turso.io"
     token: String,
 }
 
@@ -160,10 +160,7 @@ impl HranaService {
             .inner
             .client
             .post(format!("{}/v2/pipeline", self.inner.url))
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.inner.token),
-            )
+            .header("Authorization", format!("Bearer {}", self.inner.token))
             .json(&body)
             .send()
             .await?
@@ -204,7 +201,9 @@ fn to_hrana_args(params: Vec<serde_json::Value>) -> anyhow::Result<Vec<HranaArg>
                     }
                 }
                 serde_json::Value::String(s) => HranaArg::Text { value: s },
-                _ => anyhow::bail!("unsupported Hrana parameter type (only null/bool/number/string)"),
+                _ => {
+                    anyhow::bail!("unsupported Hrana parameter type (only null/bool/number/string)")
+                }
             })
         })
         .collect()

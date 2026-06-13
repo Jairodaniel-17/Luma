@@ -312,4 +312,3 @@ async fn vector_diskann_build_status_and_tune() {
 
     let _ = shutdown.send(());
 }
-

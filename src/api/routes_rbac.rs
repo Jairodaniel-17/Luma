@@ -77,7 +77,9 @@ pub async fn list_permissions(
     require_role(&ctx, "admin")?;
     let svc = rbac_svc(&state)?;
     let perms = svc.list_permissions(&role_id).await.map_err(internal)?;
-    Ok(Json(serde_json::json!({ "role_id": role_id, "permissions": perms })))
+    Ok(Json(
+        serde_json::json!({ "role_id": role_id, "permissions": perms }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -158,9 +160,5 @@ fn rbac_svc(state: &AppState) -> Result<&crate::api::rbac::RbacService, ApiError
 }
 
 fn internal(e: anyhow::Error) -> ApiError {
-    ApiError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        e.to_string(),
-    )
+    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())
 }

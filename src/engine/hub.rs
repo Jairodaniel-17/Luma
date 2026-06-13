@@ -949,7 +949,9 @@ fn reject_subqueries_in_filter(expr: &sqlparser::ast::Expr) -> anyhow::Result<()
             // Belt-and-suspenders: catch nested SELECT in function body string form
             let body = f.to_string().to_lowercase();
             if body.contains("select ") || body.contains("(select") {
-                anyhow::bail!("invalid sql_filter: subqueries in function arguments are not allowed");
+                anyhow::bail!(
+                    "invalid sql_filter: subqueries in function arguments are not allowed"
+                );
             }
             Ok(())
         }

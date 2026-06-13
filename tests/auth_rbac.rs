@@ -296,14 +296,8 @@ async fn admin_can_list_roles() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let roles = body["roles"].as_array().unwrap();
     // Seeded: admin, user, readonly
-    assert!(
-        roles.len() >= 3,
-        "at least 3 system roles should be seeded"
-    );
-    let names: Vec<&str> = roles
-        .iter()
-        .filter_map(|r| r["name"].as_str())
-        .collect();
+    assert!(roles.len() >= 3, "at least 3 system roles should be seeded");
+    let names: Vec<&str> = roles.iter().filter_map(|r| r["name"].as_str()).collect();
     assert!(names.contains(&"admin"));
     assert!(names.contains(&"user"));
     assert!(names.contains(&"readonly"));
@@ -459,7 +453,10 @@ async fn permission_check_endpoint() {
         .await
         .unwrap();
     let body2: serde_json::Value = resp2.json().await.unwrap();
-    assert_eq!(body2["allowed"], false, "readonly should not have vector:write");
+    assert_eq!(
+        body2["allowed"], false,
+        "readonly should not have vector:write"
+    );
 
     // user inherits read from readonly
     let resp3 = client
@@ -472,7 +469,10 @@ async fn permission_check_endpoint() {
         .await
         .unwrap();
     let body3: serde_json::Value = resp3.json().await.unwrap();
-    assert_eq!(body3["allowed"], true, "user inherits vector:read from readonly");
+    assert_eq!(
+        body3["allowed"], true,
+        "user inherits vector:read from readonly"
+    );
     let _ = shutdown.send(());
 }
 
@@ -520,6 +520,9 @@ async fn admin_can_update_key_role() {
         .send()
         .await
         .unwrap();
-    assert!(after.status().is_success(), "promoted key should have admin access");
+    assert!(
+        after.status().is_success(),
+        "promoted key should have admin access"
+    );
     let _ = shutdown.send(());
 }
