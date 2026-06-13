@@ -53,6 +53,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@1.75
+      - name: Remove Cargo.lock (v4 format unsupported by 1.75)
+        run: rm -f Cargo.lock
       - name: Check compilation on MSRV
         run: cargo check --all-features
 
