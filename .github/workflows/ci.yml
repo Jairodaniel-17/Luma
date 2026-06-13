@@ -47,16 +47,14 @@ jobs:
         run: cargo test --verbose --locked
 
   msrv:
-    name: MSRV (1.75)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install MSRV toolchain
-        uses: dtolnay/rust-toolchain@1.75
-      - name: Remove Cargo.lock (v4 format unsupported by 1.75)
-        run: rm -f Cargo.lock
+        uses: dtolnay/rust-toolchain@1.85
       - name: Check compilation on MSRV
-        run: cargo check --all-features
+        run: cargo check --all-features --locked
 
   deny:
     name: Dependency Audit (cargo-deny)

@@ -4,6 +4,7 @@ version = "4.0.0"
 edition = "2021"
 description = "Luma: High-performance Vector DB powered by RustKissVDB"
 license = "MIT"
+rust-version = "1.85"
 default-run = "luma"
 
 [dependencies]
