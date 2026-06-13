@@ -38,10 +38,33 @@ fn parse_opts(args: &[String]) -> anyhow::Result<DiskAnnCli> {
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--collection" => opts.collection = iter.next().unwrap().to_string(),
-            "--max-degree" => opts.max_degree = Some(iter.next().unwrap().parse()?),
-            "--build-threads" => opts.build_threads = Some(iter.next().unwrap().parse()?),
-            "--search-list" => opts.search_list_size = Some(iter.next().unwrap().parse()?),
+            "--collection" => {
+                opts.collection = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--collection requiere un valor"))?
+                    .to_string();
+            }
+            "--max-degree" => {
+                opts.max_degree = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow::anyhow!("--max-degree requiere un valor"))?
+                        .parse()?,
+                );
+            }
+            "--build-threads" => {
+                opts.build_threads = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow::anyhow!("--build-threads requiere un valor"))?
+                        .parse()?,
+                );
+            }
+            "--search-list" => {
+                opts.search_list_size = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow::anyhow!("--search-list requiere un valor"))?
+                        .parse()?,
+                );
+            }
             other => anyhow::bail!("flag desconocida `{other}`"),
         }
     }
@@ -57,7 +80,10 @@ fn parse_collection(args: &[String]) -> anyhow::Result<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "--collection" {
-            return Ok(iter.next().unwrap().to_string());
+            return iter
+                .next()
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("--collection requiere un valor"));
         }
     }
     anyhow::bail!("status requiere --collection")

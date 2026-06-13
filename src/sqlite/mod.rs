@@ -1,22 +1,34 @@
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
+use parking_lot::Mutex;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, Row};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 mod actor;
+pub mod hrana;
 pub mod memory_schema;
 mod pool;
 use actor::{SqliteActor, SqliteCommand};
+use hrana::HranaService;
 use pool::SqliteReaderPool;
+
+enum ServiceInner {
+    Local {
+        sender: mpsc::Sender<SqliteCommand>,
+        reader_pool: Arc<SqliteReaderPool>,
+    },
+    Remote {
+        hrana: Arc<HranaService>,
+    },
+}
 
 #[derive(Clone)]
 pub struct SqliteService {
-    sender: mpsc::Sender<SqliteCommand>,
-    reader_pool: Arc<SqliteReaderPool>,
+    inner: Arc<ServiceInner>,
     path: PathBuf,
     planner_stats: Arc<Mutex<HashMap<String, CachedCount>>>,
 }
@@ -28,6 +40,7 @@ struct CachedCount {
 }
 
 impl SqliteService {
+    /// Local rusqlite backend — the default.
     pub fn new(db_path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         if let Some(parent) = db_path.parent() {
@@ -45,15 +58,26 @@ impl SqliteService {
             actor.run();
         });
 
-        // Concurrency improvement: 10 readers
         let reader_pool = Arc::new(SqliteReaderPool::new(db_path.clone(), 10)?);
 
         Ok(Self {
-            sender,
-            reader_pool,
+            inner: Arc::new(ServiceInner::Local { sender, reader_pool }),
             path: db_path,
             planner_stats: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Remote libSQL/Turso backend via Hrana over HTTPS.
+    /// `url` is the database URL (e.g. `https://db-name.turso.io`).
+    /// `token` is the auth token issued by Turso.
+    pub fn new_remote(url: String, token: String) -> Self {
+        Self {
+            inner: Arc::new(ServiceInner::Remote {
+                hrana: Arc::new(HranaService::new(url, token)),
+            }),
+            path: PathBuf::new(),
+            planner_stats: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn query(
@@ -61,8 +85,13 @@ impl SqliteService {
         sql: String,
         params: Vec<serde_json::Value>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let values = json_params_to_values(params)?;
-        self.reader_pool.query(sql, values).await
+        match self.inner.as_ref() {
+            ServiceInner::Local { reader_pool, .. } => {
+                let values = json_params_to_values(params)?;
+                reader_pool.query(sql, values).await
+            }
+            ServiceInner::Remote { hrana } => hrana.query(sql, params).await,
+        }
     }
 
     pub async fn execute(
@@ -70,22 +99,24 @@ impl SqliteService {
         sql: String,
         params: Vec<serde_json::Value>,
     ) -> anyhow::Result<u64> {
-        let (respond_to, receiver) = oneshot::channel();
-        let values = json_params_to_values(params)?;
-
-        let msg = SqliteCommand::Execute {
-            sql,
-            params: values,
-            respond_to,
-        };
-
-        if self.sender.send(msg).await.is_err() {
-            return Err(anyhow::anyhow!("sqlite actor channel closed"));
+        match self.inner.as_ref() {
+            ServiceInner::Local { sender, .. } => {
+                let (respond_to, receiver) = oneshot::channel();
+                let values = json_params_to_values(params)?;
+                let msg = SqliteCommand::Execute {
+                    sql,
+                    params: values,
+                    respond_to,
+                };
+                if sender.send(msg).await.is_err() {
+                    return Err(anyhow::anyhow!("sqlite actor channel closed"));
+                }
+                receiver
+                    .await
+                    .map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
+            }
+            ServiceInner::Remote { hrana } => hrana.execute(sql, params).await,
         }
-
-        receiver
-            .await
-            .map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
     }
 
     pub fn path(&self) -> &Path {
@@ -99,7 +130,7 @@ impl SqliteService {
         ttl_ms: u64,
     ) -> anyhow::Result<usize> {
         let now = now_ms();
-        if let Some(cached) = self.planner_stats.lock().unwrap().get(&cache_key).copied() {
+        if let Some(cached) = self.planner_stats.lock().get(&cache_key).copied() {
             if cached.expires_at_ms > now {
                 return Ok(cached.count);
             }
@@ -114,7 +145,7 @@ impl SqliteService {
                     .or_else(|| value.as_i64().map(|v| v.max(0) as u64))
             })
             .unwrap_or(0) as usize;
-        self.planner_stats.lock().unwrap().insert(
+        self.planner_stats.lock().insert(
             cache_key,
             CachedCount {
                 count,

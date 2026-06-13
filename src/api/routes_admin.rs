@@ -1,4 +1,5 @@
 use crate::api::errors::ApiError;
+use crate::api::rbac::require_role;
 use crate::api::{AppState, TenantContext};
 use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
@@ -18,13 +19,7 @@ pub async fn backup(
     State(state): State<AppState>,
     Extension(ctx): Extension<TenantContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != "admin" {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "admin role required",
-        ));
-    }
+    require_role(&ctx, "admin")?;
     state
         .engine
         .force_snapshot()
@@ -38,13 +33,7 @@ pub async fn get_audit_log(
     Extension(ctx): Extension<TenantContext>,
     Query(params): Query<AuditQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != "admin" {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "admin role required",
-        ));
-    }
+    require_role(&ctx, "admin")?;
     let Some(audit_log) = &state.audit_log else {
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

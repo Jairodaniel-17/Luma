@@ -1,6 +1,6 @@
 [package]
 name = "luma"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2021"
 description = "Luma: High-performance Vector DB powered by RustKissVDB"
 default-run = "luma"
@@ -63,6 +63,13 @@ toml = "1.0.3"
 dashmap = "6.1.0"
 memmap2 = "0.9.10"
 bytemuck = "1.25.0"
+sqlparser = "0.55"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+tower_governor = { version = "0.4", features = ["axum"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = [

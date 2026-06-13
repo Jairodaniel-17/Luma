@@ -1,5 +1,6 @@
+use parking_lot::Mutex;
 use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub struct SqliteReaderPool {
@@ -36,7 +37,7 @@ impl SqliteReaderPool {
         tokio::task::spawn_blocking(move || {
             let mut conn = None;
             {
-                let mut guard = pool.lock().unwrap();
+                let mut guard = pool.lock();
                 if let Some(c) = guard.pop() {
                     conn = Some(c);
                 }
@@ -79,7 +80,7 @@ impl SqliteReaderPool {
 
             // Return to pool
             {
-                let mut guard = pool.lock().unwrap();
+                let mut guard = pool.lock();
                 if guard.len() < 10 {
                     // Max size
                     guard.push(c);

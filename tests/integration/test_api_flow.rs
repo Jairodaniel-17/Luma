@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use luma::api::router;
+use luma::api::{router, RouterDeps};
 use luma::config::Config;
 use luma::engine::Engine;
 use luma::search::engine::SearchEngine;
@@ -23,17 +23,18 @@ async fn test_api_vector_flow() {
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
     // Minimal app setup without SQLite/Auth for vector test
-    let app = router(
+    let app = router(RouterDeps {
         engine,
-        config.clone(),
-        None,
+        config: config.clone(),
+        sqlite: None,
         search_engine,
-        None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+        auth_store: None,
+        embeddings: std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     // 1. Create Collection
     let response = app

@@ -2,69 +2,222 @@ name: Release
 
 permissions:
   contents: write
+  id-token: write
 
 on:
   push:
     tags:
-      - "v*" # Se activa con tags como v0.2.2
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  build-and-upload:
-    name: Build for ${{ matrix.os }}
+  # ── Binary builds ─────────────────────────────────────────────────────────
+  build:
+    name: Build · ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # --- Linux (x86_64) ---
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: luma
-            asset_name: luma-linux-amd64
-          
-          # --- Windows (x86_64) ---
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: luma.exe
-            asset_name: luma-windows-amd64.exe
-          
-          # --- macOS (Intel - compatible con M1/M2 vía Rosetta) ---
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: luma
-            asset_name: luma-macos-amd64
+          # Linux x86_64 — glibc (most compatible, main download)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+            binary: luma
 
-          # --- macOS (Apple Silicon - Nativo M1/M2/M3) ---
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: luma
-            asset_name: luma-macos-arm64
+          # Linux x86_64 — musl (fully static, works in Alpine / Docker scratch)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            archive: tar.gz
+            binary: luma
+            use_cross: true
+
+          # Linux ARM64 — AWS Graviton 2/3, Raspberry Pi 4/5
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+            binary: luma
+            use_cross: true
+
+          # macOS Intel (x86_64) — also runs on M-series via Rosetta 2
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+            binary: luma
+
+          # macOS Apple Silicon — M1/M2/M3/M4, native
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            binary: luma
+
+          # Windows x86_64 — installer-friendly EXE
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            binary: luma.exe
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: Install Rust stable + target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # Caché inteligente para no recompilar dependencias pesadas como hnsw_rs en cada release
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
+      - name: Cache Cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      - name: Build
+      - name: Install cross (cross-compilation)
+        if: matrix.use_cross == true
+        uses: taiki-e/install-action@cross
+
+      - name: Build (native)
+        if: matrix.use_cross != true
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Rename Binary
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip binary (Linux / macOS)
+        if: matrix.os != 'windows-latest'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.binary }} || true
+
+      - name: Compute archive name
+        id: pkg
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
+          VERSION="${GITHUB_REF_NAME}"
+          NAME="luma-${VERSION}-${{ matrix.target }}"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "file=${NAME}.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Package (tar.gz — Linux / macOS)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          cp README.md dist/ 2>/dev/null || true
+          cp luma.toml dist/luma.toml.example 2>/dev/null || true
+          cp docs/ dist/docs/ -r 2>/dev/null || true
+          tar -czf ${{ steps.pkg.outputs.file }} -C dist .
+
+      - name: Package (zip — Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.binary }}" dist\
+          if (Test-Path README.md)  { Copy-Item README.md dist\ }
+          if (Test-Path luma.toml) { Copy-Item luma.toml dist\luma.toml.example }
+          Compress-Archive -Path dist\* -DestinationPath ${{ steps.pkg.outputs.file }}
+
+      - uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.asset_name }}
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          retention-days: 7
+
+  # ── GitHub Release ─────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten & checksum
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          echo "=== release assets ==="
+          ls -lh
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Python SDK → PyPI ──────────────────────────────────────────────────────
+  publish-python:
+    name: Publish Python SDK → PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bump SDK version to match tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+      - name: Build wheel + sdist
+        run: |
+          pip install build
+          python -m build
+      - name: Publish to PyPI (trusted publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/dist
+        continue-on-error: true
+
+  # ── TypeScript SDK → npm ───────────────────────────────────────────────────
+  publish-npm:
+    name: Publish TypeScript SDK → npm
+    needs: release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Bump SDK version to match tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "${VERSION}" --no-git-tag-version
+      - name: Install & build
+        run: |
+          npm ci
+          npm run build
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: true

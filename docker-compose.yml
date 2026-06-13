@@ -9,13 +9,47 @@ services:
       - "1234:1234"
     volumes:
       - ./data_storage:/data
-    # Override de comandos si es necesario
-    command: ["--port", "1234", "--bind", "0.0.0.0", "--DATA_DIR", "/data"]
+      # TLS: mount your cert/key and uncomment TLS_CERT_PATH / TLS_KEY_PATH below
+      # - ./certs:/certs:ro
+    environment:
+      DATA_DIR: /data
+      LUMA_API_KEY: "${LUMA_API_KEY:-changeme}"
+
+      # Rate limiting (0 = disabled)
+      RATE_LIMIT_RPS: "${RATE_LIMIT_RPS:-0}"
+      RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-0}"
+
+      # TLS (optional)
+      # TLS_CERT_PATH: /certs/server.crt
+      # TLS_KEY_PATH:  /certs/server.key
+
+      # Embeddings
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-none}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      EMBEDDING_URL: "${EMBEDDING_URL:-}"
+
+      # SQLite / Auth / RBAC
+      SQLITE_ENABLED: "true"
+      SQLITE_DB_PATH: /data/sqlite/rustkiss.db
+
+      # libSQL / Turso HA (optional — leave unset to use local SQLite)
+      # When LIBSQL_URL is set, all SQL routes through Hrana over HTTPS to the remote DB.
+      # LIBSQL_URL: "https://db-name.turso.io"
+      # LIBSQL_AUTH_TOKEN: "${LIBSQL_AUTH_TOKEN:-}"
+
+      RUST_LOG: "${RUST_LOG:-info}"
+
     restart: unless-stopped
-    # Optimización para producción
     deploy:
       resources:
         limits:
           memory: 512M
         reservations:
           memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:1234/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use luma::api::router;
+use luma::api::{router, RouterDeps};
 use luma::config::Config;
 use luma::engine::Engine;
 use luma::search::engine::SearchEngine;
@@ -21,17 +21,18 @@ async fn test_health_check_contract() {
     let engine = Engine::new(config.clone(), token).unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
-    let app = router(
+    let app = router(RouterDeps {
         engine,
         config,
-        None,
+        sqlite: None,
         search_engine,
-        None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+        auth_store: None,
+        embeddings: std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     let response = app
         .oneshot(
@@ -67,17 +68,18 @@ async fn test_error_schema_contract() {
     let engine = Engine::new(config.clone(), token).unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
 
-    let app = router(
+    let app = router(RouterDeps {
         engine,
         config,
-        None,
+        sqlite: None,
         search_engine,
-        None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+        auth_store: None,
+        embeddings: std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     // Request with missing auth
     let response = app

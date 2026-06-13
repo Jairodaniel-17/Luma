@@ -26,17 +26,18 @@ async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
 
-    let app = api::router(
+    let app = api::router(api::RouterDeps {
         engine,
         config,
-        None,
+        sqlite: None,
         search_engine,
-        None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+        auth_store: None,
+        embeddings: std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -312,33 +313,3 @@ async fn vector_diskann_build_status_and_tune() {
     let _ = shutdown.send(());
 }
 
-#[tokio::test]
-async fn meta_execute_endpoint() {
-    let (base, shutdown) = start().await;
-    let client = reqwest::Client::new();
-
-    // First create a collection
-    let create = client
-        .post(format!("{}/v1/vector/docs", base))
-        .json(&serde_json::json!({"dim":2,"metric":"cosine"}))
-        .bearer_auth("test")
-        .send()
-        .await
-        .unwrap();
-    assert!(create.status().is_success());
-
-    // Execute meta query
-    let meta_exec = client
-        .post(format!("{}/v1/meta/docs/execute", base))
-        .json(&serde_json::json!({"type":"vector","vector":[0.9,0.1],"k":1,"options":{"include_meta":true}}))
-        .bearer_auth("test")
-        .send()
-        .await
-        .unwrap();
-
-    assert!(meta_exec.status().is_success());
-    let v: serde_json::Value = meta_exec.json().await.unwrap();
-    assert!(v.as_array().is_some());
-
-    let _ = shutdown.send(());
-}

@@ -34,8 +34,10 @@ impl MetaEngine {
 
         match query_type {
             "vector" => self.execute_vector(collection, &query).await,
-            "sql" => self.execute_sql(&query).await,
             "hybrid" => self.execute_hybrid(collection, &query).await,
+            "sql" => Err(anyhow::anyhow!(
+                "query type 'sql' is not supported; use 'hybrid' with a structured sql_query field"
+            )),
             _ => Err(anyhow::anyhow!("unknown query type: {}", query_type)),
         }
     }

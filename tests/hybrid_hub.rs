@@ -37,15 +37,16 @@ async fn start() -> TestApp {
         luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
     ));
 
-    let app = api::router(
+    let app = api::router(api::RouterDeps {
         engine,
         config,
-        Some(sqlite),
+        sqlite: Some(sqlite),
         search_engine,
-        None,
+        auth_store: None,
         embeddings,
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

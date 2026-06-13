@@ -42,9 +42,9 @@ jobs:
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --verbose --locked
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --verbose --locked
 
   msrv:
     name: MSRV (1.75)
@@ -54,7 +54,7 @@ jobs:
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@1.75
       - name: Check compilation on MSRV
-        run: cargo check --all-features
+        run: cargo check --all-features --locked
 
   deny:
     name: Dependency Audit (cargo-deny)
@@ -84,4 +84,18 @@ jobs:
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: Check bench compilation
-        run: cargo bench --no-run
+        run: cargo bench --no-run --locked
+
+  all-checks:
+    name: All Checks Passed
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify all jobs passed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" || "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more CI jobs failed or were cancelled"
+            exit 1
+          fi
+          echo "All CI checks passed"

@@ -1,6 +1,24 @@
+"""
+_http.py — Shared httpx transport layer for the Luma SDK.
+
+Both sync (httpx.Client) and async (httpx.AsyncClient) share the same
+headers and error-mapping logic. All 4xx / 5xx responses are converted
+to typed LumaError subclasses before being surfaced to callers.
+
+Status-code mapping
+-------------------
+401  → LumaAuthError
+403  → LumaForbiddenError
+404  → LumaNotFoundError
+409  → LumaConflictError
+4xx  → LumaError(status, message)
+5xx  → LumaError(status, message)
+"""
+from __future__ import annotations
+
 import logging
 import time
-from typing import AsyncIterator, Iterator, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, Optional
 
 import httpx
 
@@ -14,7 +32,7 @@ from .exceptions import (
 
 log = logging.getLogger("luma.http")
 
-_STATUS_MAP = {
+_STATUS_MAP: Dict[int, type] = {
     401: LumaAuthError,
     403: LumaForbiddenError,
     404: LumaNotFoundError,
@@ -23,23 +41,28 @@ _STATUS_MAP = {
 
 
 def _raise(resp: httpx.Response) -> None:
+    """Raise a typed exception for any 4xx / 5xx response."""
     if resp.status_code < 400:
         return
     try:
-        msg = resp.json().get("message", resp.text)
+        body = resp.json()
+        msg: str = body.get("message") or body.get("error") or resp.text
     except Exception:
-        msg = resp.text
+        msg = resp.text or f"HTTP {resp.status_code}"
     exc_cls = _STATUS_MAP.get(resp.status_code)
-    if exc_cls:
-        raise exc_cls(msg)
+    if exc_cls is not None:
+        raise exc_cls(msg)  # type: ignore[call-arg]
     raise LumaError(resp.status_code, msg)
 
 
-def _decode(resp: httpx.Response):
+def _decode(resp: httpx.Response) -> Any:
+    """Decode the response body: JSON when the content-type says so, plain text otherwise."""
     if not resp.content:
         return None
     ct = resp.headers.get("content-type", "")
-    return resp.json() if "application/json" in ct else resp.text
+    if "application/json" in ct:
+        return resp.json()
+    return resp.text
 
 
 class Http:
@@ -59,22 +82,23 @@ class Http:
 
     # ── sync ─────────────────────────────────────────────────────────────────
 
-    def get(self, path: str, params=None):
+    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return self._req("GET", path, params=params)
 
-    def post(self, path: str, body=None):
+    def post(self, path: str, body: Optional[Any] = None) -> Any:
         return self._req("POST", path, json=body)
 
-    def put(self, path: str, body=None):
+    def put(self, path: str, body: Optional[Any] = None) -> Any:
         return self._req("PUT", path, json=body)
 
-    def delete(self, path: str):
+    def delete(self, path: str) -> Any:
         return self._req("DELETE", path)
 
-    def stream(self, path: str, params=None):
+    def stream(self, path: str, params: Optional[Dict[str, Any]] = None):
+        """Return a sync context manager for SSE / chunked streaming."""
         return self._sync.stream("GET", self._url(path), params=params)
 
-    def _req(self, method: str, path: str, **kwargs):
+    def _req(self, method: str, path: str, **kwargs: Any) -> Any:
         t0 = time.monotonic()
         resp = self._sync.request(method, self._url(path), **kwargs)
         ms = int((time.monotonic() - t0) * 1000)
@@ -84,22 +108,23 @@ class Http:
 
     # ── async ────────────────────────────────────────────────────────────────
 
-    async def aget(self, path: str, params=None):
+    async def aget(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return await self._areq("GET", path, params=params)
 
-    async def apost(self, path: str, body=None):
+    async def apost(self, path: str, body: Optional[Any] = None) -> Any:
         return await self._areq("POST", path, json=body)
 
-    async def aput(self, path: str, body=None):
+    async def aput(self, path: str, body: Optional[Any] = None) -> Any:
         return await self._areq("PUT", path, json=body)
 
-    async def adelete(self, path: str):
+    async def adelete(self, path: str) -> Any:
         return await self._areq("DELETE", path)
 
-    def astream(self, path: str, params=None):
+    def astream(self, path: str, params: Optional[Dict[str, Any]] = None):
+        """Return an async context manager for SSE / chunked streaming."""
         return self._async.stream("GET", self._url(path), params=params)
 
-    async def _areq(self, method: str, path: str, **kwargs):
+    async def _areq(self, method: str, path: str, **kwargs: Any) -> Any:
         t0 = time.monotonic()
         resp = await self._async.request(method, self._url(path), **kwargs)
         ms = int((time.monotonic() - t0) * 1000)
@@ -110,7 +135,23 @@ class Http:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def close(self) -> None:
+        """Close the underlying sync httpx client."""
         self._sync.close()
 
     async def aclose(self) -> None:
+        """Close the underlying async httpx client."""
         await self._async.aclose()
+
+    # ── context manager support ───────────────────────────────────────────────
+
+    def __enter__(self) -> "Http":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    async def __aenter__(self) -> "Http":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.aclose()
