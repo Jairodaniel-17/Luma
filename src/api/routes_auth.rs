@@ -1,4 +1,5 @@
 use crate::api::errors::ApiError;
+use crate::api::rbac::require_role;
 use crate::api::{AppState, TenantContext};
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
@@ -24,13 +25,7 @@ pub async fn list_keys(
     State(state): State<AppState>,
     Extension(ctx): Extension<TenantContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != "admin" {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "admin role required",
-        ));
-    }
+    require_role(&ctx, "admin")?;
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -53,13 +48,7 @@ pub async fn create_key(
     Extension(ctx): Extension<TenantContext>,
     axum::Json(body): axum::Json<CreateKeyBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != "admin" {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "admin role required",
-        ));
-    }
+    require_role(&ctx, "admin")?;
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -103,13 +92,7 @@ pub async fn revoke_key(
     Extension(ctx): Extension<TenantContext>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != "admin" {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "admin role required",
-        ));
-    }
+    require_role(&ctx, "admin")?;
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -131,5 +114,34 @@ pub async fn revoke_key(
             "key id not found",
         ));
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateKeyRoleBody {
+    pub role: String,
+    pub permissions: Option<serde_json::Value>,
+}
+
+pub async fn update_key_role(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<UpdateKeyRoleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_role(&ctx, "admin")?;
+    let Some(store) = &state.auth_store else {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_enabled",
+            "auth store not enabled",
+        ));
+    };
+    store
+        .update_key_role(&id, &body.role, body.permissions)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+        .then_some(())
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "key id not found"))?;
     Ok(StatusCode::NO_CONTENT)
 }

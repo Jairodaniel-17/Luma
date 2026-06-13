@@ -242,6 +242,29 @@ impl AuthStore {
         Ok(())
     }
 
+    pub async fn update_key_role(
+        &self,
+        id: &str,
+        role: &str,
+        permissions: Option<serde_json::Value>,
+    ) -> anyhow::Result<bool> {
+        let perm_str = permissions
+            .unwrap_or_else(|| serde_json::json!({}))
+            .to_string();
+        let n = self
+            .sqlite
+            .execute(
+                "UPDATE sys_api_keys SET role = ?, permissions = ? WHERE id = ?".to_string(),
+                vec![
+                    serde_json::json!(role),
+                    serde_json::Value::String(perm_str),
+                    serde_json::json!(id),
+                ],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
     pub fn generate_api_key(&self) -> String {
         use rand::Rng;
         let random_bytes: [u8; 32] = rand::thread_rng().gen();

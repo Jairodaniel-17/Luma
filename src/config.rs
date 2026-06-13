@@ -123,6 +123,22 @@ pub struct Config {
     pub embedding_azure_api_version: String,
     /// Cohere embed input_type: "search_document" (upsert) or "search_query" (query).
     pub embedding_cohere_input_type: String,
+    /// Max IDs fetched by sql_filter pre-scan (prevents OOM on large collections). Default 50_000.
+    pub hub_sql_filter_max_ids: usize,
+    /// Path to TLS certificate (PEM). Both cert+key required to enable TLS.
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key (PEM).
+    pub tls_key_path: Option<String>,
+    /// Rate limit: max requests per second per IP address (0 = disabled).
+    pub rate_limit_rps: u32,
+    /// Rate limit burst size (default 10× rate_limit_rps).
+    pub rate_limit_burst: u32,
+    /// libSQL/Turso remote URL (e.g. https://db-name.turso.io).
+    /// When set, Luma routes all SQL through the Hrana HTTP protocol instead of local SQLite.
+    /// Enables active-active HA via Turso's global replication — zero code changes required.
+    pub libsql_url: Option<String>,
+    /// Auth token for libSQL/Turso remote database (Bearer token).
+    pub libsql_auth_token: String,
 }
 
 impl Default for Config {
@@ -217,6 +233,13 @@ impl Default for Config {
             embedding_azure_deployment: String::new(),
             embedding_azure_api_version: "2024-02-01".to_string(),
             embedding_cohere_input_type: "search_document".to_string(),
+            hub_sql_filter_max_ids: 50_000,
+            tls_cert_path: None,
+            tls_key_path: None,
+            rate_limit_rps: 0,
+            rate_limit_burst: 0,
+            libsql_url: None,
+            libsql_auth_token: String::new(),
         }
     }
 }
@@ -621,6 +644,22 @@ impl Config {
                 .unwrap_or_else(|_| "2024-02-01".to_string()),
             embedding_cohere_input_type: std::env::var("EMBEDDING_COHERE_INPUT_TYPE")
                 .unwrap_or_else(|_| "search_document".to_string()),
+            hub_sql_filter_max_ids: std::env::var("HUB_SQL_FILTER_MAX_IDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50_000),
+            tls_cert_path: std::env::var("TLS_CERT_PATH").ok(),
+            tls_key_path: std::env::var("TLS_KEY_PATH").ok(),
+            rate_limit_rps: std::env::var("RATE_LIMIT_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            rate_limit_burst: std::env::var("RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            libsql_url: std::env::var("LIBSQL_URL").ok(),
+            libsql_auth_token: std::env::var("LIBSQL_AUTH_TOKEN").unwrap_or_default(),
         })
     }
 }

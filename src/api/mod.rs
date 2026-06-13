@@ -2,6 +2,7 @@ pub mod audit;
 pub mod auth;
 pub mod auth_store;
 pub mod errors;
+pub mod rbac;
 pub mod routes_admin;
 pub mod routes_auth;
 pub mod routes_config;
@@ -11,6 +12,7 @@ pub mod routes_events;
 pub mod routes_hub;
 pub mod routes_memory;
 pub mod routes_meta;
+pub mod routes_rbac;
 pub mod routes_search;
 pub mod routes_state;
 pub mod routes_ui;
@@ -22,11 +24,13 @@ use crate::search::engine::SearchEngine;
 use crate::sqlite::SqliteService;
 use auth_store::AuthStore;
 use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::GovernorLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -41,6 +45,7 @@ pub struct AppState {
     pub hub: Arc<crate::engine::hub::LumaDatabase>,
     pub memory: Arc<crate::memory::MemoryService>,
     pub audit_log: Option<Arc<audit::AuditLog>>,
+    pub rbac: Option<Arc<rbac::RbacService>>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,15 +56,45 @@ pub struct TenantContext {
     pub quotas: serde_json::Value,
 }
 
-pub fn router(
-    engine: Engine,
-    config: Config,
-    sqlite: Option<SqliteService>,
-    search_engine: Arc<SearchEngine>,
-    auth_store: Option<Arc<AuthStore>>,
-    embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
-    audit_log: Option<Arc<audit::AuditLog>>,
-) -> Router {
+async fn security_headers(mut response: axum::response::Response) -> axum::response::Response {
+    let headers = response.headers_mut();
+    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "referrer-policy",
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert("x-xss-protection", HeaderValue::from_static("0"));
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
+    );
+    response
+}
+
+pub struct RouterDeps {
+    pub engine: Engine,
+    pub config: Config,
+    pub sqlite: Option<SqliteService>,
+    pub search_engine: Arc<SearchEngine>,
+    pub auth_store: Option<Arc<AuthStore>>,
+    pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
+    pub audit_log: Option<Arc<audit::AuditLog>>,
+    pub rbac: Option<Arc<rbac::RbacService>>,
+}
+
+pub fn router(deps: RouterDeps) -> Router<()> {
+    let RouterDeps {
+        engine,
+        config,
+        sqlite,
+        search_engine,
+        auth_store,
+        embeddings,
+        audit_log,
+        rbac,
+    } = deps;
+
     let memory = Arc::new(crate::memory::MemoryService::new(
         Arc::new(engine.clone()),
         sqlite.clone().map(Arc::new),
@@ -84,6 +119,7 @@ pub fn router(
         hub,
         memory,
         audit_log,
+        rbac,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -103,7 +139,7 @@ pub fn router(
                 .allow_methods(Any)
         }
     };
-    Router::<AppState>::new()
+    let app = Router::<AppState>::new()
         .route("/", get(routes_ui::handler))
         .route("/index.html", get(routes_ui::handler))
         .merge(routes_docs::routes_docs())
@@ -114,6 +150,25 @@ pub fn router(
             get(routes_auth::list_keys).post(routes_auth::create_key),
         )
         .route("/v1/auth/keys/:id", delete(routes_auth::revoke_key))
+        .route(
+            "/v1/auth/keys/:id/role",
+            put(routes_auth::update_key_role),
+        )
+        .route(
+            "/v1/auth/roles",
+            get(routes_rbac::list_roles).post(routes_rbac::create_role),
+        )
+        .route(
+            "/v1/auth/roles/:id",
+            delete(routes_rbac::delete_role),
+        )
+        .route(
+            "/v1/auth/roles/:id/permissions",
+            get(routes_rbac::list_permissions)
+                .post(routes_rbac::add_permission)
+                .delete(routes_rbac::remove_permission),
+        )
+        .route("/v1/auth/roles/check", get(routes_rbac::check_permission))
         .route("/v1/state", get(routes_state::list))
         .route("/v1/state/indexes", post(routes_state::create_index))
         .route(
@@ -214,7 +269,6 @@ pub fn router(
             "/v1/memory/:namespace/graph/centrality",
             post(routes_memory::recompute_centrality),
         )
-        .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/v1/config", get(routes_config::get_config))
         .route("/v1/config", put(routes_config::update_config))
         .route("/v1/admin/backup", post(routes_admin::backup))
@@ -236,5 +290,26 @@ pub fn router(
             state.clone(),
             auth::auth_middleware,
         ))
-        .with_state(state)
+        .layer(axum::middleware::map_response(security_headers))
+        .with_state(state.clone());
+
+    if state.config.rate_limit_rps > 0 {
+        let burst = if state.config.rate_limit_burst > 0 {
+            state.config.rate_limit_burst
+        } else {
+            state.config.rate_limit_rps * 10
+        };
+        let governor_conf = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(state.config.rate_limit_rps as u64)
+                .burst_size(burst)
+                .finish()
+                .expect("invalid rate limit configuration"),
+        );
+        app.layer(GovernorLayer {
+            config: governor_conf,
+        })
+    } else {
+        app
+    }
 }

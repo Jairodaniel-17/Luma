@@ -14,17 +14,18 @@ async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
 
-    let app = api::router(
+    let app = api::router(api::RouterDeps {
         engine,
         config,
-        None,
+        sqlite: None,
         search_engine,
-        None,
-        std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+        auth_store: None,
+        embeddings: std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

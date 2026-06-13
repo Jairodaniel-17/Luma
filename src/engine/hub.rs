@@ -203,6 +203,23 @@ impl LumaDatabase {
         self.ensure_collection(namespace, detected_dim)?;
         self.ensure_sqlite_table(namespace).await?;
 
+        // SQLite written first: if the process crashes after this point the document
+        // metadata row exists but has no vectors — a recoverable state on restart.
+        // The inverse (orphaned vectors with no metadata) is harder to detect and
+        // reconcile, so we prefer this ordering.
+        let sql_stage = std::time::Instant::now();
+        if let Err(err) = self
+            .write_sqlite_document(namespace, doc_id, metadata.clone())
+            .await
+        {
+            let _ = self.engine.delete_state(&doc_key);
+            return Err(err);
+        }
+        self.engine
+            .metrics()
+            .hybrid_sql_write_latency
+            .record_us(sql_stage.elapsed().as_micros() as u64);
+
         let vector_stage = std::time::Instant::now();
         let mut inserted_ids = Vec::with_capacity(chunks.len());
         for (i, (chunk, vector)) in chunks.iter().zip(vectors).enumerate() {
@@ -220,6 +237,15 @@ impl LumaDatabase {
             };
             if let Err(err) = self.engine.vector_upsert(namespace, &chunk_id, item) {
                 self.rollback_ingest(namespace, &doc_key, &inserted_ids);
+                if let Some(sql_svc) = &self.sqlite {
+                    let table = sql_doc_table(namespace);
+                    let _ = sql_svc
+                        .execute(
+                            format!("DELETE FROM {table} WHERE id = ?"),
+                            vec![serde_json::Value::String(doc_id.to_string())],
+                        )
+                        .await;
+                }
                 return Err(anyhow::anyhow!(
                     "vector insertion failed, rolled back: {}",
                     err
@@ -231,19 +257,6 @@ impl LumaDatabase {
             .metrics()
             .hybrid_vector_write_latency
             .record_us(vector_stage.elapsed().as_micros() as u64);
-
-        let sql_stage = std::time::Instant::now();
-        if let Err(err) = self
-            .write_sqlite_document(namespace, doc_id, metadata.clone())
-            .await
-        {
-            self.rollback_ingest(namespace, &doc_key, &inserted_ids);
-            return Err(err);
-        }
-        self.engine
-            .metrics()
-            .hybrid_sql_write_latency
-            .record_us(sql_stage.elapsed().as_micros() as u64);
 
         self.enqueue_metadata_indexes(namespace, metadata.as_ref());
         tracing::info!(
@@ -729,6 +742,7 @@ impl LumaDatabase {
         filter: &str,
         collection_size: usize,
     ) -> anyhow::Result<SqlInspection> {
+        validate_sql_filter(filter)?;
         let Some(sql) = &self.sqlite else {
             return Ok(SqlInspection {
                 estimated_matches: 0,
@@ -759,10 +773,13 @@ impl LumaDatabase {
         let (Some(filter), Some(sql)) = (sql_filter, &self.sqlite) else {
             return Ok(SqlFilterIds::NotRequested);
         };
+        validate_sql_filter(filter)?;
+        let max_ids = self.config.hub_sql_filter_max_ids;
         let query = format!(
-            "SELECT id FROM {} WHERE {}",
+            "SELECT id FROM {} WHERE {} LIMIT {}",
             sql_doc_table(namespace),
-            filter
+            filter,
+            max_ids
         );
         let rows = sql.query(query, vec![]).await?;
         let mut ids = HashSet::new();
@@ -784,6 +801,7 @@ impl LumaDatabase {
         filter: &str,
         doc_ids: &[String],
     ) -> anyhow::Result<HashSet<String>> {
+        validate_sql_filter(filter)?;
         let Some(sql) = &self.sqlite else {
             return Ok(HashSet::new());
         };
@@ -869,6 +887,92 @@ fn expand_vector_first_limit(limit: usize, collection_size: usize, multiplier: u
 
 fn sql_doc_table(namespace: &str) -> String {
     format!("docs_{}", sanitize_sql_identifier(namespace))
+}
+
+/// Validate a user-supplied sql_filter expression using full AST parsing.
+///
+/// Wraps the filter in `SELECT 1 FROM __t__ WHERE <filter>` and parses it with
+/// sqlparser (SQLite dialect). Rejects:
+/// - Statement separators (`;`)
+/// - Compound queries at the top level (UNION/INTERSECT/EXCEPT)
+/// - Subqueries anywhere in the expression tree (Subquery, EXISTS, IN (SELECT ...))
+/// - Dangerous function names (load_extension, readfile, writefile)
+fn validate_sql_filter(filter: &str) -> anyhow::Result<()> {
+    use sqlparser::ast::{SetExpr, Statement};
+    use sqlparser::dialect::SQLiteDialect;
+    use sqlparser::parser::Parser;
+
+    if filter.trim().is_empty() {
+        anyhow::bail!("sql_filter cannot be empty");
+    }
+    if filter.contains(';') {
+        anyhow::bail!("invalid sql_filter: statement separator ';' is not allowed");
+    }
+
+    let sql = format!("SELECT 1 FROM __t__ WHERE {filter}");
+    let mut stmts = Parser::parse_sql(&SQLiteDialect {}, &sql)
+        .map_err(|e| anyhow::anyhow!("invalid sql_filter: parse error: {e}"))?;
+
+    let stmt = stmts
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("invalid sql_filter: empty parse result"))?;
+
+    let Statement::Query(query) = stmt else {
+        anyhow::bail!("invalid sql_filter: not a valid WHERE expression");
+    };
+
+    // Reject UNION / INTERSECT / EXCEPT at the top level
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        anyhow::bail!("invalid sql_filter: compound queries are not allowed");
+    };
+
+    let Some(where_expr) = &select.selection else {
+        anyhow::bail!("invalid sql_filter: could not parse as a WHERE expression");
+    };
+
+    reject_subqueries_in_filter(where_expr)
+}
+
+/// Recursively walk an expression tree and reject any subquery or dangerous function.
+fn reject_subqueries_in_filter(expr: &sqlparser::ast::Expr) -> anyhow::Result<()> {
+    use sqlparser::ast::Expr;
+    match expr {
+        Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => {
+            anyhow::bail!("invalid sql_filter: subqueries are not allowed");
+        }
+        Expr::Function(f) => {
+            let name = f.name.to_string().to_lowercase();
+            const BLOCKED_FNS: &[&str] = &["load_extension", "readfile", "writefile"];
+            if BLOCKED_FNS.iter().any(|b| name.contains(b)) {
+                anyhow::bail!("invalid sql_filter: function '{name}' is not allowed");
+            }
+            // Belt-and-suspenders: catch nested SELECT in function body string form
+            let body = f.to_string().to_lowercase();
+            if body.contains("select ") || body.contains("(select") {
+                anyhow::bail!("invalid sql_filter: subqueries in function arguments are not allowed");
+            }
+            Ok(())
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            reject_subqueries_in_filter(left)?;
+            reject_subqueries_in_filter(right)
+        }
+        Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => reject_subqueries_in_filter(expr),
+        Expr::IsNull(e) | Expr::IsNotNull(e) => reject_subqueries_in_filter(e),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            reject_subqueries_in_filter(expr)?;
+            reject_subqueries_in_filter(low)?;
+            reject_subqueries_in_filter(high)
+        }
+        Expr::InList { expr, list, .. } => {
+            reject_subqueries_in_filter(expr)?;
+            list.iter().try_for_each(reject_subqueries_in_filter)
+        }
+        Expr::Cast { expr, .. } => reject_subqueries_in_filter(expr),
+        _ => Ok(()),
+    }
 }
 
 fn sanitize_sql_identifier(value: &str) -> String {

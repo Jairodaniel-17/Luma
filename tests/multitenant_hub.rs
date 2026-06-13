@@ -35,17 +35,18 @@ async fn start() -> (TenantApp, Arc<AuthStore>) {
     let auth_store = Arc::new(AuthStore::new(Arc::new(sqlite.clone())));
     auth_store.init().await.unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
-    let app = api::router(
+    let app = api::router(api::RouterDeps {
         engine,
         config,
-        Some(sqlite),
+        sqlite: Some(sqlite),
         search_engine,
-        Some(auth_store.clone()),
-        Arc::new(luma::engine::embeddings::EmbeddingClient::new(
+        auth_store: Some(auth_store.clone()),
+        embeddings: Arc::new(luma::engine::embeddings::EmbeddingClient::new(
             luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
         )),
-        None,
-    );
+        audit_log: None,
+        rbac: None,
+    });
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
