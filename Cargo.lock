@@ -1745,6 +1745,7 @@ dependencies = [
  "hnsw_rs",
  "hyper",
  "hyper-util",
+ "image",
  "indexmap",
  "lru",
  "memmap2",
