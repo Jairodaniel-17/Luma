@@ -5,6 +5,7 @@ pub mod errors;
 pub mod rbac;
 pub mod routes_admin;
 pub mod routes_auth;
+pub mod routes_blob;
 pub mod routes_config;
 pub mod routes_doc;
 pub mod routes_docs;
@@ -180,6 +181,10 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/doc/:collection/:id", get(routes_doc::get))
         .route("/v1/doc/:collection/:id", delete(routes_doc::delete))
         .route("/v1/doc/:collection/find", post(routes_doc::find))
+        .route("/v1/blob/:bucket", get(routes_blob::list))
+        .route("/v1/blob/:bucket/:key", put(routes_blob::put))
+        .route("/v1/blob/:bucket/:key", get(routes_blob::get))
+        .route("/v1/blob/:bucket/:key", delete(routes_blob::delete))
         .route("/v1/events", get(routes_events::events))
         .route("/v1/stream", get(routes_events::stream))
         .route("/v1/vector", get(routes_vector::list_collections))
