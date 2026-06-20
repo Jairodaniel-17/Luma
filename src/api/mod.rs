@@ -11,7 +11,9 @@ pub mod routes_doc;
 pub mod routes_docs;
 pub mod routes_events;
 pub mod routes_hub;
+pub mod routes_image;
 pub mod routes_memory;
+pub mod routes_queue;
 pub mod routes_meta;
 pub mod routes_rbac;
 pub mod routes_search;
@@ -185,6 +187,11 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/blob/:bucket/:key", put(routes_blob::put))
         .route("/v1/blob/:bucket/:key", get(routes_blob::get))
         .route("/v1/blob/:bucket/:key", delete(routes_blob::delete))
+        .route("/v1/queue/:queue", post(routes_queue::enqueue))
+        .route("/v1/queue/:queue", get(routes_queue::stats))
+        .route("/v1/queue/:queue/receive", post(routes_queue::receive))
+        .route("/v1/queue/:queue/:id", delete(routes_queue::ack))
+        .route("/v1/image/:bucket/:key", get(routes_image::transform))
         .route("/v1/events", get(routes_events::events))
         .route("/v1/stream", get(routes_events::stream))
         .route("/v1/vector", get(routes_vector::list_collections))
