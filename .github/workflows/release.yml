@@ -45,13 +45,10 @@ jobs:
             binary: luma
             use_cross: true
 
-          # macOS Intel (x86_64) — also runs on M-series via Rosetta 2
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.gz
-            binary: luma
-
-          # macOS Apple Silicon — M1/M2/M3/M4, native
+          # macOS Apple Silicon — M1/M2/M3/M4, native.
+          # (macOS Intel / macos-13 se quitó: su runner queda en cola sin asignar
+          #  para esta cuenta y dejaba el run corriendo 24h. Los Mac Intel pueden
+          #  usar este binario ARM vía Rosetta 2 o compilar localmente.)
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
