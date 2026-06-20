@@ -13,3 +13,6 @@ __pycache__/
 # graphify output / backups locales
 graphify-out/
 luma.toml.bak.*
+
+# tooling local
+.claude/
