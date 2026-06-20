@@ -18,6 +18,9 @@ jobs:
   build:
     name: Build · ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Cap EVERY matrix leg (incl. macOS) so a stuck build can never run for hours
+    # and trip abuse detection / freeze the account. A clean build is ~20-40 min.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -136,6 +139,7 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -165,59 +169,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Python SDK → PyPI ──────────────────────────────────────────────────────
-  publish-python:
-    name: Publish Python SDK → PyPI
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-    defaults:
-      run:
-        working-directory: sdk
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Bump SDK version to match tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
-      - name: Build wheel + sdist
-        run: |
-          pip install build
-          python -m build
-      - name: Publish to PyPI (trusted publisher)
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: sdk/dist
-        continue-on-error: true
-
-  # ── TypeScript SDK → npm ───────────────────────────────────────────────────
-  publish-npm:
-    name: Publish TypeScript SDK → npm
-    needs: release
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/typescript
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-      - name: Bump SDK version to match tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version "${VERSION}" --no-git-tag-version
-      - name: Install & build
-        run: |
-          npm ci
-          npm run build
-      - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
