@@ -175,6 +175,49 @@ Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con b
 
 Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
 
+## 🚀 Novedades en v4.2.0 (Object Storage, Queues e Images)
+
+Tres nuevas primitivas que convierten a Luma en un stack completo tipo Cloudflare (R2 + Queues + Images), todas autenticadas con `Authorization: Bearer <api_key>` y endurecidas contra path-traversal. Ver detalle y ejemplos en [`docs/API.md`](docs/API.md).
+
+### Object Storage — R2-like (`/v1/blob`)
+Objetos binarios persistidos en disco (`{data_dir}/blobs/{bucket}/{key}`), fuera del document store — ideal para adjuntos, imágenes, PDFs, backups.
+
+- `PUT /v1/blob/:bucket/:key` — sube bytes crudos (escritura atómica), devuelve `{ bucket, key, size, etag }`.
+- `GET /v1/blob/:bucket/:key` — descarga los bytes.
+- `DELETE /v1/blob/:bucket/:key` — borra (idempotente).
+- `GET /v1/blob/:bucket` — lista las keys del bucket.
+
+```bash
+curl -X PUT http://localhost:1234/v1/blob/adjuntos/acta.pdf \
+  -H "Authorization: Bearer dev" --data-binary @acta.pdf
+```
+
+### Queues — colas de mensajes (`/v1/queue`)
+Cola durable en disco con entrega *at-least-once*, *visibility timeout* y *ack*.
+
+- `POST /v1/queue/:queue` — encola `{ "body": <json>, "delay_secs"?: n }` → `{ id }`.
+- `POST /v1/queue/:queue/receive` — recibe `{ "max"?: 1..100, "visibility_secs"?: 30 }` → `{ messages: [{ id, body, attempts }] }`.
+- `DELETE /v1/queue/:queue/:id` — ack/borra el mensaje (idempotente).
+- `GET /v1/queue/:queue` — stats `{ queue, depth, visible }`.
+
+```bash
+curl -X POST http://localhost:1234/v1/queue/jobs \
+  -H "Authorization: Bearer dev" -H 'Content-Type: application/json' \
+  -d '{"body":{"task":"enviar-email"}}'
+```
+
+### Images — transformación on-the-fly (`/v1/image`)
+Redimensiona y convierte imágenes ya guardadas en el blob store (sin estado, sin caché).
+
+- `GET /v1/image/:bucket/:key?w=&h=&format=&quality=` — resize (Lanczos3, preserva aspecto) + convert (`png`|`jpeg`). `w`/`h` ≤ 5000, `quality` 1..100.
+
+```bash
+curl "http://localhost:1234/v1/image/adjuntos/foto.png?w=256&format=jpeg&quality=82" \
+  -H "Authorization: Bearer dev" -o thumb.jpg
+```
+
+> Durable Objects y KV ya están cubiertos por el state store con CAS (`if_revision`) y los eventos pub/sub; Vectorize por el núcleo vectorial; D1 por el SQLite embebido.
+
 ## 🚀 Novedades en v3.0.0 (Search, Observabilidad y NS-Mem Avanzado)
 
 ### Búsqueda y exportación

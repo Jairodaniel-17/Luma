@@ -237,4 +237,97 @@ El endpoint `/v1/events` se mantiene por compatibilidad con versiones anteriores
 **Se recomienda encarecidamente migrar a `/v1/stream` para nuevas implementaciones.**
 
 ---
+
+## Almacenamiento de Objetos (Blobs) — `/v1/blob`
+
+Object storage estilo S3/R2: bytes binarios persistidos en disco (`{data_dir}/blobs/{bucket}/{key}`), fuera del document store. Escritura atómica (tmp + rename) y validación anti path-traversal en `bucket` y `key`.
+
+### 1. Subir un objeto
+
+-   **Endpoint:** `PUT /v1/blob/{bucket}/{key}`
+-   **Body:** bytes crudos (`application/octet-stream`).
+-   **Respuesta:** `{ "bucket", "key", "size", "etag" }`.
+
+```bash
+curl -X PUT http://localhost:1234/v1/blob/adjuntos/acta.pdf \
+  -H "Authorization: Bearer dev" \
+  --data-binary @acta.pdf
+```
+
+### 2. Descargar un objeto
+
+-   **Endpoint:** `GET /v1/blob/{bucket}/{key}` → devuelve los bytes (`404` si no existe).
+
+```bash
+curl http://localhost:1234/v1/blob/adjuntos/acta.pdf \
+  -H "Authorization: Bearer dev" -o acta.pdf
+```
+
+### 3. Borrar un objeto
+
+-   **Endpoint:** `DELETE /v1/blob/{bucket}/{key}` (idempotente) → `{ "ok": true }`.
+
+### 4. Listar las keys de un bucket
+
+-   **Endpoint:** `GET /v1/blob/{bucket}` → `{ "keys": [...], "count": N }`.
+
+---
+
+## Colas de Mensajes (Queues) — `/v1/queue`
+
+Cola durable en disco con entrega *at-least-once*, *visibility timeout* y *ack* explícito. El orden es FIFO aproximado (por marca de tiempo de encolado).
+
+### 1. Encolar un mensaje
+
+-   **Endpoint:** `POST /v1/queue/{queue}`
+-   **Body:** `{ "body": <cualquier json>, "delay_secs"?: number }` (`delay_secs` retrasa la visibilidad).
+-   **Respuesta:** `{ "id" }`.
+
+```bash
+curl -X POST http://localhost:1234/v1/queue/jobs \
+  -H "Authorization: Bearer dev" -H 'Content-Type: application/json' \
+  -d '{"body":{"task":"enviar-email","to":"a@b.com"}}'
+```
+
+### 2. Recibir mensajes
+
+-   **Endpoint:** `POST /v1/queue/{queue}/receive`
+-   **Body:** `{ "max"?: 1..100 (def 1), "visibility_secs"?: number (def 30) }`.
+-   Devuelve los mensajes más antiguos visibles, les pone `visible_at = ahora + visibility_secs` e incrementa `attempts` (no se vuelven a entregar hasta que venza la visibilidad o se borren).
+-   **Respuesta:** `{ "messages": [{ "id", "body", "attempts" }] }`.
+
+```bash
+curl -X POST http://localhost:1234/v1/queue/jobs/receive \
+  -H "Authorization: Bearer dev" -H 'Content-Type: application/json' \
+  -d '{"max":10,"visibility_secs":60}'
+```
+
+### 3. Confirmar (ack) un mensaje
+
+-   **Endpoint:** `DELETE /v1/queue/{queue}/{id}` (idempotente) → `{ "ok": true }`. Tras procesarlo, bórralo para que no se reentregue.
+
+### 4. Estadísticas de la cola
+
+-   **Endpoint:** `GET /v1/queue/{queue}` → `{ "queue", "depth", "visible" }`.
+
+---
+
+## Transformación de Imágenes (Images) — `/v1/image`
+
+Redimensiona y convierte, on-the-fly y sin estado, imágenes ya almacenadas en el blob store. Soporta `png` y `jpeg`.
+
+-   **Endpoint:** `GET /v1/image/{bucket}/{key}?w=&h=&format=&quality=`
+-   **Parámetros:**
+    -   `w`, `h` (opcionales, `1..5000`): redimensiona para encajar dentro de esas dimensiones preservando el aspecto (Lanczos3). Si solo das una, se ajusta por esa.
+    -   `format` (opcional): `png` | `jpeg` (por defecto, el formato de origen / jpeg).
+    -   `quality` (opcional, `1..100`): solo para `jpeg`.
+-   **Respuesta:** los bytes de la imagen con su `Content-Type` (`404` si no existe el blob origen, `400` si los parámetros o la imagen son inválidos).
+
+```bash
+# Miniatura JPEG de 256px de ancho a partir de un PNG guardado en el bucket "adjuntos"
+curl "http://localhost:1234/v1/image/adjuntos/foto.png?w=256&format=jpeg&quality=82" \
+  -H "Authorization: Bearer dev" -o thumb.jpg
+```
+
+---
 *Para una descripción completa de todos los endpoints, incluidos los de gestión de estado (`/state`), documentos (`/doc`) y SQL (`/sql`), consulta la especificación OpenAPI en `docs/openapi.yaml`.*
