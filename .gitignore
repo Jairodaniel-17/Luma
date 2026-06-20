@@ -9,3 +9,7 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+
+# graphify output / backups locales
+graphify-out/
+luma.toml.bak.*
