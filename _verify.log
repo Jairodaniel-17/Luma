@@ -1,4 +1,0 @@
-=== cargo check ===
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.47s
-CHECK_EXIT=0
-=== cargo clippy ===
