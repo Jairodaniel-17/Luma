@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, Iterator, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 
