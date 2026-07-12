@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Optional, TypeVar
 
 from ._http import Http
 from .admin import AdminClient
