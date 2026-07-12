@@ -142,7 +142,7 @@ pub async fn transform(
         }
     }
     if let Some(q) = params.quality {
-        if q < 1 || q > 100 {
+        if !(1..=100).contains(&q) {
             return Err(bad_request("quality must be 1-100"));
         }
     }
