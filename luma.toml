@@ -89,3 +89,9 @@ hub_sql_filter_max_ids = 50000
 rate_limit_rps = 0
 rate_limit_burst = 0
 libsql_auth_token = ""
+
+# Automatic backups (SQLite + snapshot + WAL) — see `luma backup` / `luma restore`.
+backup_enabled = false
+backup_dir = "backups"
+backup_interval_secs = 86400
+backup_retention = 7

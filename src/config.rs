@@ -139,6 +139,28 @@ pub struct Config {
     pub libsql_url: Option<String>,
     /// Auth token for libSQL/Turso remote database (Bearer token).
     pub libsql_auth_token: String,
+    /// Enable the periodic background backup task (default false).
+    #[serde(default)]
+    pub backup_enabled: bool,
+    /// Directory where timestamped backups are written (default "backups").
+    #[serde(default = "default_backup_dir")]
+    pub backup_dir: String,
+    /// Interval between automatic backups, in seconds (default 86400 = daily).
+    #[serde(default = "default_backup_interval_secs")]
+    pub backup_interval_secs: u64,
+    /// Number of most-recent backups to retain; older ones are pruned (default 7).
+    #[serde(default = "default_backup_retention")]
+    pub backup_retention: usize,
+}
+
+fn default_backup_dir() -> String {
+    "backups".to_string()
+}
+fn default_backup_interval_secs() -> u64 {
+    86_400
+}
+fn default_backup_retention() -> usize {
+    7
 }
 
 impl Default for Config {
@@ -240,6 +262,10 @@ impl Default for Config {
             rate_limit_burst: 0,
             libsql_url: None,
             libsql_auth_token: String::new(),
+            backup_enabled: false,
+            backup_dir: default_backup_dir(),
+            backup_interval_secs: default_backup_interval_secs(),
+            backup_retention: default_backup_retention(),
         }
     }
 }
@@ -660,6 +686,16 @@ impl Config {
                 .unwrap_or(0),
             libsql_url: std::env::var("LIBSQL_URL").ok(),
             libsql_auth_token: std::env::var("LIBSQL_AUTH_TOKEN").unwrap_or_default(),
+            backup_enabled: parse_env_bool("BACKUP_ENABLED", false),
+            backup_dir: std::env::var("BACKUP_DIR").unwrap_or_else(|_| default_backup_dir()),
+            backup_interval_secs: std::env::var("BACKUP_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_backup_interval_secs),
+            backup_retention: std::env::var("BACKUP_RETENTION")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_backup_retention),
         })
     }
 }

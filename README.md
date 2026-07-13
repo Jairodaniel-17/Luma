@@ -1,3 +1,4 @@
+<!-- RustKissVDB: el motor de datos convergente en Rust que impulsa Luma (búsqueda vectorial + KV + SQL + eventos en un solo binario). -->
 # Luma (rust-kiss-vdb): La Plataforma de Datos Convergente
 
 Luma no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** diseñado para la era de la Inteligencia Artificial Generativa y los Agentes Autónomos.
@@ -40,6 +41,54 @@ El "pegamento" que une los mundos.
 *   Expone una **API HTTP Unificada** (`src/api/`) que enruta las peticiones al motor correspondiente.
 *   Maneja la autenticación y la seguridad de forma centralizada.
 *   Permite que un solo binario sirva como la infraestructura completa para una aplicación de IA.
+
+---
+
+## 🏢 Capa Empresarial: Multi-Tenancy, Panel de Administración y Seguridad
+
+Luma incluye una capa "enterprise" **aditiva** montada sobre las primitivas del core. Todo vive en un único binario: no necesitas Node, ni el código fuente del panel, ni servicios externos en runtime.
+
+### Cuentas, sesiones y roles (`src/api/accounts.rs`)
+*   **Organizaciones y usuarios** en SQLite (`sys_orgs`, `sys_users`), más `sys_sessions` para tokens de sesión.
+*   **Login por email + contraseña**: las contraseñas se hashean con **Argon2id** (`src/crypto.rs`). El login emite un **token de sesión opaco** (`lums_…`) del que solo se guarda su hash SHA-256.
+*   **Roles**: `owner` > `admin` > `member` > `viewer`, integrados con el RBAC existente. Un middleware exige rol mínimo por ruta.
+*   Endpoints: `POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/logout`, `POST /v1/auth/refresh`; gestión admin en `/v1/admin/orgs`, `/v1/admin/users` (alta/baja/roles) y las API keys existentes en `/v1/auth/keys`.
+
+### Aislamiento de datos por organización
+*   Un **middleware de aislamiento** (`tenant_isolation_middleware`) asocia cada colección/documento/blob a la organización que la creó (tabla `sys_collections`). Otra organización que intente acceder a ese nombre recibe `404` — la existencia queda oculta entre tenants.
+*   El hub (`/v1/db`) y NS-Mem (`/v1/memory`) **comparten namespace a propósito** y ya aíslan internamente por el `tenant_id` del token, por lo que no se les impone propiedad exclusiva.
+
+### Panel de administración (React + Vite + TypeScript)
+*   El código fuente vive en `admin-ui/`; se compila (`npm ci && npm run build`) a `ui/dist` y se **incrusta en el binario** con `rust-embed`. Axum lo sirve en `/` con *fallback* SPA para las rutas del cliente.
+*   Páginas: login/registro, **dashboard de uso** (`/v1/admin/stats`), gestión de usuarios y organizaciones, API keys, **registro de auditoría** y estado de salud del servidor.
+*   React escapa el contenido por defecto y la respuesta de la API es siempre JSON, mitigando XSS reflejado/almacenado.
+
+### Respaldos automáticos (`src/backup.rs`)
+*   Copia **consistente** del SQLite (`VACUUM INTO`) + `snapshot.json` + segmentos del WAL a `backups/<timestamp>/`, con **retención configurable**.
+*   CLI: `luma backup` y `luma restore <ruta>`. Tarea de fondo opcional (`backup_enabled`) con `backup_interval_secs`.
+
+### Auditoría y cifrado
+*   **Auditoría semántica** (`sys_audit_events`): quién hizo qué (login, alta/baja de usuarios y keys, cambios de org), con IP y user-agent. Consultable en `/v1/admin/audit-events` y en el panel.
+*   **Cifrado en reposo** de campos sensibles con **ChaCha20-Poly1305** (AEAD), clave maestra derivada de `LUMA_MASTER_KEY`.
+*   **Cabeceras de seguridad** en todas las respuestas: `Content-Security-Policy` estricta (sin `unsafe-inline` para scripts), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` y **HSTS**.
+
+### Uso rápido (panel + login)
+
+```bash
+# 1) Compilar el panel (una vez / al cambiar la UI) e incrustarlo
+cd admin-ui && npm ci && npm run build && cd ..
+
+# 2) Compilar y arrancar el binario (sirve el panel en http://127.0.0.1:1234/)
+cargo build --release
+LUMA_MASTER_KEY="una-clave-secreta-fuerte" ./target/release/luma serve
+
+# 3) Crear tu organización y entrar
+curl -X POST localhost:1234/v1/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"org_name":"Acme","email":"owner@acme.com","password":"un-password-fuerte"}'
+```
+
+> **Producción:** define siempre `LUMA_MASTER_KEY` (cifrado) y `LUMA_API_KEY` (bootstrap). Sin `LUMA_MASTER_KEY` se usa una clave de desarrollo conocida y el servidor lo advierte en los logs.
 
 ---
 

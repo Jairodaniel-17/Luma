@@ -24,19 +24,30 @@ pub struct PermissionRecord {
     pub action: String,
 }
 
-/// Ordered role tiers for simple role-level checks.
-/// Higher index = more privileged.
-const ROLE_TIERS: &[&str] = &["readonly", "user", "admin"];
+/// Numeric privilege level for a known role name.
+///
+/// Both the original tiers (`readonly`/`user`/`admin`) and the enterprise
+/// account roles (`viewer`/`member`/`admin`/`owner`) are recognized and mapped
+/// onto a common ladder so a single `require_role` gate works for either.
+/// Custom roles return `None` (treated as sufficient — use `RbacService::can`
+/// for fine-grained checks on those).
+fn role_level(role: &str) -> Option<u32> {
+    match role {
+        "viewer" | "readonly" => Some(10),
+        "member" | "user" => Some(20),
+        "admin" => Some(30),
+        "owner" => Some(40),
+        _ => None,
+    }
+}
 
 /// Synchronous role-level gate used by routes.
 /// Returns 403 if the caller's role is below `min_role`.
-/// For custom roles (not in ROLE_TIERS) this always passes — use `RbacService::can` instead.
+/// For custom roles (not in the ladder) this always passes — use
+/// `RbacService::can` instead.
 pub fn require_role(ctx: &TenantContext, min_role: &str) -> Result<(), ApiError> {
-    let caller_level = ROLE_TIERS
-        .iter()
-        .position(|&r| r == ctx.role.as_str())
-        .unwrap_or(usize::MAX); // custom role: assume sufficient
-    let min_level = ROLE_TIERS.iter().position(|&r| r == min_role).unwrap_or(0);
+    let caller_level = role_level(&ctx.role).unwrap_or(u32::MAX); // custom role: assume sufficient
+    let min_level = role_level(min_role).unwrap_or(0);
     if caller_level >= min_level {
         Ok(())
     } else {
@@ -104,6 +115,14 @@ impl RbacService {
                 "admin",
                 Some("user"),
                 "Full administrative access; inherits user",
+            ),
+            // Enterprise account roles (aliases layered on the same ladder).
+            ("viewer", Some("readonly"), "Enterprise: read-only member"),
+            ("member", Some("user"), "Enterprise: read-write member"),
+            (
+                "owner",
+                Some("admin"),
+                "Enterprise: organization owner; full control",
             ),
         ];
         for (name, parent, desc) in roles {

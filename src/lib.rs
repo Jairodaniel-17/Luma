@@ -15,8 +15,12 @@
 
 /// HTTP layer: Axum router, authentication, and per-concern route handlers.
 pub mod api;
+/// Consistent on-disk backups (SQLite + snapshot + WAL) and restore.
+pub mod backup;
 /// Configuration loading and defaults (`luma.toml` + environment overrides).
 pub mod config;
+/// Encryption-at-rest (AEAD) and password hashing (Argon2id).
+pub mod crypto;
 /// Document store: chunking, storage, and retrieval of ingested documents.
 pub mod docstore;
 /// Core engine: subsystem coordination, event sourcing, WAL, and persistence.

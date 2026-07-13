@@ -1,0 +1,369 @@
+import { useEffect, useState } from "react";
+import {
+  api,
+  getToken,
+  setToken,
+  clearToken,
+  type UserRow,
+  type OrgRow,
+  type KeyRow,
+  type AuditRow,
+} from "./api";
+
+type Tab = "dashboard" | "users" | "orgs" | "keys" | "audit" | "health";
+
+export default function App() {
+  const [authed, setAuthed] = useState<boolean>(!!getToken());
+  if (!authed) return <Login onLogin={() => setAuthed(true)} />;
+  return <Console onLogout={() => setAuthed(false)} />;
+}
+
+function Login({ onLogin }: { onLogin: () => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [orgName, setOrgName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      if (mode === "register") {
+        await api.register(orgName, email, password);
+      }
+      const { token } = await api.login(email, password);
+      setToken(token);
+      onLogin();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="login-wrap">
+      <form className="card login" onSubmit={submit}>
+        <h1>
+          Luma <span className="muted">Admin</span>
+        </h1>
+        <p className="muted">
+          {mode === "login" ? "Sign in to your organization" : "Create a new organization"}
+        </p>
+        {mode === "register" && (
+          <input
+            placeholder="Organization name"
+            value={orgName}
+            onChange={(e) => setOrgName(e.target.value)}
+            required
+          />
+        )}
+        <input
+          type="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
+        {error && <div className="error">{error}</div>}
+        <button disabled={busy} type="submit">
+          {busy ? "…" : mode === "login" ? "Sign in" : "Create & sign in"}
+        </button>
+        <button
+          type="button"
+          className="link"
+          onClick={() => {
+            setMode(mode === "login" ? "register" : "login");
+            setError(null);
+          }}
+        >
+          {mode === "login"
+            ? "Need an organization? Register"
+            : "Already have an account? Sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function Console({ onLogout }: { onLogout: () => void }) {
+  const [tab, setTab] = useState<Tab>("dashboard");
+  async function doLogout() {
+    try {
+      await api.logout();
+    } catch {
+      /* ignore */
+    }
+    clearToken();
+    onLogout();
+  }
+  const tabs: Tab[] = ["dashboard", "users", "orgs", "keys", "audit", "health"];
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          Luma <span className="muted">Admin</span>
+        </div>
+        <nav>
+          {tabs.map((t) => (
+            <button
+              key={t}
+              className={t === tab ? "active" : ""}
+              onClick={() => setTab(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </nav>
+        <button className="logout" onClick={doLogout}>
+          Sign out
+        </button>
+      </aside>
+      <main className="content">
+        {tab === "dashboard" && <Dashboard />}
+        {tab === "users" && <Users />}
+        {tab === "orgs" && <Orgs />}
+        {tab === "keys" && <Keys />}
+        {tab === "audit" && <Audit />}
+        {tab === "health" && <Health />}
+      </main>
+    </div>
+  );
+}
+
+function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    let live = true;
+    fn()
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError((e as Error).message));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reload, ...deps]);
+  return { data, error, refresh: () => setReload((n) => n + 1) };
+}
+
+function Dashboard() {
+  const { data, error } = useAsync(() => api.stats());
+  if (error) return <ErrorBox msg={error} />;
+  if (!data) return <p className="muted">Loading…</p>;
+  const cards: [string, string][] = [
+    ["Organizations", String(data.orgs ?? 0)],
+    ["Users", String(data.users ?? 0)],
+    ["Collections", String(data.collections ?? 0)],
+    ["Audit events", String(data.audit_events ?? 0)],
+    ["Storage (bytes)", String(data.storage_bytes ?? 0)],
+  ];
+  return (
+    <div>
+      <h2>Usage</h2>
+      <div className="stat-grid">
+        {cards.map(([label, value]) => (
+          <div className="card stat" key={label}>
+            <div className="stat-value">{value}</div>
+            <div className="stat-label">{label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Users() {
+  const { data, error, refresh } = useAsync(() => api.listUsers());
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState("member");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    try {
+      await api.createUser(email, password, role);
+      setEmail("");
+      setPassword("");
+      refresh();
+    } catch (err) {
+      setMsg((err as Error).message);
+    }
+  }
+  return (
+    <div>
+      <h2>Users</h2>
+      <form className="row" onSubmit={add}>
+        <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input placeholder="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        <select value={role} onChange={(e) => setRole(e.target.value)}>
+          <option value="owner">owner</option>
+          <option value="admin">admin</option>
+          <option value="member">member</option>
+          <option value="viewer">viewer</option>
+        </select>
+        <button type="submit">Add user</button>
+      </form>
+      {msg && <ErrorBox msg={msg} />}
+      {error && <ErrorBox msg={error} />}
+      <Table<UserRow>
+        rows={data?.users ?? []}
+        cols={["email", "role", "status"]}
+        actions={(u) => (
+          <button
+            className="danger"
+            onClick={async () => {
+              await api.deleteUser(u.id);
+              refresh();
+            }}
+          >
+            delete
+          </button>
+        )}
+      />
+    </div>
+  );
+}
+
+function Orgs() {
+  const { data, error } = useAsync(() => api.listOrgs());
+  if (error) return <ErrorBox msg={error} />;
+  return (
+    <div>
+      <h2>Organizations</h2>
+      <Table<OrgRow> rows={data?.orgs ?? []} cols={["id", "name"]} />
+    </div>
+  );
+}
+
+function Keys() {
+  const { data, error, refresh } = useAsync(() => api.listKeys());
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("member");
+  const [newKey, setNewKey] = useState<string | null>(null);
+  return (
+    <div>
+      <h2>API keys</h2>
+      <form
+        className="row"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          const r = await api.createKey(name, role);
+          setNewKey(r.key);
+          setName("");
+          refresh();
+        }}
+      >
+        <input placeholder="key name" value={name} onChange={(e) => setName(e.target.value)} required />
+        <select value={role} onChange={(e) => setRole(e.target.value)}>
+          <option value="member">member</option>
+          <option value="admin">admin</option>
+          <option value="viewer">viewer</option>
+        </select>
+        <button type="submit">Create key</button>
+      </form>
+      {newKey && (
+        <div className="card notice">
+          New key (shown once): <code>{newKey}</code>
+        </div>
+      )}
+      {error && <ErrorBox msg={error} />}
+      <Table<KeyRow>
+        rows={data ?? []}
+        cols={["name", "role"]}
+        actions={(k) => (
+          <button
+            className="danger"
+            onClick={async () => {
+              await api.revokeKey(k.id);
+              refresh();
+            }}
+          >
+            revoke
+          </button>
+        )}
+      />
+    </div>
+  );
+}
+
+function Audit() {
+  const { data, error } = useAsync(() => api.auditEvents());
+  if (error) return <ErrorBox msg={error} />;
+  return (
+    <div>
+      <h2>Audit log</h2>
+      <Table<AuditRow>
+        rows={data?.events ?? []}
+        cols={["action", "resource", "user_id", "ip", "detail"]}
+      />
+    </div>
+  );
+}
+
+function Health() {
+  const { data, error } = useAsync(() => api.health());
+  if (error) return <ErrorBox msg={error} />;
+  return (
+    <div>
+      <h2>Server health</h2>
+      <pre className="card">{JSON.stringify(data, null, 2)}</pre>
+    </div>
+  );
+}
+
+function Table<T extends Record<string, unknown>>({
+  rows,
+  cols,
+  actions,
+}: {
+  rows: T[];
+  cols: string[];
+  actions?: (row: T) => React.ReactNode;
+}) {
+  if (!rows.length) return <p className="muted">No records.</p>;
+  return (
+    <table className="table">
+      <thead>
+        <tr>
+          {cols.map((c) => (
+            <th key={c}>{c}</th>
+          ))}
+          {actions && <th />}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i}>
+            {cols.map((c) => (
+              <td key={c}>{fmt(r[c])}</td>
+            ))}
+            {actions && <td>{actions(r)}</td>}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function fmt(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  return String(v);
+}
+
+function ErrorBox({ msg }: { msg: string }) {
+  return <div className="error">{msg}</div>;
+}

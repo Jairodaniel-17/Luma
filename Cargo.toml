@@ -73,6 +73,8 @@ hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
 tower_governor = { version = "0.4", features = ["axum"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+argon2 = { version = "0.5", features = ["std"] }
+chacha20poly1305 = "0.10"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = [
@@ -81,6 +83,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 tempfile = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 tokio-test = "0.4"
 mockall = "0.13"

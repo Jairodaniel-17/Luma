@@ -8,6 +8,8 @@ pub enum Command {
     DiskAnnBuild(crate::diskann::DiskAnnCli),
     DiskAnnTune(crate::diskann::DiskAnnCli),
     DiskAnnStatus { collection: String },
+    Backup,
+    Restore { path: String },
 }
 
 pub fn parse_command() -> anyhow::Result<Command> {
@@ -21,8 +23,27 @@ pub fn parse_command() -> anyhow::Result<Command> {
         "serve" => Ok(Command::Serve),
         "vacuum" => parse_vacuum(&args[2..]),
         "diskann" => crate::diskann::parse_diskann(&args[2..]),
+        "backup" => Ok(Command::Backup),
+        "restore" => {
+            let path = args.get(2).cloned().ok_or_else(|| {
+                anyhow::anyhow!("restore requiere <path> al directorio de backup")
+            })?;
+            Ok(Command::Restore { path })
+        }
         _ => Ok(Command::Serve),
     }
+}
+
+pub fn run_backup(config: &Config) -> anyhow::Result<()> {
+    let dest = luma::backup::run_backup(config)?;
+    println!("Backup creado en {}", dest.display());
+    Ok(())
+}
+
+pub fn run_restore(config: &Config, path: String) -> anyhow::Result<()> {
+    luma::backup::restore(config, &path)?;
+    println!("Restauración desde `{path}` completada.");
+    Ok(())
 }
 
 fn parse_vacuum(args: &[String]) -> anyhow::Result<Command> {

@@ -1,8 +1,10 @@
+pub mod accounts;
 pub mod audit;
 pub mod auth;
 pub mod auth_store;
 pub mod errors;
 pub mod rbac;
+pub mod routes_accounts;
 pub mod routes_admin;
 pub mod routes_auth;
 pub mod routes_blob;
@@ -13,8 +15,8 @@ pub mod routes_events;
 pub mod routes_hub;
 pub mod routes_image;
 pub mod routes_memory;
-pub mod routes_queue;
 pub mod routes_meta;
+pub mod routes_queue;
 pub mod routes_rbac;
 pub mod routes_search;
 pub mod routes_state;
@@ -49,15 +51,35 @@ pub struct AppState {
     pub memory: Arc<crate::memory::MemoryService>,
     pub audit_log: Option<Arc<audit::AuditLog>>,
     pub rbac: Option<Arc<rbac::RbacService>>,
+    pub accounts: Option<Arc<accounts::AccountsService>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct TenantContext {
     pub tenant_id: Option<String>,
+    /// Set when the caller authenticated with a user session token.
+    pub user_id: Option<String>,
     pub role: String,
     pub permissions: serde_json::Value,
     pub quotas: serde_json::Value,
 }
+
+/// Content-Security-Policy applied to every response.
+///
+/// `script-src 'self'` (no `'unsafe-inline'`) blocks reflected/stored inline
+/// script injection — the embedded admin SPA loads its JS from `/assets/*`.
+/// The Scalar API docs page loads its bundle from jsdelivr, so that origin is
+/// allow-listed for scripts/styles/fonts. `object-src 'none'` and
+/// `frame-ancestors 'none'` prevent plugin and clickjacking abuse.
+const CSP: &str = "default-src 'self'; \
+script-src 'self' https://cdn.jsdelivr.net; \
+style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
+img-src 'self' data: https:; \
+font-src 'self' data: https://cdn.jsdelivr.net; \
+connect-src 'self'; \
+object-src 'none'; \
+frame-ancestors 'none'; \
+base-uri 'self'";
 
 async fn security_headers(mut response: axum::response::Response) -> axum::response::Response {
     let headers = response.headers_mut();
@@ -75,7 +97,79 @@ async fn security_headers(mut response: axum::response::Response) -> axum::respo
         "permissions-policy",
         HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
     );
+    headers.insert("content-security-policy", HeaderValue::from_static(CSP));
+    // HSTS is honored by browsers only over HTTPS; harmless over plain HTTP.
+    headers.insert(
+        "strict-transport-security",
+        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+    );
     response
+}
+
+/// Extract the collection/bucket segment from a raw-store path, if any.
+///
+/// Only the raw stores that key purely by name are covered here: the vector
+/// store, the JSON document store, and the blob store. The hub (`/v1/db`) and
+/// NS-Mem (`/v1/memory`) intentionally share namespaces across tenants and
+/// isolate *internally* by the token's tenant id, so exclusive name ownership
+/// must not be imposed on them.
+fn scoped_resource_name(path: &str) -> Option<&str> {
+    for prefix in ["/v1/vector/", "/v1/doc/", "/v1/blob/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            let seg = rest.split('/').next().unwrap_or("");
+            if !seg.is_empty() {
+                return Some(seg);
+            }
+        }
+    }
+    None
+}
+
+/// Per-organization data isolation. Runs after authentication (so the
+/// [`TenantContext`] is present) and enforces that a collection/namespace is
+/// only ever accessed by the org that first created it. Platform admins (no
+/// `tenant_id`) and requests without a scoped resource are passed through.
+///
+/// First-touch by an org records ownership; any other org touching the same
+/// name gets a `404` (existence is hidden across tenants).
+async fn tenant_isolation_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, errors::ApiError> {
+    let Some(ctx) = req.extensions().get::<TenantContext>().cloned() else {
+        return Ok(next.run(req).await);
+    };
+    let Some(org) = ctx.tenant_id.clone() else {
+        // Platform admin / static key: not scoped to a single org.
+        return Ok(next.run(req).await);
+    };
+    let Some(accounts) = state.accounts.clone() else {
+        return Ok(next.run(req).await);
+    };
+    let Some(name) = scoped_resource_name(req.uri().path()).map(str::to_string) else {
+        return Ok(next.run(req).await);
+    };
+
+    match accounts.collection_owner(&name).await {
+        Ok(Some(owner)) if owner != org => {
+            return Err(errors::ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "resource not found",
+            ));
+        }
+        Ok(Some(_)) => {} // owned by the caller's org
+        Ok(None) => {
+            // First touch: this org now owns the resource.
+            let _ = accounts.register_collection(&name, &org).await;
+        }
+        Err(e) => {
+            tracing::warn!("tenant isolation registry error for '{name}': {e}");
+        }
+    }
+
+    Ok(next.run(req).await)
 }
 
 pub struct RouterDeps {
@@ -115,6 +209,12 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         config.clone(),
     ));
 
+    // Enterprise account layer (orgs/users/sessions/isolation) — available
+    // whenever SQLite is enabled. Tables are created lazily on first use.
+    let accounts = sqlite
+        .clone()
+        .map(|svc| Arc::new(accounts::AccountsService::new(Arc::new(svc))));
+
     let state = AppState {
         engine,
         config,
@@ -126,6 +226,7 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         memory,
         audit_log,
         rbac,
+        accounts,
     };
     let cors = match &state.config.cors_allowed_origins {
         None => CorsLayer::new()
@@ -151,6 +252,27 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .merge(routes_docs::routes_docs())
         .route("/v1/health", get(routes_state::health))
         .route("/v1/metrics", get(routes_state::metrics))
+        // ---- Enterprise accounts: register / login are public; the rest need a token ----
+        .route("/v1/auth/register", post(routes_accounts::register))
+        .route("/v1/auth/login", post(routes_accounts::login))
+        .route("/v1/auth/logout", post(routes_accounts::logout))
+        .route("/v1/auth/refresh", post(routes_accounts::refresh))
+        .route(
+            "/v1/admin/orgs",
+            get(routes_accounts::list_orgs).post(routes_accounts::create_org),
+        )
+        .route("/v1/admin/orgs/:id", delete(routes_accounts::delete_org))
+        .route(
+            "/v1/admin/users",
+            get(routes_accounts::list_users).post(routes_accounts::create_user),
+        )
+        .route("/v1/admin/users/:id", delete(routes_accounts::delete_user))
+        .route(
+            "/v1/admin/users/:id/role",
+            put(routes_accounts::update_user_role),
+        )
+        .route("/v1/admin/stats", get(routes_accounts::stats))
+        .route("/v1/admin/audit-events", get(routes_accounts::audit_events))
         .route(
             "/v1/auth/keys",
             get(routes_auth::list_keys).post(routes_auth::create_key),
@@ -284,6 +406,9 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/admin/audit", get(routes_admin::get_audit_log))
         .route("/search", post(routes_search::search))
         .route("/search/ingest", post(routes_search::ingest))
+        // SPA fallback: serves embedded admin panel assets + index.html for any
+        // unmatched route. API routes above are matched first, so no collision.
+        .fallback(routes_ui::spa_fallback)
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -294,6 +419,10 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             audit::audit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            tenant_isolation_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -1,0 +1,103 @@
+// Minimal typed API client. All requests use RELATIVE paths (/v1/...) so the
+// same build works locally and behind any reverse proxy / TLS terminator.
+
+const TOKEN_KEY = "luma_token";
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+export function setToken(token: string) {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
+  const resp = await fetch(path, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!resp.ok) {
+    let message = `${resp.status} ${resp.statusText}`;
+    try {
+      const j = await resp.json();
+      if (j && j.message) message = j.message;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
+  if (resp.status === 204) return undefined as T;
+  return (await resp.json()) as T;
+}
+
+export const api = {
+  login: (email: string, password: string) =>
+    request<{ token: string; role: string; org_id: string }>(
+      "POST",
+      "/v1/auth/login",
+      { email, password },
+    ),
+  register: (org_name: string, email: string, password: string) =>
+    request<{ org_id: string }>("POST", "/v1/auth/register", {
+      org_name,
+      email,
+      password,
+    }),
+  logout: () => request<void>("POST", "/v1/auth/logout"),
+  stats: () => request<Record<string, number>>("GET", "/v1/admin/stats"),
+  health: () => request<Record<string, unknown>>("GET", "/v1/health"),
+  listUsers: () =>
+    request<{ users: UserRow[] }>("GET", "/v1/admin/users"),
+  createUser: (email: string, password: string, role: string) =>
+    request<UserRow>("POST", "/v1/admin/users", { email, password, role }),
+  deleteUser: (id: string) => request<void>("DELETE", `/v1/admin/users/${id}`),
+  listOrgs: () => request<{ orgs: OrgRow[] }>("GET", "/v1/admin/orgs"),
+  listKeys: () => request<KeyRow[]>("GET", "/v1/auth/keys"),
+  createKey: (name: string, role: string) =>
+    request<{ id: string; key: string }>("POST", "/v1/auth/keys", {
+      name,
+      role,
+    }),
+  revokeKey: (id: string) => request<void>("DELETE", `/v1/auth/keys/${id}`),
+  auditEvents: () =>
+    request<{ events: AuditRow[] }>("GET", "/v1/admin/audit-events?limit=100"),
+};
+
+export interface UserRow {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  org_id: string;
+}
+export interface OrgRow {
+  id: string;
+  name: string;
+  created_at_ms: number;
+}
+export interface KeyRow {
+  id: string;
+  name: string;
+  role: string;
+}
+export interface AuditRow {
+  id: number;
+  ts_ms: number;
+  action: string;
+  resource: string | null;
+  user_id: string | null;
+  ip: string | null;
+  detail: string | null;
+}
