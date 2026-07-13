@@ -3,6 +3,29 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
+/// Upper bound on any single length field read from the log. Lengths are
+/// untrusted u32 values; a torn or malicious record could otherwise request a
+/// ~4GiB allocation (OOM) or, via unchecked subtraction, underflow and wrap.
+const MAX_RECORD_BYTES: u32 = 256 * 1024 * 1024;
+
+/// Compute `content_len = total_len - 4 - meta_len - 4 - vector_len` without
+/// underflowing (which panics in debug and wraps to a huge value in release).
+/// Returns an `InvalidData` error for a truncated/torn record instead.
+fn content_len_checked(total_len: u32, meta_len: u32, vector_len: u32) -> io::Result<u32> {
+    total_len
+        .checked_sub(4)
+        .and_then(|v| v.checked_sub(meta_len))
+        .and_then(|v| v.checked_sub(4))
+        .and_then(|v| v.checked_sub(vector_len))
+        .filter(|&len| len <= MAX_RECORD_BYTES)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt record: inconsistent length fields",
+            )
+        })
+}
+
 pub struct AppendLog {
     path: PathBuf,
 }
@@ -105,8 +128,8 @@ impl AppendLog {
 
         file.seek(SeekFrom::Current(vector_len as i64))?;
 
-        // Remaining is content
-        let content_len = total_len - 4 - meta_len - 4 - vector_len;
+        // Remaining is content. Validate the arithmetic to avoid underflow.
+        let content_len = content_len_checked(total_len, meta_len, vector_len)?;
         let mut content_buf = vec![0u8; content_len as usize];
         file.read_exact(&mut content_buf)?;
 
@@ -123,15 +146,27 @@ impl AppendLog {
 
         file.read_exact(&mut len_buf)?;
         let meta_len = u32::from_le_bytes(len_buf);
+        if meta_len > MAX_RECORD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt record: meta length too large",
+            ));
+        }
         let mut meta_buf = vec![0u8; meta_len as usize];
         file.read_exact(&mut meta_buf)?;
 
         file.read_exact(&mut len_buf)?;
         let vector_len = u32::from_le_bytes(len_buf);
+        if vector_len > MAX_RECORD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt record: vector length too large",
+            ));
+        }
         let mut vector_buf = vec![0u8; vector_len as usize];
         file.read_exact(&mut vector_buf)?;
 
-        let content_len = total_len - 4 - meta_len - 4 - vector_len;
+        let content_len = content_len_checked(total_len, meta_len, vector_len)?;
         let mut content_buf = vec![0u8; content_len as usize];
         file.read_exact(&mut content_buf)?;
 
@@ -185,6 +220,13 @@ impl Iterator for MetadataIterator {
         let meta_len = u32::from_le_bytes(len_buf);
         self.offset += 4;
 
+        // Bound the untrusted meta length before allocating to avoid OOM.
+        if meta_len > MAX_RECORD_BYTES {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt record: meta length too large",
+            )));
+        }
         // Read Meta
         let mut meta_buf = vec![0u8; meta_len as usize];
         if let Err(e) = reader.read_exact(&mut meta_buf) {
@@ -192,8 +234,15 @@ impl Iterator for MetadataIterator {
         }
         self.offset += meta_len as u64;
 
-        // Skip Vector + Content
-        let remaining = total_len - 4 - meta_len;
+        // Skip Vector + Content. Use checked_sub so a torn record with
+        // total_len < 4 + meta_len does not underflow (panic/huge seek).
+        let Some(remaining) = total_len.checked_sub(4).and_then(|v| v.checked_sub(meta_len))
+        else {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt record: inconsistent length fields",
+            )));
+        };
         if let Err(e) = reader.seek(SeekFrom::Current(remaining as i64)) {
             return Some(Err(e));
         }
@@ -205,5 +254,49 @@ impl Iterator for MetadataIterator {
         };
 
         Some(Ok((start_offset, id, metadata)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_len_underflow_returns_error() {
+        // total_len smaller than the sum of the length fields must not wrap.
+        assert!(content_len_checked(8, 0, 4).is_err());
+        assert!(content_len_checked(0, 0, 0).is_err());
+        assert!(content_len_checked(4, 100, 0).is_err());
+    }
+
+    #[test]
+    fn content_len_valid_case() {
+        // total_len = 4 + meta_len + 4 + vector_len + content_len(2)
+        assert_eq!(content_len_checked(4 + 3 + 4 + 5 + 2, 3, 5).unwrap(), 2);
+    }
+
+    #[test]
+    fn content_len_rejects_oversized() {
+        // Even without underflow, an absurd content_len is rejected.
+        let total = 4 + 0 + 4 + 0 + MAX_RECORD_BYTES.saturating_add(1);
+        assert!(content_len_checked(total, 0, 0).is_err());
+    }
+
+    #[test]
+    fn read_document_torn_record_errors_not_panics() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("luma_storage_test_{}_torn", std::process::id()));
+        // total_len=8, meta_len=0, vector_len=4 + 4 vector bytes.
+        // content_len = 8 - 4 - 0 - 4 - 4 would underflow.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        std::fs::write(&p, &bytes).unwrap();
+        let log = AppendLog::new(p.clone()).unwrap();
+        let res = log.read_document(0);
+        assert!(res.is_err(), "torn record must error, not panic");
+        let _ = std::fs::remove_file(&p);
     }
 }
