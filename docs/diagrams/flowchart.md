@@ -1,55 +1,48 @@
-# Flujo NS-Mem: ingesta de evento, consolidación y recall (memoria de agente)
+# Flujo Luma: ingesta híbrida de documentos y búsqueda (Level 2 /v1/db)
 
-_tipo: flowchart_ · _origen: c3da68372c88_
+_tipo: flowchart_ · _origen: 466e4fe606cf_
 
 ```mermaid
 flowchart TD
-  ini(["Cliente/Agente<br/>llama a /v1/memory/{ns}"]) --> ruta{"¿Qué operación?"}
+  ini(["Cliente autenticado<br/>Bearer / sesión"]) --> auth{"¿Auth y RBAC<br/>válidos?"}
+  auth -->|No| deny[/"401 / 403"/]
+  auth -->|Sí| accion{"¿Ingesta o<br/>búsqueda?"}
 
-  subgraph "Ingesta de evento (ingest_event)"
-    ing["POST ingest_event<br/>texto + entity_id + session"] --> schema["Asegurar esquema SQLite<br/>ensure_schema"]
-    schema --> rec["Construir MemoryRecord<br/>kind=Episodic, status=Active"]
-    rec --> persist["Persistir en memory_records"]
-    persist --> idx["Generar embedding e<br/>indexar en vector store"]
-    idx --> work["Guardar working memory<br/>en KV con TTL (si hay session)"]
-    work --> consEn{"¿Consolidación<br/>habilitada y hay entity_id?"}
-    consEn -->|No| finIng(["Devolver record"])
-    consEn -->|Sí| llm[/"LLM extrae<br/>FactCandidate(s)"/]
-    llm --> loop{"¿Quedan candidatos?"}
-    loop -->|No| emit["Emitir evento de<br/>consolidación (KV, TTL 60s)"]
-    emit --> finIng
-    loop -->|Sí| dup{"¿Existe fact duplicado?<br/>coseno >= 0.95"}
-    dup -->|Sí y distinto| skip["Omitir (log DEBUG)"]
-    skip --> loop
-    dup -->|No| prom{"¿confidence >= umbral<br/>de promoción (0.85)?"}
-    prom -->|Sí| act["upsert_fact status=Active"]
-    prom -->|No| draft["upsert_fact status=Draft"]
-    act --> edge["Crear arista<br/>TriggeredBy episodic to fact"]
-    draft --> edge
-    edge --> loop
+  subgraph "Ingesta POST /v1/db/{ns}/ingest"
+    accion -->|Ingesta| permit["Adquiere permiso<br/>de concurrencia"]
+    permit --> store["Guarda documento fuente<br/>en KV (doc:ns:id)"]
+    store --> chunk["Divide texto en chunks"]
+    chunk --> vacio{"¿Chunks vacíos?"}
+    vacio -->|Sí| finish(["Fin sin indexar"])
+    vacio -->|No| embed["Genera embeddings<br/>embed_batch"]
+    embed --> emberr{"¿Embedding OK?"}
+    emberr -->|No| rberr["Borra doc KV<br/>y devuelve error"]
+    rberr --> err(["Error"])
+    emberr -->|Sí| ensure["Asegura colección vectorial<br/>y tabla SQLite del ns"]
+    ensure --> sqlw["Escribe metadata en SQLite<br/>(primero, por recuperación)"]
+    sqlw --> vecw["Upsert de cada chunk<br/>en el índice vectorial"]
+    vecw --> vecok{"¿Upsert OK?"}
+    vecok -->|No| rollback["Rollback: revierte vectores,\nKV y fila SQLite"]
+    rollback --> err
+    vecok -->|Sí| idx["Encola auto-índices<br/>sobre campos de metadata"]
+    idx --> done(["Ingesta completada"])
   end
 
-  subgraph "Recall / consulta (query)"
-    q["POST query<br/>texto de consulta"] --> qmode{"¿Modo?"}
-    qmode -->|timeline| tl["Timeline por entity_id<br/>desde SQLite"]
-    qmode -->|next_step| ns["Siguiente paso del<br/>DAG procedural"]
-    qmode -->|recall/semantic| emb["Embeder consulta"]
-    emb --> knn["Paso 1: semillas K-NN<br/>en semantic + episodic"]
-    knn --> walk["Paso 2: Semantic Walk BFS<br/>sobre aristas tipadas"]
-    walk --> score["Puntuar: coseno x edge_factor<br/>x (1 + centralidad)"]
-    score --> filt["Paso 3: filtrar archivados,<br/>deduplicar, recortar a top-k"]
-    filt --> resp(["Devolver resultados<br/>+ evidencia"])
-    tl --> resp
-    ns --> resp
+  subgraph "Búsqueda POST /v1/db/{ns}/search"
+    accion -->|Búsqueda| plan["Planifica query según<br/>tamaño y filtro"]
+    plan --> strat{"¿Estrategia?"}
+    strat -->|SqlFirst| sqlf["Pre-filtro SQL →<br/>candidatos → vector"]
+    strat -->|VectorFirst| vecf["Búsqueda vectorial →<br/>post-filtro"]
+    sqlf --> hyd["Hidrata documentos<br/>y arma diagnósticos"]
+    vecf --> hyd
+    hyd --> res[/"Resultados rankeados<br/>(+ plan opcional)"/]
+    res --> endsearch(["Fin búsqueda"])
   end
-
-  ruta -->|ingest_event| ing
-  ruta -->|query| q
 ```
 
-Flujo derivado del código real de NS-Mem (Level 3): src/memory/ingest.rs (ingest_event → persist_memory_record → index_memory_record → persist_working_memory → consolidator.process), src/memory/consolidator.rs (extracción de facts por LLM, dedup coseno>=0.95, promoción según memory_fact_promotion_threshold=0.85, arista TriggeredBy), src/memory/retrieval.rs (query → recall: K-NN seeds → semantic_walk BFS → filtrado top-k; modos timeline y next_step), rutas en src/api/routes_memory.rs. Se eligió el flujo NS-Mem por ser la capa de negocio insignia (memoria de agente) del motor; existen otros flujos (hub de documentos en engine/hub.rs, auth/multi-tenancy) no dibujados por claridad.
+Flujo derivado del código real: src/api/mod.rs (auth_middleware + RBAC), src/api/routes_hub.rs (ingest/search), y src/engine/hub.rs (ingest_document líneas 149-274: KV → chunking → embeddings → SQLite → upsert vectorial con rollback; search_with_plan líneas 289-324: planner → SqlFirst/VectorFirst → hidratación). Se eligió el hub Level 2 (/v1/db) por ser la lógica de negocio más representativa que orquesta todos los subsistemas. Existen otros flujos (NS-Mem en src/memory/, vector primitivo, auth enterprise) no dibujados para priorizar claridad.
 
 
 <!-- tooling:diagram
-{"has_content": true, "title": "Flujo NS-Mem: ingesta de evento, consolidación y recall (memoria de agente)", "mermaid": "flowchart TD\n  ini([\"Cliente/Agente<br/>llama a /v1/memory/{ns}\"]) --> ruta{\"¿Qué operación?\"}\n\n  subgraph \"Ingesta de evento (ingest_event)\"\n    ing[\"POST ingest_event<br/>texto + entity_id + session\"] --> schema[\"Asegurar esquema SQLite<br/>ensure_schema\"]\n    schema --> rec[\"Construir MemoryRecord<br/>kind=Episodic, status=Active\"]\n    rec --> persist[\"Persistir en memory_records\"]\n    persist --> idx[\"Generar embedding e<br/>indexar en vector store\"]\n    idx --> work[\"Guardar working memory<br/>en KV con TTL (si hay session)\"]\n    work --> consEn{\"¿Consolidación<br/>habilitada y hay entity_id?\"}\n    consEn -->|No| finIng([\"Devolver record\"])\n    consEn -->|Sí| llm[/\"LLM extrae<br/>FactCandidate(s)\"/]\n    llm --> loop{\"¿Quedan candidatos?\"}\n    loop -->|No| emit[\"Emitir evento de<br/>consolidación (KV, TTL 60s)\"]\n    emit --> finIng\n    loop -->|Sí| dup{\"¿Existe fact duplicado?<br/>coseno >= 0.95\"}\n    dup -->|Sí y distinto| skip[\"Omitir (log DEBUG)\"]\n    skip --> loop\n    dup -->|No| prom{\"¿confidence >= umbral<br/>de promoción (0.85)?\"}\n    prom -->|Sí| act[\"upsert_fact status=Active\"]\n    prom -->|No| draft[\"upsert_fact status=Draft\"]\n    act --> edge[\"Crear arista<br/>TriggeredBy episodic to fact\"]\n    draft --> edge\n    edge --> loop\n  end\n\n  subgraph \"Recall / consulta (query)\"\n    q[\"POST query<br/>texto de consulta\"] --> qmode{\"¿Modo?\"}\n    qmode -->|timeline| tl[\"Timeline por entity_id<br/>desde SQLite\"]\n    qmode -->|next_step| ns[\"Siguiente paso del<br/>DAG procedural\"]\n    qmode -->|recall/semantic| emb[\"Embeder consulta\"]\n    emb --> knn[\"Paso 1: semillas K-NN<br/>en semantic + episodic\"]\n    knn --> walk[\"Paso 2: Semantic Walk BFS<br/>sobre aristas tipadas\"]\n    walk --> score[\"Puntuar: coseno x edge_factor<br/>x (1 + centralidad)\"]\n    score --> filt[\"Paso 3: filtrar archivados,<br/>deduplicar, recortar a top-k\"]\n    filt --> resp([\"Devolver resultados<br/>+ evidencia\"])\n    tl --> resp\n    ns --> resp\n  end\n\n  ruta -->|ingest_event| ing\n  ruta -->|query| q", "notes": "Flujo derivado del código real de NS-Mem (Level 3): src/memory/ingest.rs (ingest_event → persist_memory_record → index_memory_record → persist_working_memory → consolidator.process), src/memory/consolidator.rs (extracción de facts por LLM, dedup coseno>=0.95, promoción según memory_fact_promotion_threshold=0.85, arista TriggeredBy), src/memory/retrieval.rs (query → recall: K-NN seeds → semantic_walk BFS → filtrado top-k; modos timeline y next_step), rutas en src/api/routes_memory.rs. Se eligió el flujo NS-Mem por ser la capa de negocio insignia (memoria de agente) del motor; existen otros flujos (hub de documentos en engine/hub.rs, auth/multi-tenancy) no dibujados por claridad.", "kind": "flowchart", "source_sha": "c3da68372c8886687ad430b7865905e7fc27e315"}
+{"has_content": true, "title": "Flujo Luma: ingesta híbrida de documentos y búsqueda (Level 2 /v1/db)", "mermaid": "flowchart TD\n  ini([\"Cliente autenticado<br/>Bearer / sesión\"]) --> auth{\"¿Auth y RBAC<br/>válidos?\"}\n  auth -->|No| deny[/\"401 / 403\"/]\n  auth -->|Sí| accion{\"¿Ingesta o<br/>búsqueda?\"}\n\n  subgraph \"Ingesta POST /v1/db/{ns}/ingest\"\n    accion -->|Ingesta| permit[\"Adquiere permiso<br/>de concurrencia\"]\n    permit --> store[\"Guarda documento fuente<br/>en KV (doc:ns:id)\"]\n    store --> chunk[\"Divide texto en chunks\"]\n    chunk --> vacio{\"¿Chunks vacíos?\"}\n    vacio -->|Sí| finish([\"Fin sin indexar\"])\n    vacio -->|No| embed[\"Genera embeddings<br/>embed_batch\"]\n    embed --> emberr{\"¿Embedding OK?\"}\n    emberr -->|No| rberr[\"Borra doc KV<br/>y devuelve error\"]\n    rberr --> err([\"Error\"])\n    emberr -->|Sí| ensure[\"Asegura colección vectorial<br/>y tabla SQLite del ns\"]\n    ensure --> sqlw[\"Escribe metadata en SQLite<br/>(primero, por recuperación)\"]\n    sqlw --> vecw[\"Upsert de cada chunk<br/>en el índice vectorial\"]\n    vecw --> vecok{\"¿Upsert OK?\"}\n    vecok -->|No| rollback[\"Rollback: revierte vectores,\\nKV y fila SQLite\"]\n    rollback --> err\n    vecok -->|Sí| idx[\"Encola auto-índices<br/>sobre campos de metadata\"]\n    idx --> done([\"Ingesta completada\"])\n  end\n\n  subgraph \"Búsqueda POST /v1/db/{ns}/search\"\n    accion -->|Búsqueda| plan[\"Planifica query según<br/>tamaño y filtro\"]\n    plan --> strat{\"¿Estrategia?\"}\n    strat -->|SqlFirst| sqlf[\"Pre-filtro SQL →<br/>candidatos → vector\"]\n    strat -->|VectorFirst| vecf[\"Búsqueda vectorial →<br/>post-filtro\"]\n    sqlf --> hyd[\"Hidrata documentos<br/>y arma diagnósticos\"]\n    vecf --> hyd\n    hyd --> res[/\"Resultados rankeados<br/>(+ plan opcional)\"/]\n    res --> endsearch([\"Fin búsqueda\"])\n  end", "notes": "Flujo derivado del código real: src/api/mod.rs (auth_middleware + RBAC), src/api/routes_hub.rs (ingest/search), y src/engine/hub.rs (ingest_document líneas 149-274: KV → chunking → embeddings → SQLite → upsert vectorial con rollback; search_with_plan líneas 289-324: planner → SqlFirst/VectorFirst → hidratación). Se eligió el hub Level 2 (/v1/db) por ser la lógica de negocio más representativa que orquesta todos los subsistemas. Existen otros flujos (NS-Mem en src/memory/, vector primitivo, auth enterprise) no dibujados para priorizar claridad.", "kind": "flowchart", "source_sha": "466e4fe606cfa6a74e9e4fda1876d33321971620"}
 -->
