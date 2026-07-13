@@ -1,5 +1,7 @@
-use crate::api::AppState;
-use axum::extract::{Query, State};
+use crate::api::errors::ApiError;
+use crate::api::rbac::require_platform_admin;
+use crate::api::{AppState, TenantContext};
+use axum::extract::{Extension, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
@@ -29,11 +31,13 @@ pub struct EventsQuery {
 
 pub async fn events(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     headers: HeaderMap,
     Query(q): Query<EventsQuery>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     stream(
         State(state),
+        Extension(ctx),
         headers,
         Query(StreamQuery {
             since: q.since,
@@ -48,9 +52,17 @@ pub async fn events(
 
 pub async fn stream(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     headers: HeaderMap,
     Query(q): Query<StreamQuery>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    // ponytail: the event bus is a single global feed with no reliable per-tenant
+    // tag (events span state/vector/doc/... with heterogeneous shapes), so rather
+    // than build a pub/sub rewrite we restrict the raw feed to platform admins.
+    // A tenant scrolling the global stream would otherwise observe other tenants'
+    // activity (keys, collections, offsets).
+    require_platform_admin(&ctx)?;
+
     let mut since = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
@@ -170,11 +182,11 @@ pub async fn stream(
         }
     };
 
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
-    )
+    ))
 }
 
 fn matches_filters(
