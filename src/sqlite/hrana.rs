@@ -44,6 +44,8 @@ enum HranaArg {
 
 #[derive(Deserialize)]
 struct PipelineResp {
+    #[serde(default)]
+    baton: Option<String>,
     results: Vec<HranaResult>,
 }
 
@@ -149,6 +151,100 @@ impl HranaService {
             rows.push(serde_json::Value::Object(obj));
         }
         Ok(rows)
+    }
+
+    /// Runs a batch of `(sql, params)` statements atomically on the remote.
+    pub async fn execute_tx(
+        &self,
+        statements: Vec<(String, Vec<serde_json::Value>)>,
+    ) -> anyhow::Result<()> {
+        // ponytail: remote atomicity opens the transaction with an explicit
+        // BEGIN, then finishes with a baton-continued COMMIT/ROLLBACK on the
+        // same stream. Two round-trips, but it guarantees we never COMMIT a
+        // partially-failed batch — a single pipeline would still run COMMIT
+        // after an inner statement errored (pipeline requests are independent).
+        let mut arg_sets = Vec::with_capacity(statements.len());
+        for (_, params) in &statements {
+            arg_sets.push(to_hrana_args(params.clone())?);
+        }
+
+        // Phase 1: BEGIN + every statement, leaving the stream open (no Close)
+        // so the server hands back a baton to continue on.
+        let mut requests: Vec<HranaReq> = Vec::with_capacity(statements.len() + 1);
+        requests.push(HranaReq::Execute {
+            stmt: HranaStmt {
+                sql: "BEGIN",
+                args: vec![],
+                want_rows: false,
+            },
+        });
+        for ((sql, _), args) in statements.iter().zip(arg_sets) {
+            let sql = sql.as_str();
+            requests.push(HranaReq::Execute {
+                stmt: HranaStmt {
+                    sql,
+                    args,
+                    want_rows: false,
+                },
+            });
+        }
+        let (results, baton) = self.send_pipeline(None, requests, false).await?;
+
+        let ok = results.iter().all(|r| matches!(r, HranaResult::Ok { .. }));
+
+        // Phase 2: COMMIT if every statement succeeded, otherwise ROLLBACK.
+        // Close the stream in the same pipeline either way.
+        let finish = if ok { "COMMIT" } else { "ROLLBACK" };
+        let _ = self
+            .send_pipeline(
+                baton.as_deref(),
+                vec![HranaReq::Execute {
+                    stmt: HranaStmt {
+                        sql: finish,
+                        args: vec![],
+                        want_rows: false,
+                    },
+                }],
+                true,
+            )
+            .await;
+
+        if ok {
+            Ok(())
+        } else {
+            let message = results
+                .iter()
+                .find_map(|r| match r {
+                    HranaResult::Error { error } => Some(error.message.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "unknown error".to_string());
+            anyhow::bail!("libSQL remote transaction rolled back: {message}")
+        }
+    }
+
+    async fn send_pipeline(
+        &self,
+        baton: Option<&str>,
+        mut requests: Vec<HranaReq<'_>>,
+        close: bool,
+    ) -> anyhow::Result<(Vec<HranaResult>, Option<String>)> {
+        if close {
+            requests.push(HranaReq::Close);
+        }
+        let body = PipelineReq { baton, requests };
+        let resp = self
+            .inner
+            .client
+            .post(format!("{}/v2/pipeline", self.inner.url))
+            .header("Authorization", format!("Bearer {}", self.inner.token))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<PipelineResp>()
+            .await?;
+        Ok((resp.results, resp.baton))
     }
 
     async fn pipeline(&self, stmt: HranaStmt<'_>) -> anyhow::Result<ExecResult> {

@@ -122,6 +122,36 @@ impl SqliteService {
         }
     }
 
+    /// Runs a list of `(sql, params)` statements atomically inside a single
+    /// transaction. On any error the whole batch is rolled back and nothing is
+    /// committed. Additive to `execute`; use it for multi-statement writes that
+    /// must not leave a half-applied state.
+    pub async fn execute_tx(
+        &self,
+        statements: Vec<(String, Vec<serde_json::Value>)>,
+    ) -> anyhow::Result<()> {
+        match self.inner.as_ref() {
+            ServiceInner::Local { sender, .. } => {
+                let mut converted = Vec::with_capacity(statements.len());
+                for (sql, params) in statements {
+                    converted.push((sql, json_params_to_values(params)?));
+                }
+                let (respond_to, receiver) = oneshot::channel();
+                let msg = SqliteCommand::ExecuteTx {
+                    statements: converted,
+                    respond_to,
+                };
+                if sender.send(msg).await.is_err() {
+                    return Err(anyhow::anyhow!("sqlite actor channel closed"));
+                }
+                receiver
+                    .await
+                    .map_err(|_| anyhow::anyhow!("sqlite actor dropped response channel"))?
+            }
+            ServiceInner::Remote { hrana } => hrana.execute_tx(statements).await,
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

@@ -45,25 +45,8 @@ impl GraphService {
     // ── Edge CRUD ──────────────────────────────────────────────────────────
 
     pub async fn upsert_edge(&self, edge: &MemoryEdge) -> anyhow::Result<()> {
-        self.sqlite
-            .execute(
-                "INSERT OR REPLACE INTO memory_edges \
-                 (id, namespace, source_id, target_id, edge_type, weight, metadata, created_at_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                    .to_string(),
-                vec![
-                    serde_json::Value::String(edge.id.clone()),
-                    serde_json::Value::String(edge.namespace.clone()),
-                    serde_json::Value::String(edge.source_id.clone()),
-                    serde_json::Value::String(edge.target_id.clone()),
-                    serde_json::Value::String(edge.edge_type.to_string()),
-                    serde_json::json!(edge.weight),
-                    serde_json::Value::String(edge.metadata.to_string()),
-                    serde_json::json!(edge.created_at_ms),
-                ],
-            )
-            .await
-            .map(|_| ())
+        let (sql, params) = edge_upsert_stmt(edge);
+        self.sqlite.execute(sql, params).await.map(|_| ())
     }
 
     pub async fn delete_edge(&self, id: &str, namespace: &str) -> anyhow::Result<()> {
@@ -221,10 +204,18 @@ impl GraphService {
         Ok(results)
     }
 
-    // ── PageRank (simplified, 15 iterations, damping 0.85) ────────────────
+    // ── PageRank (damping 0.85, mass-conserving, convergence-checked) ──────
 
     /// Computes PageRank for all memory nodes in the namespace using positive
     /// edge types only (supports, triggered_by, related_to).
+    ///
+    /// Edges are treated as UNDIRECTED here, mirroring `semantic_walk` (which
+    /// follows edges in both directions). Centrality means "well-connected",
+    /// not "pointed-to", so directionality is intentionally dropped for
+    /// consistency between the two traversals.
+    ///
+    /// Returns mass-conserved scores that sum to ~1.0 (no max-normalization),
+    /// so a dangling-node leak cannot silently shrink the totals.
     pub async fn compute_centrality(
         &self,
         namespace: &str,
@@ -261,52 +252,21 @@ impl GraphService {
             if src.is_empty() || tgt.is_empty() {
                 continue;
             }
+            // Mirror the edge → undirected adjacency.
             adjacency
                 .entry(src.clone())
                 .or_default()
                 .push((tgt.clone(), w));
+            adjacency
+                .entry(tgt.clone())
+                .or_default()
+                .push((src.clone(), w));
             all_nodes.insert(src);
             all_nodes.insert(tgt);
         }
 
-        let n = all_nodes.len();
-        if n == 0 {
-            return Ok(HashMap::new());
-        }
-
         let nodes: Vec<String> = all_nodes.into_iter().collect();
-        let init = 1.0 / n as f32;
-        let mut scores: HashMap<String, f32> = nodes.iter().map(|id| (id.clone(), init)).collect();
-        const DAMPING: f32 = 0.85;
-
-        for _ in 0..15 {
-            let mut new_scores: HashMap<String, f32> = nodes
-                .iter()
-                .map(|id| (id.clone(), (1.0 - DAMPING) / n as f32))
-                .collect();
-
-            for (src, targets) in &adjacency {
-                let out_total: f32 = targets.iter().map(|(_, w)| w).sum();
-                if out_total <= 0.0 {
-                    continue;
-                }
-                let src_score = scores.get(src).copied().unwrap_or(0.0);
-                for (tgt, w) in targets {
-                    *new_scores.entry(tgt.clone()).or_insert(0.0) +=
-                        DAMPING * src_score * (w / out_total);
-                }
-            }
-            scores = new_scores;
-        }
-
-        // Normalize to [0, 1]
-        let max_score = scores.values().cloned().fold(0.0_f32, f32::max);
-        if max_score > 0.0 {
-            for v in scores.values_mut() {
-                *v /= max_score;
-            }
-        }
-        Ok(scores)
+        Ok(pagerank(&nodes, &adjacency))
     }
 
     /// Recomputes centrality scores and persists them to `memory_records`.
@@ -339,41 +299,60 @@ impl GraphService {
         valid_until: u64,
     ) -> anyhow::Result<String> {
         let history_id = Uuid::new_v4().to_string();
-        let status_str = match record.status {
-            crate::memory::types::MemoryStatus::Draft => "draft",
-            crate::memory::types::MemoryStatus::Active => "active",
-            crate::memory::types::MemoryStatus::Archived => "archived",
+        let (sql, params) = history_insert_stmt(&history_id, record, valid_until);
+        self.sqlite.execute(sql, params).await?;
+        Ok(history_id)
+    }
+
+    /// Atomically supersedes `existing`: snapshots it into `memory_history`,
+    /// records the belief edge, and archives the old row — all in ONE
+    /// transaction so a mid-sequence failure can't leave history without its
+    /// edge or an un-archived stale record. Returns the new history id.
+    ///
+    /// The `EdgeType` (Contradicts vs Supersedes) is chosen by the caller; the
+    /// edge id embeds the freshly generated history id, so it must be built here.
+    pub async fn supersede_with_history(
+        &self,
+        namespace: &str,
+        existing: &MemoryRecord,
+        new_id: &str,
+        edge_type: EdgeType,
+        is_contradiction: bool,
+        now_ms: u64,
+    ) -> anyhow::Result<String> {
+        let history_id = Uuid::new_v4().to_string();
+        let (history_sql, history_params) = history_insert_stmt(&history_id, existing, now_ms);
+
+        let edge = MemoryEdge {
+            id: format!("{edge_type}::{new_id}::{history_id}"),
+            namespace: namespace.to_string(),
+            source_id: new_id.to_string(),
+            target_id: existing.id.clone(),
+            edge_type,
+            weight: 1.0,
+            metadata: serde_json::json!({
+                "reason": "upsert_fact_overwrite",
+                "contradiction": is_contradiction,
+            }),
+            created_at_ms: now_ms,
         };
-        let fact_key = record
-            .metadata
-            .get("fact_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&record.id)
-            .to_string();
+        let (edge_sql, edge_params) = edge_upsert_stmt(&edge);
+
+        let archive = (
+            "UPDATE memory_records SET status = 'archived' WHERE namespace = ? AND id = ?"
+                .to_string(),
+            vec![
+                serde_json::Value::String(namespace.to_string()),
+                serde_json::Value::String(existing.id.clone()),
+            ],
+        );
+
         self.sqlite
-            .execute(
-                "INSERT INTO memory_history \
-                 (id, fact_key, namespace, entity_id, content, confidence, status, \
-                  superseded_by, valid_from, valid_until, created_at_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)"
-                    .to_string(),
-                vec![
-                    serde_json::Value::String(history_id.clone()),
-                    serde_json::Value::String(fact_key),
-                    serde_json::Value::String(record.namespace.clone()),
-                    record
-                        .entity_id
-                        .clone()
-                        .map(serde_json::Value::String)
-                        .unwrap_or(serde_json::Value::Null),
-                    serde_json::Value::String(record.content.clone()),
-                    serde_json::json!(record.confidence),
-                    serde_json::Value::String(status_str.to_string()),
-                    serde_json::json!(record.created_at_ms),
-                    serde_json::json!(valid_until),
-                    serde_json::json!(now_ms()),
-                ],
-            )
+            .execute_tx(vec![
+                (history_sql, history_params),
+                (edge_sql, edge_params),
+                archive,
+            ])
             .await?;
         Ok(history_id)
     }
@@ -424,6 +403,68 @@ impl GraphService {
             .collect();
         Ok(map)
     }
+}
+
+// ── SQL statement builders (shared by single-write and transactional paths) ─
+
+fn edge_upsert_stmt(edge: &MemoryEdge) -> (String, Vec<serde_json::Value>) {
+    (
+        "INSERT OR REPLACE INTO memory_edges \
+         (id, namespace, source_id, target_id, edge_type, weight, metadata, created_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            .to_string(),
+        vec![
+            serde_json::Value::String(edge.id.clone()),
+            serde_json::Value::String(edge.namespace.clone()),
+            serde_json::Value::String(edge.source_id.clone()),
+            serde_json::Value::String(edge.target_id.clone()),
+            serde_json::Value::String(edge.edge_type.to_string()),
+            serde_json::json!(edge.weight),
+            serde_json::Value::String(edge.metadata.to_string()),
+            serde_json::json!(edge.created_at_ms),
+        ],
+    )
+}
+
+fn history_insert_stmt(
+    history_id: &str,
+    record: &MemoryRecord,
+    valid_until: u64,
+) -> (String, Vec<serde_json::Value>) {
+    let status_str = match record.status {
+        crate::memory::types::MemoryStatus::Draft => "draft",
+        crate::memory::types::MemoryStatus::Active => "active",
+        crate::memory::types::MemoryStatus::Archived => "archived",
+    };
+    let fact_key = record
+        .metadata
+        .get("fact_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&record.id)
+        .to_string();
+    (
+        "INSERT INTO memory_history \
+         (id, fact_key, namespace, entity_id, content, confidence, status, \
+          superseded_by, valid_from, valid_until, created_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)"
+            .to_string(),
+        vec![
+            serde_json::Value::String(history_id.to_string()),
+            serde_json::Value::String(fact_key),
+            serde_json::Value::String(record.namespace.clone()),
+            record
+                .entity_id
+                .clone()
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+            serde_json::Value::String(record.content.clone()),
+            serde_json::json!(record.confidence),
+            serde_json::Value::String(status_str.to_string()),
+            serde_json::json!(record.created_at_ms),
+            serde_json::json!(valid_until),
+            serde_json::json!(now_ms()),
+        ],
+    )
 }
 
 // ── Row deserialization helpers ────────────────────────────────────────────
@@ -514,5 +555,110 @@ fn edge_factor(edge_type: EdgeType, weight: f32) -> f32 {
         EdgeType::RelatedTo => 0.7 * weight,
         EdgeType::Contradicts => -0.5,
         EdgeType::Supersedes => 0.0,
+    }
+}
+
+/// Standard PageRank over a (pre-built) weighted adjacency map.
+///
+/// Conserves total mass: each iteration the rank sitting on dangling nodes
+/// (no outgoing weight) is collected and redistributed uniformly, so scores
+/// sum to ~1.0 instead of leaking away. Iterates until the L1 delta drops
+/// below `EPSILON` or `MAX_ITERS` is hit. O(nodes + edges) per iteration.
+fn pagerank(
+    nodes: &[String],
+    adjacency: &HashMap<String, Vec<(String, f32)>>,
+) -> HashMap<String, f32> {
+    let n = nodes.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+    const DAMPING: f32 = 0.85;
+    const EPSILON: f32 = 1e-6;
+    const MAX_ITERS: usize = 100;
+    let n_f = n as f32;
+
+    let init = 1.0 / n_f;
+    let mut scores: HashMap<String, f32> = nodes.iter().map(|id| (id.clone(), init)).collect();
+
+    // Precompute out-weight totals once; adjacency is immutable across iterations.
+    let out_totals: HashMap<String, f32> = adjacency
+        .iter()
+        .map(|(src, targets)| (src.clone(), targets.iter().map(|(_, w)| *w).sum()))
+        .collect();
+
+    for _ in 0..MAX_ITERS {
+        // Rank held by dangling nodes (no positive outgoing weight) is pooled
+        // and spread uniformly so no mass is lost.
+        let dangling: f32 = nodes
+            .iter()
+            .filter(|id| out_totals.get(*id).copied().unwrap_or(0.0) <= 0.0)
+            .map(|id| scores.get(id).copied().unwrap_or(0.0))
+            .sum();
+
+        let base = (1.0 - DAMPING) / n_f + DAMPING * dangling / n_f;
+        let mut new_scores: HashMap<String, f32> =
+            nodes.iter().map(|id| (id.clone(), base)).collect();
+
+        for (src, targets) in adjacency {
+            let out_total = out_totals.get(src).copied().unwrap_or(0.0);
+            if out_total <= 0.0 {
+                continue;
+            }
+            let src_score = scores.get(src).copied().unwrap_or(0.0);
+            for (tgt, w) in targets {
+                *new_scores.entry(tgt.clone()).or_insert(0.0) +=
+                    DAMPING * src_score * (w / out_total);
+            }
+        }
+
+        let delta: f32 = nodes
+            .iter()
+            .map(|id| {
+                (new_scores.get(id).copied().unwrap_or(0.0)
+                    - scores.get(id).copied().unwrap_or(0.0))
+                .abs()
+            })
+            .sum();
+        scores = new_scores;
+        if delta < EPSILON {
+            break;
+        }
+    }
+    scores
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pagerank;
+    use std::collections::HashMap;
+
+    #[test]
+    fn pagerank_conserves_mass_and_ranks_hub_above_leaf() {
+        // Undirected star: "hub" connects to a, b, c; "leaf" hangs off a only.
+        //   hub—a, hub—b, hub—c, a—leaf
+        let nodes: Vec<String> = ["hub", "a", "b", "c", "leaf"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut adj: HashMap<String, Vec<(String, f32)>> = HashMap::new();
+        let mut edge = |x: &str, y: &str| {
+            adj.entry(x.to_string()).or_default().push((y.to_string(), 1.0));
+            adj.entry(y.to_string()).or_default().push((x.to_string(), 1.0));
+        };
+        edge("hub", "a");
+        edge("hub", "b");
+        edge("hub", "c");
+        edge("a", "leaf");
+
+        let scores = pagerank(&nodes, &adj);
+
+        let sum: f32 = scores.values().sum();
+        assert!((sum - 1.0).abs() < 1e-3, "mass not conserved: sum = {sum}");
+        assert!(
+            scores["hub"] > scores["leaf"],
+            "hub ({}) should outrank leaf ({})",
+            scores["hub"],
+            scores["leaf"]
+        );
     }
 }

@@ -7,6 +7,12 @@ pub enum SqliteCommand {
         params: Vec<rusqlite::types::Value>,
         respond_to: oneshot::Sender<anyhow::Result<u64>>,
     },
+    /// Run a list of `(sql, params)` statements inside a single
+    /// `BEGIN`/`COMMIT`. Any error rolls the whole batch back.
+    ExecuteTx {
+        statements: Vec<(String, Vec<rusqlite::types::Value>)>,
+        respond_to: oneshot::Sender<anyhow::Result<()>>,
+    },
 }
 
 pub struct SqliteActor {
@@ -30,6 +36,13 @@ impl SqliteActor {
                     let result = self.handle_execute(sql, params);
                     let _ = respond_to.send(result);
                 }
+                SqliteCommand::ExecuteTx {
+                    statements,
+                    respond_to,
+                } => {
+                    let result = self.handle_execute_tx(statements);
+                    let _ = respond_to.send(result);
+                }
             }
         }
     }
@@ -44,5 +57,21 @@ impl SqliteActor {
             .prepare(&sql)?
             .execute(rusqlite::params_from_iter(params.iter()))?;
         Ok(affected as u64)
+    }
+
+    /// Runs all statements inside one transaction. rusqlite's `Transaction`
+    /// rolls back on drop unless `commit()` is reached, so any `?` failure here
+    /// leaves the database untouched.
+    fn handle_execute_tx(
+        &mut self,
+        statements: Vec<(String, Vec<rusqlite::types::Value>)>,
+    ) -> anyhow::Result<()> {
+        let tx = self.conn.transaction()?;
+        for (sql, params) in &statements {
+            tx.prepare(sql)?
+                .execute(rusqlite::params_from_iter(params.iter()))?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }

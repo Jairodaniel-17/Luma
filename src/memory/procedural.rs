@@ -25,137 +25,113 @@ impl MemoryService {
         let version = request.version.unwrap_or(now_ms as i64);
         let status = request.status.unwrap_or(ProcedureStatus::Active);
 
-        sqlite
-            .execute(
-                "DELETE FROM procedures WHERE namespace = ? AND procedure_id = ?".to_string(),
-                vec![
-                    serde_json::Value::String(namespace.to_string()),
-                    serde_json::Value::String(request.procedure_id.clone()),
-                ],
-            )
-            .await?;
-        sqlite
-            .execute(
-                "DELETE FROM procedure_nodes WHERE namespace = ? AND procedure_id = ?".to_string(),
-                vec![
-                    serde_json::Value::String(namespace.to_string()),
-                    serde_json::Value::String(request.procedure_id.clone()),
-                ],
-            )
-            .await?;
-        sqlite
-            .execute(
-                "DELETE FROM procedure_edges WHERE namespace = ? AND procedure_id = ?".to_string(),
-                vec![
-                    serde_json::Value::String(namespace.to_string()),
-                    serde_json::Value::String(request.procedure_id.clone()),
-                ],
-            )
-            .await?;
-        sqlite
-            .execute(
-                "DELETE FROM procedure_constraints WHERE namespace = ? AND procedure_id = ?"
-                    .to_string(),
-                vec![
-                    serde_json::Value::String(namespace.to_string()),
-                    serde_json::Value::String(request.procedure_id.clone()),
-                ],
-            )
-            .await?;
+        // All DELETEs + INSERTs run in ONE transaction: a mid-sequence failure
+        // must not leave a procedure with, say, its old edges deleted but the
+        // new ones missing. Build the full statement list, then commit atomically.
+        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
 
-        sqlite
-            .execute(
-                "INSERT INTO procedures (
+        for table in [
+            "procedures",
+            "procedure_nodes",
+            "procedure_edges",
+            "procedure_constraints",
+        ] {
+            statements.push((
+                format!("DELETE FROM {table} WHERE namespace = ? AND procedure_id = ?"),
+                vec![
+                    serde_json::Value::String(namespace.to_string()),
+                    serde_json::Value::String(request.procedure_id.clone()),
+                ],
+            ));
+        }
+
+        statements.push((
+            "INSERT INTO procedures (
                     procedure_id, namespace, name, version, status, description, confidence, source, created_at_ms, updated_at_ms
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                .to_string(),
+            vec![
+                serde_json::Value::String(request.procedure_id.clone()),
+                serde_json::Value::String(namespace.to_string()),
+                serde_json::Value::String(request.name.clone()),
+                serde_json::json!(version),
+                serde_json::Value::String(procedure_status_str(status).to_string()),
+                request
+                    .description
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+                serde_json::json!(request.confidence.unwrap_or(1.0)),
+                serde_json::Value::String(request.source.clone().unwrap_or_else(|| "api".to_string())),
+                serde_json::json!(now_ms),
+                serde_json::json!(now_ms),
+            ],
+        ));
+
+        for node in &request.nodes {
+            statements.push((
+                "INSERT INTO procedure_nodes (procedure_id, namespace, version, node_id, kind, label, payload)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
                     .to_string(),
                 vec![
                     serde_json::Value::String(request.procedure_id.clone()),
                     serde_json::Value::String(namespace.to_string()),
-                    serde_json::Value::String(request.name.clone()),
                     serde_json::json!(version),
-                    serde_json::Value::String(procedure_status_str(status).to_string()),
-                    request
-                        .description
-                        .clone()
-                        .map(serde_json::Value::String)
-                        .unwrap_or(serde_json::Value::Null),
-                    serde_json::json!(request.confidence.unwrap_or(1.0)),
-                    serde_json::Value::String(request.source.clone().unwrap_or_else(|| "api".to_string())),
-                    serde_json::json!(now_ms),
-                    serde_json::json!(now_ms),
+                    serde_json::Value::String(node.node_id.clone()),
+                    serde_json::Value::String(node_kind_str(node.kind).to_string()),
+                    serde_json::Value::String(node.label.clone()),
+                    serde_json::Value::String(node.payload.to_string()),
                 ],
-            )
-            .await?;
-
-        for node in &request.nodes {
-            sqlite
-                .execute(
-                    "INSERT INTO procedure_nodes (procedure_id, namespace, version, node_id, kind, label, payload)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)"
-                        .to_string(),
-                    vec![
-                        serde_json::Value::String(request.procedure_id.clone()),
-                        serde_json::Value::String(namespace.to_string()),
-                        serde_json::json!(version),
-                        serde_json::Value::String(node.node_id.clone()),
-                        serde_json::Value::String(node_kind_str(node.kind).to_string()),
-                        serde_json::Value::String(node.label.clone()),
-                        serde_json::Value::String(node.payload.to_string()),
-                    ],
-                )
-                .await?;
+            ));
         }
 
         for edge in &request.edges {
-            sqlite
-                .execute(
-                    "INSERT INTO procedure_edges (procedure_id, namespace, version, from_node_id, to_node_id, priority, condition_json)
+            statements.push((
+                "INSERT INTO procedure_edges (procedure_id, namespace, version, from_node_id, to_node_id, priority, condition_json)
                      VALUES (?, ?, ?, ?, ?, ?, ?)"
-                        .to_string(),
-                    vec![
-                        serde_json::Value::String(request.procedure_id.clone()),
-                        serde_json::Value::String(namespace.to_string()),
-                        serde_json::json!(version),
-                        serde_json::Value::String(edge.from_node_id.clone()),
-                        serde_json::Value::String(edge.to_node_id.clone()),
-                        serde_json::json!(edge.priority),
-                        edge.condition
-                            .as_ref()
-                            .map(|value| serde_json::Value::String(serde_json::to_string(value).unwrap_or_default()))
-                            .unwrap_or(serde_json::Value::Null),
-                    ],
-                )
-                .await?;
+                    .to_string(),
+                vec![
+                    serde_json::Value::String(request.procedure_id.clone()),
+                    serde_json::Value::String(namespace.to_string()),
+                    serde_json::json!(version),
+                    serde_json::Value::String(edge.from_node_id.clone()),
+                    serde_json::Value::String(edge.to_node_id.clone()),
+                    serde_json::json!(edge.priority),
+                    edge.condition
+                        .as_ref()
+                        .map(|value| serde_json::Value::String(serde_json::to_string(value).unwrap_or_default()))
+                        .unwrap_or(serde_json::Value::Null),
+                ],
+            ));
         }
 
         for constraint in &request.constraints {
-            sqlite
-                .execute(
-                    "INSERT INTO procedure_constraints (
+            statements.push((
+                "INSERT INTO procedure_constraints (
                         constraint_id, procedure_id, namespace, version, target_node_id, condition_json, message
                      ) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                        .to_string(),
-                    vec![
-                        serde_json::Value::String(constraint.constraint_id.clone()),
-                        serde_json::Value::String(request.procedure_id.clone()),
-                        serde_json::Value::String(namespace.to_string()),
-                        serde_json::json!(version),
-                        constraint
-                            .target_node_id
-                            .clone()
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null),
-                        serde_json::Value::String(serde_json::to_string(&constraint.condition).unwrap_or_default()),
-                        constraint
-                            .message
-                            .clone()
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null),
-                    ],
-                )
-                .await?;
+                    .to_string(),
+                vec![
+                    serde_json::Value::String(constraint.constraint_id.clone()),
+                    serde_json::Value::String(request.procedure_id.clone()),
+                    serde_json::Value::String(namespace.to_string()),
+                    serde_json::json!(version),
+                    constraint
+                        .target_node_id
+                        .clone()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                    serde_json::Value::String(serde_json::to_string(&constraint.condition).unwrap_or_default()),
+                    constraint
+                        .message
+                        .clone()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                ],
+            ));
         }
+
+        sqlite.execute_tx(statements).await?;
 
         Ok(ProcedureDefinition {
             procedure_id: request.procedure_id,
