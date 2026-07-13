@@ -131,6 +131,20 @@ Use the `mock` embedding provider in tests to avoid external service dependencie
 
 ## Work Log
 
+### Done — Enterprise (multi-tenancy, admin panel, seguridad)
+
+Capa empresarial **aditiva** sobre el core existente (API keys/RBAC/audit ya presentes).
+
+- **Cuentas y sesiones** (`src/api/accounts.rs`, `routes_accounts.rs`): tablas `sys_orgs`, `sys_users`, `sys_sessions`, `sys_collections`, `sys_audit_events`. Login email+password con **Argon2id** (`src/crypto.rs`); token de sesión opaco `lums_…` (se persiste solo su hash SHA-256; TTL 7 días). Rutas: `/v1/auth/register|login|logout|refresh`, `/v1/admin/orgs`, `/v1/admin/users`, `/v1/admin/stats`, `/v1/admin/audit-events`. Tablas creadas *lazily* vía `OnceCell` (sin tocar `RouterDeps`; `AccountsService` se construye dentro de `router()` desde `sqlite`).
+- **Roles** owner/admin/member/viewer integrados en `rbac.rs` (`role_level`: viewer/readonly=10, member/user=20, admin=30, owner=40). Roles semilla añadidos con herencia por padre.
+- **Auth extendido** (`auth.rs`): además de API keys y clave estática, resuelve tokens de sesión → `TenantContext { user_id, tenant_id=org_id, role }`. Se añadió `user_id: Option<String>` a `TenantContext`.
+- **Aislamiento por org** (`tenant_isolation_middleware` en `api/mod.rs`): propiedad first-touch de colecciones/doc/blob en `sys_collections`; cross-tenant → 404. Hub (`/v1/db`) y NS-Mem (`/v1/memory`) se excluyen porque ya aíslan internamente por `tenant_id` (ver `tests/multitenant_hub.rs`).
+- **Cifrado en reposo** (`src/crypto.rs`): `SecretBox` con **ChaCha20-Poly1305**, clave maestra de `LUMA_MASTER_KEY` (SHA-256). Ciphertext auto-descriptivo `enc:v1:<b64(nonce||ct)>`.
+- **Cabeceras de seguridad** (`security_headers`): CSP estricta (script-src 'self', sin unsafe-inline; jsdelivr permitido para Scalar docs), `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, **HSTS**.
+- **Respaldos** (`src/backup.rs`): `VACUUM INTO` + snapshot + WAL a `backups/<ts>/` con retención. CLI `luma backup` / `luma restore <path>`; tarea de fondo opt-in (`backup_enabled`). Config nueva en `luma.toml`: `backup_enabled`, `backup_dir`, `backup_interval_secs`, `backup_retention` (con `#[serde(default)]` para compatibilidad).
+- **Panel React+Vite+TS** en `admin-ui/`, compilado a `ui/dist` e incrustado con `rust-embed` (`routes_ui.rs` embebe `ui/dist/`, con `spa_fallback`). Páginas: login/registro, dashboard de stats, usuarios, orgs, API keys, auditoría, salud. Rutas relativas `/v1/*` (sin localhost hardcodeado).
+- **Tests de seguridad** (`tests/security_enterprise.rs`, `tests/backup_restore.rs`): login/sesión, sesión inválida/revocada → 401, aislamiento cross-org → 404, RBAC viewer → 403, XSS servido como JSON escapado + CSP, inyección SQL neutralizada (params vinculados), cabeceras de seguridad, panel embebido servido, backup↔restore roundtrip. Suite completa verde; clippy `-D warnings` limpio.
+
 ### Done — v3.0.0
 
 **Fase 2 — Calidad de resultados y completitud funcional**

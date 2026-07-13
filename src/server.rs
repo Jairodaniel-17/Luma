@@ -29,6 +29,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if std::env::var("LUMA_MASTER_KEY").is_err() {
+        tracing::warn!(
+            "INSECURE: LUMA_MASTER_KEY is not set — encryption-at-rest uses a \
+             well-known development key. Set LUMA_MASTER_KEY before production use."
+        );
+    }
+
     tracing::info!(
         "[config] max_body_mb = {:.4}",
         config.max_body_bytes as f64 / 1_048_576.0
@@ -118,6 +125,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         rbac,
     });
     let addr = SocketAddr::new(config.bind_addr, config.port);
+
+    // Opt-in periodic backups (SQLite + snapshot + WAL).
+    luma::backup::spawn_backup_task(config.clone());
 
     tracing::info!(%addr, "listening");
     tracing::info!("Process ID: {}", std::process::id());

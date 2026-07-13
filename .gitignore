@@ -16,3 +16,11 @@ luma.toml.bak.*
 
 # tooling local
 .claude/
+
+# admin panel: commit the built ui/dist (embedded), ignore sources' deps/cache
+admin-ui/node_modules/
+admin-ui/.vite/
+node_modules/
+
+# runtime backups
+/backups/

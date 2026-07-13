@@ -32,6 +32,12 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::DiskAnnStatus { collection } => {
             diskann::run_status(&config, collection)?;
         }
+        cli::Command::Backup => {
+            cli::run_backup(&config)?;
+        }
+        cli::Command::Restore { path } => {
+            cli::run_restore(&config, path)?;
+        }
     }
 
     Ok(())
