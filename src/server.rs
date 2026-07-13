@@ -22,19 +22,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         anyhow::bail!(msg);
     }
 
-    if config.api_key == "dev" || config.api_key.len() < 16 {
-        tracing::warn!(
-            "INSECURE: api_key is weak or default ('dev'). \
-             Set LUMA_API_KEY to a strong secret before production use."
-        );
-    }
-
-    if std::env::var("LUMA_MASTER_KEY").is_err() {
-        tracing::warn!(
-            "INSECURE: LUMA_MASTER_KEY is not set — encryption-at-rest uses a \
-             well-known development key. Set LUMA_MASTER_KEY before production use."
-        );
-    }
+    // Fail-fast on insecure secrets unless the operator explicitly opts in via
+    // LUMA_ALLOW_INSECURE (intended for local/dev use only). No such flag set
+    // means production posture: refuse to start.
+    check_secure_startup(&config)?;
 
     tracing::info!(
         "[config] max_body_mb = {:.4}",
@@ -160,9 +151,14 @@ async fn serve_plain(
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_token))
-        .await?;
+    // into_make_service_with_connect_info supplies the ConnectInfo<SocketAddr>
+    // the rate limiter's peer-IP key extractor needs (otherwise every request 500s).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_token))
+    .await?;
     Ok(())
 }
 
@@ -216,7 +212,7 @@ async fn serve_tls(
     let listener = TcpListener::bind(addr).await?;
 
     loop {
-        let (tcp_stream, _peer_addr) = tokio::select! {
+        let (tcp_stream, peer_addr) = tokio::select! {
             biased;
             () = shutdown_token.cancelled() => break,
             result = listener.accept() => match result {
@@ -246,7 +242,12 @@ async fn serve_tls(
                 let app = app.clone();
                 async move {
                     use tower::ServiceExt as _;
-                    app.oneshot(req.map(axum::body::Body::new)).await
+                    // Supply ConnectInfo<SocketAddr> so the rate limiter's peer-IP
+                    // key extractor can identify the client on TLS connections too.
+                    let mut req = req.map(axum::body::Body::new);
+                    req.extensions_mut()
+                        .insert(axum::extract::ConnectInfo(peer_addr));
+                    app.oneshot(req).await
                 }
             });
             if let Err(e) = Builder::new(TokioExecutor::new())
@@ -259,6 +260,53 @@ async fn serve_tls(
     }
 
     Ok(())
+}
+
+/// Whether the operator explicitly opted in to running with insecure secrets.
+fn allow_insecure() -> bool {
+    std::env::var("LUMA_ALLOW_INSECURE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Collect insecure-secret problems for the given config + environment.
+fn insecure_startup_problems(api_key: &str, master_key_set: bool) -> Vec<&'static str> {
+    let mut problems = Vec::new();
+    if api_key == "dev" || api_key.is_empty() || api_key.len() < 16 {
+        problems
+            .push("api_key is weak or default ('dev'/empty/<16 chars); set LUMA_API_KEY to a strong secret");
+    }
+    if !master_key_set {
+        problems.push(
+            "LUMA_MASTER_KEY is not set; encryption-at-rest would use a well-known development key",
+        );
+    }
+    problems
+}
+
+/// Refuse to start with insecure secrets unless `LUMA_ALLOW_INSECURE` is set.
+/// When the opt-out is set, insecure secrets only produce warnings.
+fn check_secure_startup(config: &Config) -> anyhow::Result<()> {
+    let problems = insecure_startup_problems(&config.api_key, std::env::var("LUMA_MASTER_KEY").is_ok());
+    if problems.is_empty() {
+        return Ok(());
+    }
+
+    if allow_insecure() {
+        for p in &problems {
+            tracing::warn!("INSECURE (allowed via LUMA_ALLOW_INSECURE): {p}");
+        }
+        Ok(())
+    } else {
+        for p in &problems {
+            tracing::error!("INSECURE: {p}");
+        }
+        anyhow::bail!(
+            "refusing to start with {} insecure secret setting(s); fix the issues logged above, \
+             or set LUMA_ALLOW_INSECURE=1 to override (local/dev only)",
+            problems.len()
+        )
+    }
 }
 
 fn ensure_data_dir(path: &str) -> anyhow::Result<()> {
@@ -343,7 +391,8 @@ fn init_embeddings(
         .with_retry(
             config.embedding_retry_attempts,
             config.embedding_retry_initial_ms,
-        ),
+        )
+        .with_timeout(config.request_timeout_secs),
     )
 }
 
@@ -380,4 +429,35 @@ async fn shutdown_signal(token: CancellationToken) {
         tracing::warn!("Graceful shutdown timed out. Forcing exit.");
         std::process::exit(0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secure_config_has_no_problems() {
+        let problems = insecure_startup_problems("a-strong-api-key-32-chars-long!!", true);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn weak_api_key_is_flagged() {
+        assert_eq!(insecure_startup_problems("dev", true).len(), 1);
+        assert_eq!(insecure_startup_problems("", true).len(), 1);
+        assert_eq!(insecure_startup_problems("short", true).len(), 1);
+    }
+
+    #[test]
+    fn missing_master_key_is_flagged() {
+        assert_eq!(
+            insecure_startup_problems("a-strong-api-key-32-chars-long!!", false).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn both_insecure_reports_two_problems() {
+        assert_eq!(insecure_startup_problems("dev", false).len(), 2);
+    }
 }

@@ -7,6 +7,8 @@ pub mod resolve;
 pub struct Config {
     pub port: u16,
     pub bind_addr: IpAddr,
+    /// Secret: never persisted to luma.toml. Loaded from env at runtime.
+    #[serde(default, skip_serializing)]
     pub api_key: String,
     pub data_dir: Option<String>,
     pub snapshot_interval_secs: u64,
@@ -49,10 +51,14 @@ pub struct Config {
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_url: String,
+    /// Secret: never persisted to luma.toml. Loaded from env at runtime.
+    #[serde(default, skip_serializing)]
     pub embedding_api_key: String,
     pub llm_provider: String,
     pub llm_model: String,
     pub llm_url: String,
+    /// Secret: never persisted to luma.toml. Loaded from env at runtime.
+    #[serde(default, skip_serializing)]
     pub llm_api_key: String,
     pub embedding_dim: usize,
     /// PR2: LRU embedding cache size (0 = disabled). Default 10_000.
@@ -138,6 +144,8 @@ pub struct Config {
     /// Enables active-active HA via Turso's global replication — zero code changes required.
     pub libsql_url: Option<String>,
     /// Auth token for libSQL/Turso remote database (Bearer token).
+    /// Secret: never persisted to luma.toml. Loaded from env at runtime.
+    #[serde(default, skip_serializing)]
     pub libsql_auth_token: String,
     /// Enable the periodic background backup task (default false).
     #[serde(default)]
@@ -258,7 +266,8 @@ impl Default for Config {
             hub_sql_filter_max_ids: 50_000,
             tls_cert_path: None,
             tls_key_path: None,
-            rate_limit_rps: 0,
+            // Rate limiting on by default for brute-force protection; set to 0 to disable.
+            rate_limit_rps: 100,
             rate_limit_burst: 0,
             libsql_url: None,
             libsql_auth_token: String::new(),
@@ -275,7 +284,10 @@ impl Config {
         let path = std::path::Path::new("luma.toml");
         if path.exists() {
             let content = std::fs::read_to_string(path)?;
-            let config: Config = toml::from_str(&content)?;
+            let mut config: Config = toml::from_str(&content)?;
+            // Secrets are never written to luma.toml (see `#[serde(skip_serializing)]`).
+            // Overlay them from the environment so they come from env at runtime only.
+            config.overlay_secrets_from_env();
             return Ok(config);
         }
 
@@ -286,6 +298,25 @@ impl Config {
             tracing::info!("Auto-generated default luma.toml configuration file.");
         }
         Ok(config)
+    }
+
+    /// Overlay secret fields from the environment, overwriting any values loaded
+    /// from `luma.toml`. Uses the same env lookups as [`Config::from_env`]. A
+    /// secret is only overwritten when its env var is actually set, so an unset
+    /// var leaves the (empty) deserialized default in place.
+    fn overlay_secrets_from_env(&mut self) {
+        if let Ok(v) = std::env::var("LUMA_API_KEY").or_else(|_| std::env::var("API_KEY")) {
+            self.api_key = v;
+        }
+        if let Ok(v) = std::env::var("EMBEDDING_API_KEY") {
+            self.embedding_api_key = v;
+        }
+        if let Ok(v) = std::env::var("LLM_API_KEY") {
+            self.llm_api_key = v;
+        }
+        if let Ok(v) = std::env::var("LIBSQL_AUTH_TOKEN") {
+            self.libsql_auth_token = v;
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -679,7 +710,7 @@ impl Config {
             rate_limit_rps: std::env::var("RATE_LIMIT_RPS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+                .unwrap_or(100),
             rate_limit_burst: std::env::var("RATE_LIMIT_BURST")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -815,4 +846,41 @@ fn parse_env_bool(key: &str, default: bool) -> bool {
             _ => default,
         })
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_never_serialized() {
+        let mut c = Config::default();
+        c.api_key = "super-secret-api-value".to_string();
+        c.embedding_api_key = "embed-secret-value".to_string();
+        c.llm_api_key = "llm-secret-value".to_string();
+        c.libsql_auth_token = "turso-secret-value".to_string();
+        let toml_str = toml::to_string_pretty(&c).unwrap();
+        assert!(!toml_str.contains("super-secret-api-value"));
+        assert!(!toml_str.contains("embed-secret-value"));
+        assert!(!toml_str.contains("llm-secret-value"));
+        assert!(!toml_str.contains("turso-secret-value"));
+    }
+
+    #[test]
+    fn roundtrip_omits_secrets_and_still_parses() {
+        // A serialized config (no secret fields) must deserialize thanks to
+        // `#[serde(default)]`, coming back with empty secrets.
+        let mut c = Config::default();
+        c.api_key = "secret-that-should-vanish".to_string();
+        let s = toml::to_string_pretty(&c).unwrap();
+        let parsed: Config = toml::from_str(&s).unwrap();
+        assert_eq!(parsed.api_key, "");
+        // MED fix: rate limiting is on by default.
+        assert_eq!(parsed.rate_limit_rps, 100);
+    }
+
+    #[test]
+    fn default_rate_limit_is_enabled() {
+        assert_eq!(Config::default().rate_limit_rps, 100);
+    }
 }
