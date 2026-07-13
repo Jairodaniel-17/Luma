@@ -221,6 +221,8 @@ pub enum VectorError {
     UnsupportedOperation,
     #[error("storage quota exceeded")]
     StorageQuotaExceeded,
+    #[error("invalid filter field name")]
+    InvalidFilterField,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2406,6 +2408,15 @@ fn exact_score(metric: Metric, a: &[f32], b: &[f32], simd_enabled: bool) -> f32 
     }
 }
 
+// NOTE (Metric::Dot semantics): vectors are L2-normalized for the `Dot` metric,
+// so scoring effectively computes cosine similarity rather than a true raw inner
+// product / maximum-inner-product. This is intentional and required: the HNSW
+// `DistDot` implementation in `anndists` asserts `dot <= 1.0` on every distance
+// evaluation and would panic (in release, not just debug) on un-normalized
+// vectors. Keeping vectors unit-length makes `Dot` behave as cosine while
+// remaining compatible with the ANN index. `exact_score` and `centroid_score`
+// use raw dot for `Dot`, which on normalized vectors equals cosine and thus
+// ranks consistently across the coarse (IVF/HNSW) and exact stages.
 fn normalize_if_needed(metric: Metric, mut v: Vec<f32>) -> Vec<f32> {
     if metric == Metric::Dot {
         anndists::dist::distances::l2_normalize(v.as_mut_slice());

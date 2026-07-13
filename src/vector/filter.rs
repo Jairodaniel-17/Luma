@@ -1,3 +1,4 @@
+use crate::vector::VectorError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -286,42 +287,67 @@ pub fn from_legacy(filters: &Value) -> Option<MetadataFilter> {
 ///
 /// Returns `(sql_fragment, params)`. Always use `json_extract(metadata, '$.field')`
 /// so the query can benefit from SQLite JSON function indexes.
-pub fn to_sql_where(filter: &MetadataFilter) -> (String, Vec<Value>) {
+///
+/// Field names are validated (see [`validate_field`]) because they are
+/// interpolated directly into the SQL JSON path string and therefore cannot be
+/// bound as parameters. A field containing anything outside the identifier-safe
+/// character set is rejected with [`VectorError::InvalidFilterField`].
+pub fn to_sql_where(filter: &MetadataFilter) -> Result<(String, Vec<Value>), VectorError> {
     let mut params = Vec::new();
-    let sql = filter_to_sql(filter, &mut params);
-    (sql, params)
+    let sql = filter_to_sql(filter, &mut params)?;
+    Ok((sql, params))
 }
 
-fn filter_to_sql(filter: &MetadataFilter, params: &mut Vec<Value>) -> String {
+/// Validate a metadata field name that will be interpolated into a SQL JSON
+/// path. Only identifier-safe characters are allowed: ASCII letters, digits,
+/// underscore, dot (for nested paths) and hyphen. This rejects quotes,
+/// parentheses, whitespace, semicolons and every other character an attacker
+/// could use to break out of the `'$.<field>'` string literal.
+fn validate_field(field: &str) -> Result<(), VectorError> {
+    if field.is_empty()
+        || !field
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    {
+        return Err(VectorError::InvalidFilterField);
+    }
+    Ok(())
+}
+
+fn filter_to_sql(filter: &MetadataFilter, params: &mut Vec<Value>) -> Result<String, VectorError> {
     match filter {
         MetadataFilter::Condition(c) => condition_to_sql(c, params),
         MetadataFilter::And { and } => {
             if and.is_empty() {
-                return "1".to_string();
+                return Ok("1".to_string());
             }
-            and.iter()
-                .map(|f| format!("({})", filter_to_sql(f, params)))
-                .collect::<Vec<_>>()
-                .join(" AND ")
+            let parts = and
+                .iter()
+                .map(|f| filter_to_sql(f, params).map(|s| format!("({s})")))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(parts.join(" AND "))
         }
         MetadataFilter::Or { or } => {
             if or.is_empty() {
-                return "0".to_string();
+                return Ok("0".to_string());
             }
-            or.iter()
-                .map(|f| format!("({})", filter_to_sql(f, params)))
-                .collect::<Vec<_>>()
-                .join(" OR ")
+            let parts = or
+                .iter()
+                .map(|f| filter_to_sql(f, params).map(|s| format!("({s})")))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(parts.join(" OR "))
         }
-        MetadataFilter::Not { not } => {
-            format!("NOT ({})", filter_to_sql(not, params))
-        }
+        MetadataFilter::Not { not } => Ok(format!("NOT ({})", filter_to_sql(not, params)?)),
     }
 }
 
-fn condition_to_sql(cond: &FilterCondition, params: &mut Vec<Value>) -> String {
+fn condition_to_sql(
+    cond: &FilterCondition,
+    params: &mut Vec<Value>,
+) -> Result<String, VectorError> {
+    validate_field(&cond.field)?;
     let field_expr = format!("json_extract(metadata, '$.{}')", cond.field);
-    match cond.op {
+    let sql = match cond.op {
         FilterOp::Exists => format!("{field_expr} IS NOT NULL"),
         FilterOp::Eq => {
             params.push(cond.value.clone());
@@ -350,7 +376,7 @@ fn condition_to_sql(cond: &FilterCondition, params: &mut Vec<Value>) -> String {
         FilterOp::In => {
             let values = effective_values(cond);
             if values.is_empty() {
-                return "0".to_string();
+                return Ok("0".to_string());
             }
             let placeholders = std::iter::repeat_n("?", values.len())
                 .collect::<Vec<_>>()
@@ -361,7 +387,7 @@ fn condition_to_sql(cond: &FilterCondition, params: &mut Vec<Value>) -> String {
         FilterOp::NotIn => {
             let values = effective_values(cond);
             if values.is_empty() {
-                return "1".to_string();
+                return Ok("1".to_string());
             }
             let placeholders = std::iter::repeat_n("?", values.len())
                 .collect::<Vec<_>>()
@@ -374,12 +400,13 @@ fn condition_to_sql(cond: &FilterCondition, params: &mut Vec<Value>) -> String {
             // Generates: EXISTS (SELECT 1 FROM json_each(metadata, '$.field') WHERE value IN (?,...))
             let values = effective_values(cond);
             if values.is_empty() {
-                return "0".to_string();
+                return Ok("0".to_string());
             }
             let placeholders = std::iter::repeat_n("?", values.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             params.extend(values.iter().cloned());
+            // cond.field validated above.
             format!(
                 "EXISTS (SELECT 1 FROM json_each(metadata, '$.{}') WHERE value IN ({placeholders}))",
                 cond.field
@@ -393,7 +420,8 @@ fn condition_to_sql(cond: &FilterCondition, params: &mut Vec<Value>) -> String {
             params.push(cond.value.clone());
             format!("INSTR({field_expr}, ?) = 1")
         }
-    }
+    };
+    Ok(sql)
 }
 
 fn effective_values(cond: &FilterCondition) -> &[Value] {
@@ -714,7 +742,7 @@ mod tests {
     #[test]
     fn sql_eq_condition() {
         let f = cond("status", FilterOp::Eq, json!("active"));
-        let (sql, params) = to_sql_where(&f);
+        let (sql, params) = to_sql_where(&f).unwrap();
         assert!(sql.contains("json_extract(metadata, '$.status') = ?"));
         assert_eq!(params, vec![json!("active")]);
     }
@@ -722,7 +750,7 @@ mod tests {
     #[test]
     fn sql_in_condition() {
         let f = in_cond("tier", vec![json!("gold"), json!("platinum")]);
-        let (sql, params) = to_sql_where(&f);
+        let (sql, params) = to_sql_where(&f).unwrap();
         assert!(sql.contains("IN (?, ?)"));
         assert_eq!(params.len(), 2);
     }
@@ -735,7 +763,7 @@ mod tests {
                 cond("b", FilterOp::Gt, json!(5)),
             ],
         };
-        let (sql, _) = to_sql_where(&f);
+        let (sql, _) = to_sql_where(&f).unwrap();
         assert!(sql.contains(" AND "));
     }
 
@@ -747,7 +775,7 @@ mod tests {
                 cond("a", FilterOp::Eq, json!("y")),
             ],
         };
-        let (sql, _) = to_sql_where(&f);
+        let (sql, _) = to_sql_where(&f).unwrap();
         assert!(sql.contains(" OR "));
     }
 
@@ -756,14 +784,14 @@ mod tests {
         let f = MetadataFilter::Not {
             not: Box::new(cond("deleted", FilterOp::Eq, json!(true))),
         };
-        let (sql, _) = to_sql_where(&f);
+        let (sql, _) = to_sql_where(&f).unwrap();
         assert!(sql.starts_with("NOT ("));
     }
 
     #[test]
     fn sql_contains_uses_instr() {
         let f = cond("msg", FilterOp::Contains, json!("error"));
-        let (sql, _) = to_sql_where(&f);
+        let (sql, _) = to_sql_where(&f).unwrap();
         assert!(sql.contains("INSTR(") && sql.contains("> 0"));
     }
 
@@ -886,12 +914,54 @@ mod tests {
     #[test]
     fn sql_any_of_uses_json_each() {
         let f = any_of_cond("tax_system", vec![json!("suitetax"), json!("legacy")]);
-        let (sql, params) = to_sql_where(&f);
+        let (sql, params) = to_sql_where(&f).unwrap();
         assert!(sql.contains("json_each"), "should use json_each: {sql}");
         assert!(
             sql.contains("IN (?, ?)"),
             "should have 2 placeholders: {sql}"
         );
         assert_eq!(params.len(), 2);
+    }
+
+    // ── Field-name injection ────────────────────────────────────
+
+    #[test]
+    fn sql_rejects_injection_field() {
+        // A field name attempting to break out of the '$.<field>' JSON path
+        // and inject SQL must be rejected, not interpolated.
+        let malicious = "x') UNION SELECT password FROM users --";
+        let f = cond(malicious, FilterOp::Eq, json!("y"));
+        assert!(matches!(
+            to_sql_where(&f),
+            Err(VectorError::InvalidFilterField)
+        ));
+
+        // Rejected inside AnyOf (the other interpolation site) too.
+        let f = any_of_cond("a'b", vec![json!("z")]);
+        assert!(matches!(
+            to_sql_where(&f),
+            Err(VectorError::InvalidFilterField)
+        ));
+
+        // And when nested inside a logical combinator.
+        let f = MetadataFilter::And {
+            and: vec![
+                cond("ok_field", FilterOp::Eq, json!("v")),
+                cond("bad field", FilterOp::Eq, json!("v")),
+            ],
+        };
+        assert!(matches!(
+            to_sql_where(&f),
+            Err(VectorError::InvalidFilterField)
+        ));
+    }
+
+    #[test]
+    fn sql_accepts_identifier_safe_fields() {
+        // Dotted nested paths, digits, underscores and hyphens are allowed.
+        for field in ["status", "a.b.c", "field_1", "kebab-case", "n0.n1_x"] {
+            let f = cond(field, FilterOp::Eq, json!("v"));
+            assert!(to_sql_where(&f).is_ok(), "field should be accepted: {field}");
+        }
     }
 }

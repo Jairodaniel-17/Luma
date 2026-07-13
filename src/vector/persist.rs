@@ -9,6 +9,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+/// Current on-disk manifest schema version. `read_manifest` refuses to load a
+/// manifest whose `version` is unknown (0) or newer than this, so an older
+/// binary cannot silently misinterpret a manifest written by a newer one.
+pub(super) const MANIFEST_VERSION: u32 = 1;
 pub(super) const DEFAULT_RUN_TARGET_BYTES: u64 = 134_217_728;
 pub(super) const DEFAULT_RUN_RETENTION: usize = 8;
 pub(super) const DEFAULT_COMPACTION_TRIGGER_TOMBSTONE_RATIO: f32 = 0.5;
@@ -221,7 +225,7 @@ pub struct CentroidsMeta {
 impl Manifest {
     pub fn new(dim: usize, metric: Metric) -> Self {
         Self {
-            version: 1,
+            version: MANIFEST_VERSION,
             dim,
             metric,
             applied_offset: 0,
@@ -550,6 +554,8 @@ pub fn store_centroids(
     meta_writer.flush()?;
     meta_writer.sync_data()?;
     std::fs::rename(&tmp_meta, &layout.centroids_meta_path)?;
+    // Ensure both renames above survive a crash.
+    fsync_dir(&layout.dir)?;
     Ok(())
 }
 
@@ -766,6 +772,24 @@ fn create_new_run(layout: &CollectionLayout, manifest: &mut Manifest) -> std::io
     Ok(())
 }
 
+/// fsync the directory so that a preceding `rename` of a file into it is
+/// durably recorded. Without this a crash after `rename` can lose the rename
+/// (the temp/target directory entry) even though the file's data was synced.
+/// A directory fsync is a no-op or unsupported on some platforms; those errors
+/// are tolerated so we stay portable while still hardening the common (Linux)
+/// case.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    match File::open(dir) {
+        Ok(f) => match f.sync_all() {
+            Ok(()) => Ok(()),
+            // Some filesystems/platforms reject fsync on a directory handle.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    }
+}
+
 fn write_manifest(layout: &CollectionLayout, manifest: &Manifest) -> std::io::Result<()> {
     let tmp = layout.dir.join("manifest.json.tmp");
     let mut f = OpenOptions::new()
@@ -777,6 +801,8 @@ fn write_manifest(layout: &CollectionLayout, manifest: &Manifest) -> std::io::Re
     f.flush()?;
     f.sync_data()?;
     std::fs::rename(tmp, &layout.manifest_path)?;
+    // Ensure the rename itself survives a crash.
+    fsync_dir(&layout.dir)?;
     Ok(())
 }
 
@@ -805,6 +831,17 @@ fn select_runs_for_compaction(manifest: &Manifest, max_bytes: u64) -> Vec<String
 fn read_manifest(layout: &CollectionLayout) -> std::io::Result<Manifest> {
     let bytes = std::fs::read(&layout.manifest_path)?;
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
+    // Reject unknown (0) or future manifest versions rather than silently
+    // treating them as v1, which could corrupt data written by a newer binary.
+    if manifest.version == 0 || manifest.version > MANIFEST_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported manifest version {} (this build supports up to {})",
+                manifest.version, MANIFEST_VERSION
+            ),
+        ));
+    }
     Ok(manifest)
 }
 
@@ -959,6 +996,33 @@ mod tests {
         let res = read_run_files(&layout, 4, std::slice::from_ref(&run), &mut state);
         assert!(res.is_ok(), "oversized run length must not error/OOM");
         assert!(state.items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_manifest_rejects_future_and_unknown_versions() {
+        let dir = tmp_dir("manifest_version");
+        let layout = CollectionLayout::new(&dir, "coll");
+        std::fs::create_dir_all(&layout.dir).unwrap();
+
+        // A current-version manifest loads fine (round-trips through write).
+        let manifest = Manifest::new(4, Metric::Cosine);
+        write_manifest(&layout, &manifest).unwrap();
+        assert!(read_manifest(&layout).is_ok());
+
+        // A future version is rejected rather than loaded as v1.
+        let mut future = manifest.clone();
+        future.version = MANIFEST_VERSION + 1;
+        write_manifest(&layout, &future).unwrap();
+        let err = read_manifest(&layout).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // Version 0 is treated as unknown/invalid too.
+        let mut zero = manifest.clone();
+        zero.version = 0;
+        write_manifest(&layout, &zero).unwrap();
+        assert!(read_manifest(&layout).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

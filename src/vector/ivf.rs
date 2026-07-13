@@ -191,6 +191,60 @@ fn init_kmeans_pp(vectors: &[Vec<f32>], k: usize, metric: Metric) -> Vec<Vec<f32
     centroids
 }
 
-fn centroid_score(_metric: Metric, centroid: &[f32], vector: &[f32], simd_enabled: bool) -> f32 {
-    simd::dot(centroid, vector, simd_enabled)
+// Score a centroid against a vector consistently with the collection metric so
+// that IVF clustering/probing ranks the same way the exact scoring stage does
+// (see `exact_score` in mod.rs). Previously this always used raw dot regardless
+// of the metric, which mis-ranked centroids for Cosine collections.
+fn centroid_score(metric: Metric, centroid: &[f32], vector: &[f32], simd_enabled: bool) -> f32 {
+    match metric {
+        Metric::Cosine => {
+            let (dot, norm_a, norm_b) = simd::dot_and_norms(centroid, vector, simd_enabled);
+            if norm_a == 0.0 || norm_b == 0.0 {
+                0.0
+            } else {
+                dot / (norm_a.sqrt() * norm_b.sqrt())
+            }
+        }
+        // Dot vectors are stored L2-normalized (see normalize_if_needed), so raw
+        // dot here equals cosine and matches exact_score's Dot branch.
+        Metric::Dot => simd::dot(centroid, vector, simd_enabled),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centroid_score_honors_metric() {
+        // Centroid and vector are parallel but with different magnitudes.
+        let centroid = vec![2.0f32, 0.0, 0.0];
+        let vector = vec![5.0f32, 0.0, 0.0];
+
+        // Cosine ignores magnitude: parallel vectors score ~1.0.
+        let cos = centroid_score(Metric::Cosine, &centroid, &vector, false);
+        assert!((cos - 1.0).abs() < 1e-5, "cosine of parallel vectors: {cos}");
+
+        // Dot keeps magnitude: raw inner product = 2*5 = 10.
+        let dot = centroid_score(Metric::Dot, &centroid, &vector, false);
+        assert!((dot - 10.0).abs() < 1e-4, "raw dot: {dot}");
+
+        // The two metrics must not collapse to the same value here.
+        assert!((cos - dot).abs() > 1e-3);
+    }
+
+    #[test]
+    fn cosine_probe_ranking_ignores_magnitude() {
+        // Two centroids: one aligned with the query direction, one orthogonal.
+        // A raw-dot ranking could be fooled by a large-magnitude orthogonal
+        // centroid; cosine must rank the aligned one first.
+        let centroids = vec![
+            vec![0.0f32, 100.0, 0.0], // orthogonal to query, huge magnitude
+            vec![1.0f32, 0.0, 0.0],   // aligned with query
+        ];
+        let ivf = IvfState::new(centroids, Metric::Cosine, 0);
+        let query = vec![3.0f32, 0.0, 0.0];
+        let probes = ivf.select_probes(&query, false, 1);
+        assert_eq!(probes, vec![1], "cosine should probe the aligned centroid");
+    }
 }
