@@ -1,50 +1,61 @@
-# Flujo NS-Mem: ingesta/consolidación de memoria y recall del agente
+# Flujo principal de Luma: ingesta híbrida y búsqueda con planificador
 
-_tipo: flowchart_ · _origen: a10e23646f01_
+_tipo: flowchart_ · _origen: 4c382dee762e_
 
 ```mermaid
 flowchart TD
-  subgraph ING["Ingesta y consolidacion"]
-    ini(["Agente / cliente"]) --> ingest[/"POST /v1/memory/{ns}/ingest_event"/]
-    ingest --> persist["Persistir MemoryRecord episodico<br/>SQLite + indice vectorial + working KV"]
-    persist --> consEn{"Consolidacion habilitada<br/>y record episodico?"}
-    consEn -->|No| doneIng(["Evento almacenado"])
-    consEn -->|Si| extract["LLM extrae FactCandidates<br/>none / mock / openai / ollama"]
-    extract --> dup{"Fact duplicado?<br/>coseno >= 0.95"}
-    dup -->|Si| skip["Omitir fact redundante"]
-    dup -->|No| conf{"confidence >=<br/>promotion_threshold?"}
-    conf -->|Si| active["upsert_fact status=active"]
-    conf -->|No| draft["upsert_fact status=draft"]
-    active --> vers{"Existe fact previo?"}
-    draft --> vers
-    vers -->|Si| hist["Snapshot en memory_history<br/>coseno < 0.55 -> Contradicts<br/>si no -> Supersedes + archivar"]
-    vers -->|No| edge
-    hist --> edge["Crear arista TriggeredBy<br/>episodico -> semantico"]
-    skip --> emit
-    edge --> emit["Emitir evento de consolidacion"]
-    emit --> doneIng
+  ini(["Cliente HTTP"]) --> auth["auth_middleware:<br/>resolver Bearer / API key / sesión"]
+  auth --> authok{"¿Credencial válida?"}
+  authok -->|No| e401[/"401 No autorizado"/]
+  authok -->|Sí| tenant["tenant_isolation_middleware:<br/>resolver org / TenantContext"]
+  tenant --> tok{"¿Colección pertenece al org?"}
+  tok -->|No| e404[/"404 No encontrado"/]
+  tok -->|Sí| ruta{"¿Qué operación /v1/db?"}
+
+  subgraph "Ingesta (POST /v1/db/{ns}/ingest)"
+    ing["ingest_document"] --> store["Guardar doc fuente en KV state"]
+    store --> chunk["Chunking: split_text"]
+    chunk --> vac{"¿Genera chunks?"}
+    vac -->|No| okvacio["Fin: nada que indexar"]
+    vac -->|Sí| embed["embed_batch (proveedor de embeddings)"]
+    embed --> eok{"¿Embeddings OK?"}
+    eok -->|No| rbdoc["Borrar doc del KV + registrar fallo"]
+    rbdoc --> eerr[/"500 Error de embedding"/]
+    eok -->|Sí| ensure["ensure_collection + ensure_sqlite_table"]
+    ensure --> sqlw["Escribir metadatos en SQLite (primero)"]
+    sqlw --> vecw["vector_upsert por cada chunk"]
+    vecw --> vok{"¿Upsert vectorial OK?"}
+    vok -->|No| rback["Rollback: borrar vectores + fila SQL + KV"]
+    rback --> eerr
+    vok -->|Sí| idx["Encolar auto-índices de metadatos"]
+    idx --> okok[/"200 Ingesta completa"/]
   end
-  subgraph QRY["Consulta y recall"]
-    q(["Agente consulta"]) --> query[/"POST /v1/memory/{ns}/query"/]
-    query --> mode{"Modo de consulta?"}
-    mode -->|timeline| tl["Timeline por entity_id<br/>via SQLite"]
-    mode -->|next_step| step["next_step sobre DAG procedural"]
-    mode -->|recall / semantic| emb["Embeber texto de la query"]
-    emb --> knn["K-NN seeds<br/>colecciones semantic + episodic"]
-    knn --> walk["Semantic Walk BFS<br/>sobre aristas tipadas"]
-    walk --> score["score = coseno x edge_factor<br/>x (1 + centralidad PageRank)"]
-    score --> filt["Filtrar archivados<br/>y aristas contradicts/supersedes"]
-    filt --> topk["Top-k resultados + evidencia"]
-    tl --> resp(["Respuesta al agente"])
-    step --> resp
-    topk --> resp
+
+  subgraph "Búsqueda híbrida (POST /v1/db/{ns}/search)"
+    srch["search_with_plan"] --> csize["Leer tamaño de colección"]
+    csize --> plan{"plan_query:<br/>¿hay sql_filter?"}
+    plan -->|No| vf1["VectorFirst (sin filtro)"]
+    plan -->|Sí| insp["inspect_sql_filter:<br/>estimar coincidencias"]
+    insp --> empty{"¿0 coincidencias?"}
+    empty -->|Sí| sfempty["SqlFirst: resultado vacío"]
+    empty -->|No| selec{"¿Selectivo o set pequeño<br/>y acotado?"}
+    selec -->|Sí| sf["SqlFirst: pre-filtro SQL,<br/>luego vector"]
+    selec -->|No| vf2["VectorFirst: vector primero,<br/>post-filtro SQL"]
+    vf1 --> exec["Ejecutar estrategia +<br/>ranking por coseno"]
+    sfempty --> exec
+    sf --> exec
+    vf2 --> exec
+    exec --> hydr["hydrate_ranked_documents:<br/>traer docs fuente"]
+    hydr --> res[/"200 Resultados + plan + diagnósticos"/]
   end
-  doneIng -.->|memoria disponible| knn
+
+  ruta -->|Ingesta| ing
+  ruta -->|Búsqueda| srch
 ```
 
-Flujo derivado del Level 3 NS-Mem (la logica de negocio distintiva de Luma): src/api/routes_memory.rs, src/memory/ingest.rs (ingest_event, upsert_fact con versionado de creencias y deteccion de contradicciones por coseno < 0.55), src/memory/consolidator.rs (extraccion LLM de FactCandidates, dedup coseno >= 0.95, promocion active/draft por umbral, arista TriggeredBy), y src/memory/retrieval.rs (query: modos timeline/next_step/recall; recall = K-NN seeds -> Semantic Walk BFS -> scoring coseno x edge_factor x (1+centralidad) -> filtro de archivados -> top-k). Los primitivos de vector/state/SQL (Level 1/2) sostienen este flujo pero no son la logica de negocio principal.
+Flujo derivado de src/api/auth.rs (auth_middleware) y src/api/mod.rs (tenant_isolation_middleware), con el núcleo de negocio en src/engine/hub.rs: LumaDatabase::ingest_document (chunking -> embed_batch -> escritura SQLite-primero -> vector_upsert con rollback) y search_with_plan/plan_query (planificador que elige SqlFirst vs VectorFirst según selectividad del filtro SQL, luego hidratación de documentos). Rutas en src/api/routes_hub.rs (/v1/db). Se eligió el nivel 2 (LumaDatabase) por ser el flujo de negocio más representativo; se omiten los flujos primitivos (nivel 1) y NS-Mem (nivel 3) por claridad.
 
 
 <!-- tooling:diagram
-{"has_content": true, "title": "Flujo NS-Mem: ingesta/consolidación de memoria y recall del agente", "mermaid": "flowchart TD\n  subgraph ING[\"Ingesta y consolidacion\"]\n    ini([\"Agente / cliente\"]) --> ingest[/\"POST /v1/memory/{ns}/ingest_event\"/]\n    ingest --> persist[\"Persistir MemoryRecord episodico<br/>SQLite + indice vectorial + working KV\"]\n    persist --> consEn{\"Consolidacion habilitada<br/>y record episodico?\"}\n    consEn -->|No| doneIng([\"Evento almacenado\"])\n    consEn -->|Si| extract[\"LLM extrae FactCandidates<br/>none / mock / openai / ollama\"]\n    extract --> dup{\"Fact duplicado?<br/>coseno >= 0.95\"}\n    dup -->|Si| skip[\"Omitir fact redundante\"]\n    dup -->|No| conf{\"confidence >=<br/>promotion_threshold?\"}\n    conf -->|Si| active[\"upsert_fact status=active\"]\n    conf -->|No| draft[\"upsert_fact status=draft\"]\n    active --> vers{\"Existe fact previo?\"}\n    draft --> vers\n    vers -->|Si| hist[\"Snapshot en memory_history<br/>coseno < 0.55 -> Contradicts<br/>si no -> Supersedes + archivar\"]\n    vers -->|No| edge\n    hist --> edge[\"Crear arista TriggeredBy<br/>episodico -> semantico\"]\n    skip --> emit\n    edge --> emit[\"Emitir evento de consolidacion\"]\n    emit --> doneIng\n  end\n  subgraph QRY[\"Consulta y recall\"]\n    q([\"Agente consulta\"]) --> query[/\"POST /v1/memory/{ns}/query\"/]\n    query --> mode{\"Modo de consulta?\"}\n    mode -->|timeline| tl[\"Timeline por entity_id<br/>via SQLite\"]\n    mode -->|next_step| step[\"next_step sobre DAG procedural\"]\n    mode -->|recall / semantic| emb[\"Embeber texto de la query\"]\n    emb --> knn[\"K-NN seeds<br/>colecciones semantic + episodic\"]\n    knn --> walk[\"Semantic Walk BFS<br/>sobre aristas tipadas\"]\n    walk --> score[\"score = coseno x edge_factor<br/>x (1 + centralidad PageRank)\"]\n    score --> filt[\"Filtrar archivados<br/>y aristas contradicts/supersedes\"]\n    filt --> topk[\"Top-k resultados + evidencia\"]\n    tl --> resp([\"Respuesta al agente\"])\n    step --> resp\n    topk --> resp\n  end\n  doneIng -.->|memoria disponible| knn", "notes": "Flujo derivado del Level 3 NS-Mem (la logica de negocio distintiva de Luma): src/api/routes_memory.rs, src/memory/ingest.rs (ingest_event, upsert_fact con versionado de creencias y deteccion de contradicciones por coseno < 0.55), src/memory/consolidator.rs (extraccion LLM de FactCandidates, dedup coseno >= 0.95, promocion active/draft por umbral, arista TriggeredBy), y src/memory/retrieval.rs (query: modos timeline/next_step/recall; recall = K-NN seeds -> Semantic Walk BFS -> scoring coseno x edge_factor x (1+centralidad) -> filtro de archivados -> top-k). Los primitivos de vector/state/SQL (Level 1/2) sostienen este flujo pero no son la logica de negocio principal.", "kind": "flowchart", "source_sha": "a10e23646f0118b2e87d448044516da8eb21f1dd"}
+{"has_content": true, "title": "Flujo principal de Luma: ingesta híbrida y búsqueda con planificador", "mermaid": "flowchart TD\n  ini([\"Cliente HTTP\"]) --> auth[\"auth_middleware:<br/>resolver Bearer / API key / sesión\"]\n  auth --> authok{\"¿Credencial válida?\"}\n  authok -->|No| e401[/\"401 No autorizado\"/]\n  authok -->|Sí| tenant[\"tenant_isolation_middleware:<br/>resolver org / TenantContext\"]\n  tenant --> tok{\"¿Colección pertenece al org?\"}\n  tok -->|No| e404[/\"404 No encontrado\"/]\n  tok -->|Sí| ruta{\"¿Qué operación /v1/db?\"}\n\n  subgraph \"Ingesta (POST /v1/db/{ns}/ingest)\"\n    ing[\"ingest_document\"] --> store[\"Guardar doc fuente en KV state\"]\n    store --> chunk[\"Chunking: split_text\"]\n    chunk --> vac{\"¿Genera chunks?\"}\n    vac -->|No| okvacio[\"Fin: nada que indexar\"]\n    vac -->|Sí| embed[\"embed_batch (proveedor de embeddings)\"]\n    embed --> eok{\"¿Embeddings OK?\"}\n    eok -->|No| rbdoc[\"Borrar doc del KV + registrar fallo\"]\n    rbdoc --> eerr[/\"500 Error de embedding\"/]\n    eok -->|Sí| ensure[\"ensure_collection + ensure_sqlite_table\"]\n    ensure --> sqlw[\"Escribir metadatos en SQLite (primero)\"]\n    sqlw --> vecw[\"vector_upsert por cada chunk\"]\n    vecw --> vok{\"¿Upsert vectorial OK?\"}\n    vok -->|No| rback[\"Rollback: borrar vectores + fila SQL + KV\"]\n    rback --> eerr\n    vok -->|Sí| idx[\"Encolar auto-índices de metadatos\"]\n    idx --> okok[/\"200 Ingesta completa\"/]\n  end\n\n  subgraph \"Búsqueda híbrida (POST /v1/db/{ns}/search)\"\n    srch[\"search_with_plan\"] --> csize[\"Leer tamaño de colección\"]\n    csize --> plan{\"plan_query:<br/>¿hay sql_filter?\"}\n    plan -->|No| vf1[\"VectorFirst (sin filtro)\"]\n    plan -->|Sí| insp[\"inspect_sql_filter:<br/>estimar coincidencias\"]\n    insp --> empty{\"¿0 coincidencias?\"}\n    empty -->|Sí| sfempty[\"SqlFirst: resultado vacío\"]\n    empty -->|No| selec{\"¿Selectivo o set pequeño<br/>y acotado?\"}\n    selec -->|Sí| sf[\"SqlFirst: pre-filtro SQL,<br/>luego vector\"]\n    selec -->|No| vf2[\"VectorFirst: vector primero,<br/>post-filtro SQL\"]\n    vf1 --> exec[\"Ejecutar estrategia +<br/>ranking por coseno\"]\n    sfempty --> exec\n    sf --> exec\n    vf2 --> exec\n    exec --> hydr[\"hydrate_ranked_documents:<br/>traer docs fuente\"]\n    hydr --> res[/\"200 Resultados + plan + diagnósticos\"/]\n  end\n\n  ruta -->|Ingesta| ing\n  ruta -->|Búsqueda| srch", "notes": "Flujo derivado de src/api/auth.rs (auth_middleware) y src/api/mod.rs (tenant_isolation_middleware), con el núcleo de negocio en src/engine/hub.rs: LumaDatabase::ingest_document (chunking -> embed_batch -> escritura SQLite-primero -> vector_upsert con rollback) y search_with_plan/plan_query (planificador que elige SqlFirst vs VectorFirst según selectividad del filtro SQL, luego hidratación de documentos). Rutas en src/api/routes_hub.rs (/v1/db). Se eligió el nivel 2 (LumaDatabase) por ser el flujo de negocio más representativo; se omiten los flujos primitivos (nivel 1) y NS-Mem (nivel 3) por claridad.", "kind": "flowchart", "source_sha": "4c382dee762e8e6e772a6162c327abb7cc4fbf23"}
 -->
