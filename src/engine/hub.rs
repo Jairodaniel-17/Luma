@@ -157,9 +157,16 @@ impl LumaDatabase {
         let _permit = self.ingest_limit.clone().acquire_owned().await?;
         let ingest_start = std::time::Instant::now();
         let doc_key = format!("doc:{}:{}", namespace, doc_id);
-        self.engine
-            .put_state(doc_key.clone(), raw_json, None, None)
-            .context("store source document")?;
+        // H6: put_state fsyncs the WAL / writes SQLite — run it on the blocking
+        // pool so it doesn't stall a Tokio worker. Owned data is moved in.
+        {
+            let engine = self.engine.clone();
+            let put_key = doc_key.clone();
+            tokio::task::spawn_blocking(move || engine.put_state(put_key, raw_json, None, None))
+                .await
+                .context("join put_state task")?
+                .context("store source document")?;
+        }
 
         let chunk_start = std::time::Instant::now();
         let chunks = self.chunking.split_text(text);
@@ -178,6 +185,11 @@ impl LumaDatabase {
 
         let chunk_strs: Vec<String> = chunks.iter().map(|chunk| chunk.to_string()).collect();
         let embed_start = std::time::Instant::now();
+        // ponytail: H7b — the ingest permit (`_permit`) is held across this await, but
+        // embed_batch is now bounded: every provider HTTP call uses a client built with
+        // connect + total request timeouts (see embeddings::build_http_client), and the
+        // batch makes a finite number of such calls. So the permit is always released
+        // promptly and can't be exhausted forever — no extra tokio::time::timeout needed.
         let vectors = match self.embeddings.embed_batch(&chunk_strs).await {
             Ok(vectors) => vectors,
             Err(err) => {
@@ -221,37 +233,62 @@ impl LumaDatabase {
             .record_us(sql_stage.elapsed().as_micros() as u64);
 
         let vector_stage = std::time::Instant::now();
-        let mut inserted_ids = Vec::with_capacity(chunks.len());
-        for (i, (chunk, vector)) in chunks.iter().zip(vectors).enumerate() {
-            let chunk_id = format!("{}#{}", doc_id, i);
-            let meta = ChunkMetadata {
-                parent_id: doc_id.to_string(),
-                chunk_index: i,
-                text_snippet: chunk.to_string(),
-                metadata: metadata.clone(),
-            };
-            let item = crate::vector::VectorItem {
-                vector,
-                meta: serde_json::to_value(meta).unwrap_or(serde_json::Value::Null),
-                mmap_offset: None,
-            };
-            if let Err(err) = self.engine.vector_upsert(namespace, &chunk_id, item) {
-                self.rollback_ingest(namespace, &doc_key, &inserted_ids);
-                if let Some(sql_svc) = &self.sqlite {
-                    let table = sql_doc_table(namespace);
-                    let _ = sql_svc
-                        .execute(
-                            format!("DELETE FROM {table} WHERE id = ?"),
-                            vec![serde_json::Value::String(doc_id.to_string())],
-                        )
-                        .await;
+        // Build the (chunk_id, item) pairs up front so the blocking task owns everything.
+        let chunk_items: Vec<(String, crate::vector::VectorItem)> = chunks
+            .iter()
+            .zip(vectors)
+            .enumerate()
+            .map(|(i, (chunk, vector))| {
+                let chunk_id = format!("{}#{}", doc_id, i);
+                let meta = ChunkMetadata {
+                    parent_id: doc_id.to_string(),
+                    chunk_index: i,
+                    text_snippet: chunk.to_string(),
+                    metadata: metadata.clone(),
+                };
+                let item = crate::vector::VectorItem {
+                    vector,
+                    meta: serde_json::to_value(meta).unwrap_or(serde_json::Value::Null),
+                    mmap_offset: None,
+                };
+                (chunk_id, item)
+            })
+            .collect();
+
+        // H6: vector_upsert appends to the (fsync'd) WAL — run the whole insert loop on
+        // the blocking pool instead of stalling a Tokio worker. On failure it returns the
+        // partially-inserted ids so we can roll back (which touches async SQLite) here.
+        let upsert_outcome = {
+            let engine = self.engine.clone();
+            let ns = namespace.to_string();
+            tokio::task::spawn_blocking(move || {
+                let mut inserted = Vec::with_capacity(chunk_items.len());
+                for (chunk_id, item) in chunk_items {
+                    if let Err(err) = engine.vector_upsert(&ns, &chunk_id, item) {
+                        return Err((err, inserted));
+                    }
+                    inserted.push(chunk_id);
                 }
-                return Err(anyhow::anyhow!(
-                    "vector insertion failed, rolled back: {}",
-                    err
-                ));
+                Ok(inserted)
+            })
+            .await
+            .context("join vector_upsert task")?
+        };
+        if let Err((err, inserted_ids)) = upsert_outcome {
+            self.rollback_ingest(namespace, &doc_key, &inserted_ids);
+            if let Some(sql_svc) = &self.sqlite {
+                let table = sql_doc_table(namespace);
+                let _ = sql_svc
+                    .execute(
+                        format!("DELETE FROM {table} WHERE id = ?"),
+                        vec![serde_json::Value::String(doc_id.to_string())],
+                    )
+                    .await;
             }
-            inserted_ids.push(chunk_id);
+            return Err(anyhow::anyhow!(
+                "vector insertion failed, rolled back: {}",
+                err
+            ));
         }
         self.engine
             .metrics()
@@ -626,7 +663,13 @@ impl LumaDatabase {
             tasks.spawn(async move {
                 let _permit = permit.acquire_owned().await.ok();
                 let key = format!("doc:{}:{}", namespace, doc.id);
-                let document = engine.get_state(&key).map(|state| state.value);
+                // H6: get_state reads SQLite in state_db mode — offload to the blocking
+                // pool. On join error we fall back to no document rather than panicking.
+                let document = tokio::task::spawn_blocking(move || engine.get_state(&key))
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|state| state.value);
                 HydratedResult {
                     id: doc.id,
                     score: doc.score,
@@ -775,8 +818,10 @@ impl LumaDatabase {
         };
         validate_sql_filter(filter)?;
         let max_ids = self.config.hub_sql_filter_max_ids;
+        // Defense in depth (see validate_sql_filter): wrap the user filter in parens and
+        // put LIMIT on its own line so a trailing comment can't swallow the row cap.
         let query = format!(
-            "SELECT id FROM {} WHERE {} LIMIT {}",
+            "SELECT id FROM {} WHERE ({})\nLIMIT {}",
             sql_doc_table(namespace),
             filter,
             max_ids
@@ -908,6 +953,14 @@ fn validate_sql_filter(filter: &str) -> anyhow::Result<()> {
     if filter.contains(';') {
         anyhow::bail!("invalid sql_filter: statement separator ';' is not allowed");
     }
+    // Reject SQL comment tokens: a trailing `--` (or a `/* */` block) would otherwise
+    // comment out anything appended after the filter — e.g. the `LIMIT` guard in
+    // fetch_allowed_ids_all — letting a caller bypass the row cap.
+    for token in ["--", "/*", "*/"] {
+        if filter.contains(token) {
+            anyhow::bail!("invalid sql_filter: SQL comments ('{token}') are not allowed");
+        }
+    }
 
     let sql = format!("SELECT 1 FROM __t__ WHERE {filter}");
     let mut stmts = Parser::parse_sql(&SQLiteDialect {}, &sql)
@@ -999,9 +1052,23 @@ fn sanitize_sql_identifier(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_hits, expand_vector_first_limit, sql_doc_table, ChunkMetadata, FilterApplication,
-        QueryPlan, QueryStrategy,
+        collapse_hits, expand_vector_first_limit, sql_doc_table, validate_sql_filter,
+        ChunkMetadata, FilterApplication, QueryPlan, QueryStrategy,
     };
+
+    #[test]
+    fn validate_sql_filter_rejects_comment_tokens() {
+        // A trailing line comment would otherwise comment out the appended LIMIT.
+        let err = validate_sql_filter("status = 'active' --").unwrap_err();
+        assert!(err.to_string().contains("comments"));
+        assert!(validate_sql_filter("a = 1 /* x */").is_err());
+        assert!(validate_sql_filter("a = 1 */").is_err());
+    }
+
+    #[test]
+    fn validate_sql_filter_accepts_plain_predicate() {
+        assert!(validate_sql_filter("json_extract(metadata, '$.status') = 'active'").is_ok());
+    }
 
     #[test]
     fn vector_first_expands_candidate_limit() {

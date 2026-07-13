@@ -162,6 +162,11 @@ impl StateStore {
             }
         };
 
+        // Release the shard write lock before touching the expiry heap / secondary
+        // indexes, mirroring apply_put_with_revision to keep a single lock order
+        // (shard → index) across all write paths and avoid a latent deadlock.
+        drop(map);
+
         let item = StateItem {
             key,
             value: value_out,
