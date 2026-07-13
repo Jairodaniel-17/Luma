@@ -114,7 +114,9 @@ async fn security_headers(mut response: axum::response::Response) -> axum::respo
 /// isolate *internally* by the token's tenant id, so exclusive name ownership
 /// must not be imposed on them.
 fn scoped_resource_name(path: &str) -> Option<&str> {
-    for prefix in ["/v1/vector/", "/v1/doc/", "/v1/blob/"] {
+    // `/v1/image/` transforms read the same `blobs/{bucket}/{key}` files as
+    // `/v1/blob/`, so it must inherit the identical per-bucket ownership check.
+    for prefix in ["/v1/vector/", "/v1/doc/", "/v1/blob/", "/v1/image/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
             let seg = rest.split('/').next().unwrap_or("");
             if !seg.is_empty() {
@@ -228,8 +230,13 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         rbac,
         accounts,
     };
-    let cors = match &state.config.cors_allowed_origins {
-        None => CorsLayer::new()
+    let cors = match state.config.cors_allowed_origins.as_deref().map(str::trim) {
+        // No config: same-origin only. An empty CorsLayer emits no
+        // `Access-Control-Allow-*` headers, so browsers block cross-origin
+        // requests. Wide-open `Any/Any/Any` is never the implicit default.
+        None => CorsLayer::new(),
+        // Explicit opt-in to fully permissive CORS.
+        Some("*") => CorsLayer::new()
             .allow_origin(Any)
             .allow_headers(Any)
             .allow_methods(Any),
@@ -447,7 +454,29 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         app.layer(GovernorLayer {
             config: governor_conf,
         })
+        // ponytail: PeerIpKeyExtractor returns 500 (UnableToExtractKey) when no
+        // ConnectInfo<SocketAddr> extension is present. Guarantee one so rate
+        // limiting never crashes requests even if the server is served without
+        // `into_make_service_with_connect_info` (library embedders, tests). Real
+        // per-IP limiting still applies once ConnectInfo is wired — see server.rs.
+        .layer(axum::middleware::from_fn(ensure_connect_info))
     } else {
         app
     }
+}
+
+/// Ensure a `ConnectInfo<SocketAddr>` extension exists on every request so the
+/// rate limiter's peer-IP key extractor never fails. Real connection info (set
+/// by the serving layer) is left untouched; only missing info gets a fallback.
+async fn ensure_connect_info(
+    mut req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::extract::ConnectInfo;
+    use std::net::{Ipv4Addr, SocketAddr};
+    if req.extensions().get::<ConnectInfo<SocketAddr>>().is_none() {
+        let fallback = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+        req.extensions_mut().insert(ConnectInfo(fallback));
+    }
+    next.run(req).await
 }

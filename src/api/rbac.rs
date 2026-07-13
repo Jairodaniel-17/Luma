@@ -31,13 +31,42 @@ pub struct PermissionRecord {
 /// onto a common ladder so a single `require_role` gate works for either.
 /// Custom roles return `None` (treated as sufficient — use `RbacService::can`
 /// for fine-grained checks on those).
-fn role_level(role: &str) -> Option<u32> {
+pub fn role_level(role: &str) -> Option<u32> {
     match role {
         "viewer" | "readonly" => Some(10),
         "member" | "user" => Some(20),
         "admin" => Some(30),
         "owner" => Some(40),
         _ => None,
+    }
+}
+
+/// True when `role` is a *recognized* role at least as privileged as `min`.
+/// Unknown/custom roles on either side are treated as NOT satisfying the check
+/// (conservative — used to prevent privilege grants above the caller's own).
+pub fn role_at_least(role: &str, min: &str) -> bool {
+    matches!((role_level(role), role_level(min)), (Some(r), Some(m)) if r >= m)
+}
+
+/// True when `target` is a *recognized* role strictly less privileged than
+/// `actor`. Used to forbid creating/promoting a principal to a role equal to or
+/// above the caller's own (no self/peer escalation).
+pub fn role_strictly_below(actor: &str, target: &str) -> bool {
+    matches!((role_level(actor), role_level(target)), (Some(a), Some(t)) if t < a)
+}
+
+/// Platform-admin gate. Passes only for a *global* caller (no `tenant_id`, i.e.
+/// a static/admin API key that is not bound to a single org) whose role is
+/// `admin` or `owner`. Guards platform-wide / cross-tenant operations.
+pub fn require_platform_admin(ctx: &TenantContext) -> Result<(), ApiError> {
+    if ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner") {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "platform admin required",
+        ))
     }
 }
 
@@ -381,5 +410,43 @@ impl RbacService {
             )
             .await?;
         Ok(n > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(tenant: Option<&str>, role: &str) -> TenantContext {
+        TenantContext {
+            tenant_id: tenant.map(|s| s.to_string()),
+            user_id: None,
+            role: role.to_string(),
+            permissions: serde_json::json!({}),
+            quotas: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn platform_admin_requires_no_tenant_and_admin_role() {
+        // Global admin/owner pass; anything bound to a tenant (or below admin) fails.
+        assert!(require_platform_admin(&ctx(None, "admin")).is_ok());
+        assert!(require_platform_admin(&ctx(None, "owner")).is_ok());
+        assert!(require_platform_admin(&ctx(Some("org1"), "owner")).is_err());
+        assert!(require_platform_admin(&ctx(Some("org1"), "admin")).is_err());
+        assert!(require_platform_admin(&ctx(None, "member")).is_err());
+    }
+
+    #[test]
+    fn role_comparison_helpers() {
+        assert!(role_at_least("owner", "admin"));
+        assert!(role_at_least("admin", "admin"));
+        assert!(!role_at_least("member", "admin"));
+        assert!(!role_at_least("admin", "custom_unknown")); // unknown target rejected
+        // strictly_below: target must be a known role below the actor.
+        assert!(role_strictly_below("owner", "admin"));
+        assert!(!role_strictly_below("admin", "admin")); // equal is not below
+        assert!(!role_strictly_below("member", "admin"));
+        assert!(!role_strictly_below("owner", "custom_unknown"));
     }
 }

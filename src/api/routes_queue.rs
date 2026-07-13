@@ -11,8 +11,8 @@
 //! requires a valid Bearer api_key.
 
 use crate::api::errors::ApiError;
-use crate::api::AppState;
-use axum::extract::{Path, State};
+use crate::api::{AppState, TenantContext};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -181,19 +181,58 @@ fn ensure_within_root(root: &StdPath, candidate: &StdPath) -> Result<(), ApiErro
     Ok(())
 }
 
-fn resolve_queue_dir(state: &AppState, queue: &str) -> Result<PathBuf, ApiError> {
+/// Per-tenant isolation directory (`t_{tenant}`) under the queues root, or
+/// `None` for a platform admin (who uses the shared top-level namespace).
+/// The tenant id is validated as a path segment to preclude traversal.
+fn tenant_queue_dir(ctx: &TenantContext) -> Result<Option<String>, ApiError> {
+    match &ctx.tenant_id {
+        None => Ok(None),
+        Some(t) => {
+            validate_segment(t)?;
+            Ok(Some(format!("t_{t}")))
+        }
+    }
+}
+
+/// Lock key that keeps two tenants' identically-named queues from sharing a
+/// receive lock.
+fn scoped_lock_key(ctx: &TenantContext, queue: &str) -> String {
+    match &ctx.tenant_id {
+        Some(t) => format!("t_{t}/{queue}"),
+        None => format!("_global/{queue}"),
+    }
+}
+
+fn resolve_queue_dir(
+    state: &AppState,
+    ctx: &TenantContext,
+    queue: &str,
+) -> Result<PathBuf, ApiError> {
     validate_queue(queue)?;
     let root = queues_root(state);
-    let path = root.join(queue);
+    let mut path = root.clone();
+    if let Some(td) = tenant_queue_dir(ctx)? {
+        path = path.join(td);
+    }
+    let path = path.join(queue);
     ensure_within_root(&root, &path)?;
     Ok(path)
 }
 
-fn resolve_message_path(state: &AppState, queue: &str, id: &str) -> Result<PathBuf, ApiError> {
+fn resolve_message_path(
+    state: &AppState,
+    ctx: &TenantContext,
+    queue: &str,
+    id: &str,
+) -> Result<PathBuf, ApiError> {
     validate_queue(queue)?;
     validate_id(id)?;
     let root = queues_root(state);
-    let path = root.join(queue).join(format!("{id}.json"));
+    let mut path = root.clone();
+    if let Some(td) = tenant_queue_dir(ctx)? {
+        path = path.join(td);
+    }
+    let path = path.join(queue).join(format!("{id}.json"));
     ensure_within_root(&root, &path)?;
     Ok(path)
 }
@@ -231,10 +270,11 @@ async fn write_message_atomic(dir: &StdPath, msg: &StoredMessage) -> Result<(), 
 /// POST /v1/queue/:queue — enqueue a message.
 pub async fn enqueue(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(queue): Path<String>,
     axum::Json(req): axum::Json<EnqueueRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let dir = resolve_queue_dir(&state, &queue)?;
+    let dir = resolve_queue_dir(&state, &ctx, &queue)?;
     let delay = req.delay_secs.unwrap_or(0);
     check_delay(delay)?;
 
@@ -298,18 +338,20 @@ async fn list_message_files(dir: &StdPath) -> Result<Vec<PathBuf>, ApiError> {
 /// POST /v1/queue/:queue/receive — claim up to `max` visible messages.
 pub async fn receive(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(queue): Path<String>,
     body: Option<axum::Json<ReceiveRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let dir = resolve_queue_dir(&state, &queue)?;
+    let dir = resolve_queue_dir(&state, &ctx, &queue)?;
     let req = body.map(|b| b.0).unwrap_or_default();
 
     let max = req.max.unwrap_or(DEFAULT_RECEIVE).clamp(1, MAX_RECEIVE);
     let visibility = req.visibility_secs.unwrap_or(DEFAULT_VISIBILITY_SECS);
     check_delay(visibility)?;
 
-    // Serialize receives per queue so two callers can't claim the same message.
-    let lock = receive_lock(&queue).await;
+    // Serialize receives per (tenant, queue) so two callers can't claim the
+    // same message, without colliding across tenants sharing a queue name.
+    let lock = receive_lock(&scoped_lock_key(&ctx, &queue)).await;
     let _guard = lock.lock().await;
 
     let now = now_millis();
@@ -344,9 +386,10 @@ pub async fn receive(
 /// DELETE /v1/queue/:queue/:id — ack/delete a message (idempotent).
 pub async fn ack(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path((queue, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let path = resolve_message_path(&state, &queue, &id)?;
+    let path = resolve_message_path(&state, &ctx, &queue, &id)?;
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -358,9 +401,10 @@ pub async fn ack(
 /// GET /v1/queue/:queue — queue stats.
 pub async fn stats(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(queue): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let dir = resolve_queue_dir(&state, &queue)?;
+    let dir = resolve_queue_dir(&state, &ctx, &queue)?;
     let now = now_millis();
     let files = list_message_files(&dir).await?;
 

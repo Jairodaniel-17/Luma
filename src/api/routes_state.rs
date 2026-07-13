@@ -1,10 +1,38 @@
 use crate::api::errors::{ApiError, ErrorBody};
-use crate::api::AppState;
+use crate::api::{AppState, TenantContext};
 use crate::engine::{EngineError, StateError};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
+
+/// Per-tenant keyspace isolation for the global state store.
+///
+/// A tenant-bound caller's keys are transparently prefixed with `"{tenant}:"`
+/// so no two orgs can ever read or overwrite each other's keys. A platform
+/// admin (no `tenant_id`) operates on the raw keyspace unmodified — a
+/// superuser view that also spans the tenant-prefixed partitions.
+fn scope_key(ctx: &TenantContext, key: &str) -> String {
+    match &ctx.tenant_id {
+        Some(t) => format!("{t}:{key}"),
+        None => key.to_string(),
+    }
+}
+
+/// The `"{tenant}:"` prefix for the caller, or `None` for a platform admin.
+fn tenant_prefix(ctx: &TenantContext) -> Option<String> {
+    ctx.tenant_id.as_ref().map(|t| format!("{t}:"))
+}
+
+/// Strip the tenant prefix from a returned key so callers only ever see their
+/// own unprefixed keys.
+fn unscope_key(prefix: &Option<String>, key: &mut String) {
+    if let Some(p) = prefix {
+        if let Some(stripped) = key.strip_prefix(p.as_str()) {
+            *key = stripped.to_string();
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -40,6 +68,7 @@ pub struct CreateIndexBody {
 
 pub async fn list(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if let Some(prefix) = &q.prefix {
@@ -77,18 +106,47 @@ pub async fn list(
         ));
     }
     let limit = q.limit.unwrap_or(100).min(1000);
-    let items = if q.prefix.is_some() {
-        state.engine.list_state(q.prefix.as_deref(), limit)
-    } else {
-        state
-            .engine
-            .list_state_range(q.start.as_deref(), q.end.as_deref(), limit)
+    let tp = tenant_prefix(&ctx);
+    let mut items = match &tp {
+        // Platform admin: raw keyspace, unchanged behavior.
+        None => {
+            if q.prefix.is_some() {
+                state.engine.list_state(q.prefix.as_deref(), limit)
+            } else {
+                state
+                    .engine
+                    .list_state_range(q.start.as_deref(), q.end.as_deref(), limit)
+            }
+        }
+        // Tenant: confine every scan to the caller's `"{tenant}:"` partition.
+        Some(tp) => {
+            if q.start.is_some() || q.end.is_some() {
+                let start = format!("{tp}{}", q.start.as_deref().unwrap_or(""));
+                // Missing upper bound => end of the partition. ':' is 0x3A, so
+                // replacing it with ';' (0x3B) is the first key past the prefix.
+                let end = q
+                    .end
+                    .as_deref()
+                    .map(|e| format!("{tp}{e}"))
+                    .unwrap_or_else(|| format!("{};", &tp[..tp.len() - 1]));
+                state
+                    .engine
+                    .list_state_range(Some(&start), Some(&end), limit)
+            } else {
+                let prefix = format!("{tp}{}", q.prefix.as_deref().unwrap_or(""));
+                state.engine.list_state(Some(&prefix), limit)
+            }
+        }
     };
+    for item in items.iter_mut() {
+        unscope_key(&tp, &mut item.key);
+    }
     Ok(axum::Json(items))
 }
 
 pub async fn get(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(key): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     if key.len() > state.config.max_key_len {
@@ -98,13 +156,15 @@ pub async fn get(
             "key too long",
         ));
     }
-    let Some(item) = state.engine.get_state(&key) else {
+    let Some(mut item) = state.engine.get_state(&scope_key(&ctx, &key)) else {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
             "key not found",
         ));
     };
+    // Return the caller's original (unprefixed) key.
+    item.key = key;
     Ok(axum::Json(item))
 }
 
@@ -156,6 +216,7 @@ pub enum BatchPutResult {
 
 pub async fn put(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(key): Path<String>,
     axum::Json(body): axum::Json<PutBody>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -178,9 +239,10 @@ pub async fn put(
     }
     match state
         .engine
-        .put_state(key.clone(), body.value, body.ttl_ms, body.if_revision)
+        .put_state(scope_key(&ctx, &key), body.value, body.ttl_ms, body.if_revision)
     {
         Ok(item) => Ok(axum::Json(PutResponse {
+            // Echo back the caller's original (unprefixed) key.
             key,
             revision: item.revision,
             expires_at_ms: item.expires_at_ms,
@@ -205,6 +267,7 @@ pub async fn put(
 
 pub async fn batch_put(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     axum::Json(body): axum::Json<BatchPutBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.operations.is_empty() {
@@ -247,7 +310,7 @@ pub async fn batch_put(
         }
         match state
             .engine
-            .put_state(op.key.clone(), op.value, op.ttl_ms, op.if_revision)
+            .put_state(scope_key(&ctx, &op.key), op.value, op.ttl_ms, op.if_revision)
         {
             Ok(item) => results.push(BatchPutResult::Ok {
                 key: op.key,
@@ -290,6 +353,7 @@ pub struct DeleteResponse {
 
 pub async fn delete(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path(key): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     if key.len() > state.config.max_key_len {
@@ -299,7 +363,10 @@ pub async fn delete(
             "key too long",
         ));
     }
-    let deleted = state.engine.delete_state(&key).map_err(|err| match err {
+    let deleted = state
+        .engine
+        .delete_state(&scope_key(&ctx, &key))
+        .map_err(|err| match err {
         EngineError::Persistence(_) => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "persistence_error",
@@ -332,14 +399,61 @@ pub async fn create_index(
     })))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(tenant: Option<&str>) -> TenantContext {
+        TenantContext {
+            tenant_id: tenant.map(|s| s.to_string()),
+            user_id: None,
+            role: "user".to_string(),
+            permissions: serde_json::json!({}),
+            quotas: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn key_scoping_is_reversible_and_tenant_bound() {
+        let t = ctx(Some("orgA"));
+        assert_eq!(scope_key(&t, "foo"), "orgA:foo");
+        let p = tenant_prefix(&t);
+        let mut k = scope_key(&t, "foo");
+        unscope_key(&p, &mut k);
+        assert_eq!(k, "foo");
+
+        // Platform admin: no prefixing, no stripping.
+        let admin = ctx(None);
+        assert_eq!(scope_key(&admin, "foo"), "foo");
+        assert!(tenant_prefix(&admin).is_none());
+
+        // A tenant's prefix never matches another tenant's keys.
+        let other = tenant_prefix(&ctx(Some("orgB")));
+        let mut leaked = "orgA:secret".to_string();
+        unscope_key(&other, &mut leaked);
+        assert_eq!(leaked, "orgA:secret", "orgB prefix must not strip orgA keys");
+    }
+}
+
 pub async fn query_index(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     Path((field, value)): Path<(String, String)>,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let limit = q.limit.unwrap_or(100).min(1000);
-    let items = state
+    let mut items = state
         .engine
         .query_state_secondary_index(&field, &value, limit);
+    // Secondary-index hits span the whole keyspace; a tenant may only see hits
+    // inside their own partition. ponytail: filtering after the limit can yield
+    // fewer than `limit` rows for a tenant — acceptable for a secondary index.
+    let tp = tenant_prefix(&ctx);
+    if let Some(p) = &tp {
+        items.retain(|item| item.key.starts_with(p.as_str()));
+        for item in items.iter_mut() {
+            unscope_key(&tp, &mut item.key);
+        }
+    }
     Ok(axum::Json(items))
 }

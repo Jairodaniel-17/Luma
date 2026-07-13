@@ -299,30 +299,48 @@ impl AccountsService {
             .collect())
     }
 
-    pub async fn update_user_role(&self, id: &str, role: &str) -> anyhow::Result<bool> {
+    /// Update a user's role. When `org_scope` is `Some`, the update is confined
+    /// to that org (`AND org_id = ?`) so a tenant admin can never mutate a user
+    /// in another org; `None` (platform admin) targets any user by id.
+    pub async fn update_user_role(
+        &self,
+        id: &str,
+        org_scope: Option<&str>,
+        role: &str,
+    ) -> anyhow::Result<bool> {
         self.ensure_init().await?;
         if !ENTERPRISE_ROLES.contains(&role) {
             anyhow::bail!("invalid role '{role}'");
         }
-        let n = self
-            .sqlite
-            .execute(
+        let (sql, params) = match org_scope {
+            Some(org) => (
+                "UPDATE sys_users SET role = ? WHERE id = ? AND org_id = ?".to_string(),
+                vec![json!(role), json!(id), json!(org)],
+            ),
+            None => (
                 "UPDATE sys_users SET role = ? WHERE id = ?".to_string(),
                 vec![json!(role), json!(id)],
-            )
-            .await?;
+            ),
+        };
+        let n = self.sqlite.execute(sql, params).await?;
         Ok(n > 0)
     }
 
-    pub async fn delete_user(&self, id: &str) -> anyhow::Result<bool> {
+    /// Delete a user. When `org_scope` is `Some`, the delete is confined to that
+    /// org (`AND org_id = ?`); `None` (platform admin) targets any user by id.
+    pub async fn delete_user(&self, id: &str, org_scope: Option<&str>) -> anyhow::Result<bool> {
         self.ensure_init().await?;
-        let n = self
-            .sqlite
-            .execute(
+        let (sql, params) = match org_scope {
+            Some(org) => (
+                "DELETE FROM sys_users WHERE id = ? AND org_id = ?".to_string(),
+                vec![json!(id), json!(org)],
+            ),
+            None => (
                 "DELETE FROM sys_users WHERE id = ?".to_string(),
                 vec![json!(id)],
-            )
-            .await?;
+            ),
+        };
+        let n = self.sqlite.execute(sql, params).await?;
         Ok(n > 0)
     }
 
@@ -580,9 +598,21 @@ impl AccountsService {
                     .await,
             ),
         };
-        let orgs = self
-            .count("SELECT COUNT(*) as c FROM sys_orgs", vec![])
-            .await;
+        // Scope the org count too: a tenant-bound caller sees only their own org
+        // (0/1), never the cluster-wide total.
+        let orgs = match org_id {
+            Some(org) => {
+                self.count(
+                    "SELECT COUNT(*) as c FROM sys_orgs WHERE id = ?",
+                    vec![json!(org)],
+                )
+                .await
+            }
+            None => {
+                self.count("SELECT COUNT(*) as c FROM sys_orgs", vec![])
+                    .await
+            }
+        };
         let audit_events = match org_id {
             Some(org) => {
                 self.count(

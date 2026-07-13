@@ -4,7 +4,7 @@
 
 use crate::api::accounts::{AccountsService, SessionIdentity};
 use crate::api::errors::ApiError;
-use crate::api::rbac::require_role;
+use crate::api::rbac::{require_platform_admin, require_role, role_strictly_below};
 use crate::api::{AppState, TenantContext};
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -64,10 +64,19 @@ pub async fn register(
             "password must be at least 8 characters",
         ));
     }
+    // Generic 409 on any conflict (e.g. duplicate email) — do not echo the raw
+    // DB error, which would leak that an account for this email already exists.
     let (org, user) = svc
         .register(&body.org_name, &body.email, &body.password)
         .await
-        .map_err(|e| ApiError::new(StatusCode::CONFLICT, "conflict", e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!("register failed: {e}");
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                "registration could not be completed",
+            )
+        })?;
     svc.record_event(
         Some(&org.id),
         Some(&user.id),
@@ -198,6 +207,12 @@ pub async fn list_orgs(
     require_role(&ctx, "admin")?;
     let svc = accounts(&state)?;
     let orgs = svc.list_orgs().await.map_err(internal)?;
+    // A tenant-bound admin/owner may only see their own org; platform admins
+    // (no tenant) see every org.
+    let orgs = match &ctx.tenant_id {
+        None => orgs,
+        Some(tid) => orgs.into_iter().filter(|o| &o.id == tid).collect(),
+    };
     Ok(Json(json!({ "orgs": orgs })))
 }
 
@@ -212,7 +227,8 @@ pub async fn create_org(
     headers: HeaderMap,
     Json(body): Json<CreateOrgBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_role(&ctx, "admin")?;
+    // Creating a brand-new org is a platform-wide operation.
+    require_platform_admin(&ctx)?;
     let svc = accounts(&state)?;
     let org = svc.create_org(&body.name).await.map_err(internal)?;
     svc.record_event(
@@ -235,6 +251,17 @@ pub async fn delete_org(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_role(&ctx, "admin")?;
+    // No cross-tenant IDOR: a tenant-bound admin may only delete their own org.
+    // Return 404 (not 403) so the existence of other orgs is not revealed.
+    if let Some(tid) = &ctx.tenant_id {
+        if tid != &id {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "org not found",
+            ));
+        }
+    }
     let svc = accounts(&state)?;
     let ok = svc.delete_org(&id).await.map_err(internal)?;
     if !ok {
@@ -297,6 +324,17 @@ pub async fn create_user(
             "password must be at least 8 characters",
         ));
     }
+    let is_platform_admin =
+        ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner");
+    // No self/peer escalation: a tenant-bound admin/owner may only create users
+    // strictly below their own role. Platform admins may seed any role.
+    if !is_platform_admin && !role_strictly_below(&ctx.role, &body.role) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "cannot create a user with a role at or above your own",
+        ));
+    }
     let org_id = match &ctx.tenant_id {
         Some(org) => org.clone(),
         None => body.org_id.clone().ok_or_else(|| {
@@ -342,9 +380,21 @@ pub async fn update_user_role(
     Json(body): Json<UpdateUserRoleBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_role(&ctx, "admin")?;
+    let is_platform_admin =
+        ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner");
+    // No promoting a user to a role at or above the caller's own.
+    if !is_platform_admin && !role_strictly_below(&ctx.role, &body.role) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "cannot assign a role at or above your own",
+        ));
+    }
     let svc = accounts(&state)?;
+    // Scope the update to the caller's own tenant (no cross-tenant IDOR).
+    // Platform admins (no tenant) may target any user.
     let ok = svc
-        .update_user_role(&id, &body.role)
+        .update_user_role(&id, ctx.tenant_id.as_deref(), &body.role)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
     if !ok {
@@ -375,7 +425,12 @@ pub async fn delete_user(
 ) -> Result<impl IntoResponse, ApiError> {
     require_role(&ctx, "admin")?;
     let svc = accounts(&state)?;
-    let ok = svc.delete_user(&id).await.map_err(internal)?;
+    // Scope the delete to the caller's own tenant (no cross-tenant IDOR).
+    // Platform admins (no tenant) may target any user.
+    let ok = svc
+        .delete_user(&id, ctx.tenant_id.as_deref())
+        .await
+        .map_err(internal)?;
     if !ok {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
@@ -408,11 +463,14 @@ pub async fn stats(
         .stats(ctx.tenant_id.as_deref())
         .await
         .map_err(internal)?;
-    // Enrich with live storage size of the SQLite database.
-    if let Some(db) = crate::backup::sqlite_db_path(&state.config) {
-        if let Ok(meta) = std::fs::metadata(&db) {
-            if let Some(obj) = stats.as_object_mut() {
-                obj.insert("storage_bytes".to_string(), json!(meta.len()));
+    // The live DB size covers every tenant, so only expose it to platform
+    // admins — a tenant-bound caller must not learn whole-cluster storage.
+    if ctx.tenant_id.is_none() {
+        if let Some(db) = crate::backup::sqlite_db_path(&state.config) {
+            if let Ok(meta) = std::fs::metadata(&db) {
+                if let Some(obj) = stats.as_object_mut() {
+                    obj.insert("storage_bytes".to_string(), json!(meta.len()));
+                }
             }
         }
     }
