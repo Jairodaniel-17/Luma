@@ -1,50 +1,46 @@
-# Flujo NS-Mem: ingesta de evento y recall (memoria de agente)
+# Flujo híbrido de LumaDatabase: ingesta y búsqueda de documentos
 
-_tipo: flowchart_ · _origen: d0337b8c798f_
+_tipo: flowchart_ · _origen: cf506069f3c1_
 
 ```mermaid
 flowchart TD
-  ini(["Cliente / Agente LLM"]) --> op{"¿Operación?"}
-  op -->|POST ingest_event| ing["ingest_event(namespace, texto)"]
-  op -->|POST query| qry["query(namespace, request)"]
+  ini(["Cliente HTTP /v1/db"]) --> op{"¿Ingestar o buscar?"}
 
-  subgraph "Ingesta y consolidación"
-    ing --> schema["ensure_schema"]
-    schema --> rec["Crear MemoryRecord<br/>kind=Episodic, status=Active"]
-    rec --> persist["persist_memory_record<br/>tabla memory_records SQLite"]
-    persist --> index["index_memory_record<br/>embed + vector_upsert"]
-    index --> work{"¿session_id presente?"}
-    work -->|Sí| kv["persist_working_memory<br/>KV con TTL"]
-    work -->|No| cons
-    kv --> cons["consolidator.process<br/>LLM/heurística extrae FactCandidate"]
-    cons --> conf{"¿confianza >= umbral 0.85?"}
-    conf -->|Sí| factA["upsert_fact status=active"]
-    conf -->|No| factD["upsert_fact status=draft"]
-    factA --> edge["Crear arista TriggeredBy<br/>episodic to semantic"]
-    factD --> edge
-    edge --> okIng(["Devuelve MemoryRecord"])
+  subgraph "Ingesta de documento"
+    op -->|Ingestar| perm["Adquirir permiso de concurrencia"]
+    perm --> store["Guardar documento original en KV state<br/>doc:ns:id"]
+    store --> chunk["Dividir texto en chunks"]
+    chunk --> emptychk{"¿Chunks vacios?"}
+    emptychk -->|Si| finok(["Fin: nada que indexar"])
+    emptychk -->|No| embed["Generar embeddings por lote<br/>embed_batch"]
+    embed --> embok{"¿Embedding exitoso?"}
+    embok -->|No| delkv["Borrar doc del KV y abortar"]
+    delkv --> ferr(["Fin: error de ingesta"])
+    embok -->|Si| ensure["Asegurar coleccion vectorial y tabla SQLite"]
+    ensure --> sqlw["Escribir fila de metadatos en SQLite<br/>primero por seguridad ante crash"]
+    sqlw --> vecw["Upsert de cada chunk-vector en el vector store"]
+    vecw --> vecok{"¿Upsert vectorial OK?"}
+    vecok -->|No| rollback["Rollback: borrar vectores, fila SQL y KV"]
+    rollback --> ferr
+    vecok -->|Si| idx["Encolar auto-indexado de campos de metadatos"]
+    idx --> done(["Fin: ingesta completada"])
   end
 
-  subgraph "Recall / consulta"
-    qry --> mode{"¿Modo?"}
-    mode -->|timeline| tl["timeline: eventos episodic<br/>por entity_id, orden desc"]
-    mode -->|next_step| ns["next_step: DAG procedural"]
-    mode -->|recall/semantic| emb["embed(query)"]
-    tl --> resp
-    ns --> resp
-    emb --> knn["Paso 1: K-NN seeds<br/>semantic + episodic"]
-    knn --> hasG{"¿GraphService activo?"}
-    hasG -->|Sí| walk["Paso 2: Semantic Walk BFS<br/>cosine x edge_factor x (1+centrality)"]
-    hasG -->|No| flat["Fallback: lista plana de seeds"]
-    walk --> filt["Paso 3: hidratar records<br/>filtrar archived, dedup, top-k"]
-    flat --> filt
-    filt --> resp(["MemoryQueryResponse<br/>results + evidence"])
+  subgraph "Busqueda hibrida"
+    op -->|Buscar| plan["Planificar query segun tamano y filtro SQL"]
+    plan --> strat{"¿Estrategia del planner?"}
+    strat -->|SqlFirst| sqlf["Pre-filtrar candidatos con SQL<br/>luego rankear por vector"]
+    strat -->|VectorFirst| vecf["Buscar por vector (HNSW/IVF/DiskANN)<br/>luego aplicar filtro"]
+    sqlf --> hyd["Hidratar documentos rankeados desde KV/SQLite"]
+    vecf --> hyd
+    hyd --> resp[/"Devolver resultados + plan + diagnosticos"/]
+    resp --> finq(["Fin: respuesta al cliente"])
   end
 ```
 
-Flujo derivado del código real de la capa Level 3 (NS-Mem). Ingesta: src/memory/ingest.rs (ingest_event, upsert_fact, index_memory_record, persist_working_memory) + consolidación descrita en consolidator.process. Recall: src/memory/retrieval.rs (query resuelve modo timeline/next_step/recall; recall hace K-NN seeds, semantic walk BFS sobre memory_edges y filtrado). Umbral de promoción 0.85 y factores de arista tomados de CLAUDE.md/config. Es el flujo de negocio más representativo del motor de memoria para agentes; existe además el flujo hibrido de LumaDatabase (src/engine/hub.rs: ingest_document y search_with_plan con planner SQL-first/vector-first) no diagramado aqui por brevedad.
+Flujo derivado de src/engine/hub.rs: LumaDatabase (Level 2). Ingesta = ingest_document() (KV store -> chunking -> embed_batch -> ensure collection/tabla -> escritura SQLite primero -> upsert vectorial con rollback -> auto-indexado de metadatos). Busqueda = search_with_plan() con plan_query() eligiendo QueryStrategy::SqlFirst o VectorFirst, seguido de hydrate_ranked_documents(). Se omiten Level 1 (primitivas) y Level 3 (NS-Mem) por claridad; el hub es el orquestador mas representativo del negocio.
 
 
 <!-- tooling:diagram
-{"has_content": true, "title": "Flujo NS-Mem: ingesta de evento y recall (memoria de agente)", "mermaid": "flowchart TD\n  ini([\"Cliente / Agente LLM\"]) --> op{\"¿Operación?\"}\n  op -->|POST ingest_event| ing[\"ingest_event(namespace, texto)\"]\n  op -->|POST query| qry[\"query(namespace, request)\"]\n\n  subgraph \"Ingesta y consolidación\"\n    ing --> schema[\"ensure_schema\"]\n    schema --> rec[\"Crear MemoryRecord<br/>kind=Episodic, status=Active\"]\n    rec --> persist[\"persist_memory_record<br/>tabla memory_records SQLite\"]\n    persist --> index[\"index_memory_record<br/>embed + vector_upsert\"]\n    index --> work{\"¿session_id presente?\"}\n    work -->|Sí| kv[\"persist_working_memory<br/>KV con TTL\"]\n    work -->|No| cons\n    kv --> cons[\"consolidator.process<br/>LLM/heurística extrae FactCandidate\"]\n    cons --> conf{\"¿confianza >= umbral 0.85?\"}\n    conf -->|Sí| factA[\"upsert_fact status=active\"]\n    conf -->|No| factD[\"upsert_fact status=draft\"]\n    factA --> edge[\"Crear arista TriggeredBy<br/>episodic to semantic\"]\n    factD --> edge\n    edge --> okIng([\"Devuelve MemoryRecord\"])\n  end\n\n  subgraph \"Recall / consulta\"\n    qry --> mode{\"¿Modo?\"}\n    mode -->|timeline| tl[\"timeline: eventos episodic<br/>por entity_id, orden desc\"]\n    mode -->|next_step| ns[\"next_step: DAG procedural\"]\n    mode -->|recall/semantic| emb[\"embed(query)\"]\n    tl --> resp\n    ns --> resp\n    emb --> knn[\"Paso 1: K-NN seeds<br/>semantic + episodic\"]\n    knn --> hasG{\"¿GraphService activo?\"}\n    hasG -->|Sí| walk[\"Paso 2: Semantic Walk BFS<br/>cosine x edge_factor x (1+centrality)\"]\n    hasG -->|No| flat[\"Fallback: lista plana de seeds\"]\n    walk --> filt[\"Paso 3: hidratar records<br/>filtrar archived, dedup, top-k\"]\n    flat --> filt\n    filt --> resp([\"MemoryQueryResponse<br/>results + evidence\"])\n  end", "notes": "Flujo derivado del código real de la capa Level 3 (NS-Mem). Ingesta: src/memory/ingest.rs (ingest_event, upsert_fact, index_memory_record, persist_working_memory) + consolidación descrita en consolidator.process. Recall: src/memory/retrieval.rs (query resuelve modo timeline/next_step/recall; recall hace K-NN seeds, semantic walk BFS sobre memory_edges y filtrado). Umbral de promoción 0.85 y factores de arista tomados de CLAUDE.md/config. Es el flujo de negocio más representativo del motor de memoria para agentes; existe además el flujo hibrido de LumaDatabase (src/engine/hub.rs: ingest_document y search_with_plan con planner SQL-first/vector-first) no diagramado aqui por brevedad.", "kind": "flowchart", "source_sha": "d0337b8c798ffb071131a3f80e956f39c79a9cfa"}
+{"has_content": true, "title": "Flujo híbrido de LumaDatabase: ingesta y búsqueda de documentos", "mermaid": "flowchart TD\n  ini([\"Cliente HTTP /v1/db\"]) --> op{\"¿Ingestar o buscar?\"}\n\n  subgraph \"Ingesta de documento\"\n    op -->|Ingestar| perm[\"Adquirir permiso de concurrencia\"]\n    perm --> store[\"Guardar documento original en KV state<br/>doc:ns:id\"]\n    store --> chunk[\"Dividir texto en chunks\"]\n    chunk --> emptychk{\"¿Chunks vacios?\"}\n    emptychk -->|Si| finok([\"Fin: nada que indexar\"])\n    emptychk -->|No| embed[\"Generar embeddings por lote<br/>embed_batch\"]\n    embed --> embok{\"¿Embedding exitoso?\"}\n    embok -->|No| delkv[\"Borrar doc del KV y abortar\"]\n    delkv --> ferr([\"Fin: error de ingesta\"])\n    embok -->|Si| ensure[\"Asegurar coleccion vectorial y tabla SQLite\"]\n    ensure --> sqlw[\"Escribir fila de metadatos en SQLite<br/>primero por seguridad ante crash\"]\n    sqlw --> vecw[\"Upsert de cada chunk-vector en el vector store\"]\n    vecw --> vecok{\"¿Upsert vectorial OK?\"}\n    vecok -->|No| rollback[\"Rollback: borrar vectores, fila SQL y KV\"]\n    rollback --> ferr\n    vecok -->|Si| idx[\"Encolar auto-indexado de campos de metadatos\"]\n    idx --> done([\"Fin: ingesta completada\"])\n  end\n\n  subgraph \"Busqueda hibrida\"\n    op -->|Buscar| plan[\"Planificar query segun tamano y filtro SQL\"]\n    plan --> strat{\"¿Estrategia del planner?\"}\n    strat -->|SqlFirst| sqlf[\"Pre-filtrar candidatos con SQL<br/>luego rankear por vector\"]\n    strat -->|VectorFirst| vecf[\"Buscar por vector (HNSW/IVF/DiskANN)<br/>luego aplicar filtro\"]\n    sqlf --> hyd[\"Hidratar documentos rankeados desde KV/SQLite\"]\n    vecf --> hyd\n    hyd --> resp[/\"Devolver resultados + plan + diagnosticos\"/]\n    resp --> finq([\"Fin: respuesta al cliente\"])\n  end", "notes": "Flujo derivado de src/engine/hub.rs: LumaDatabase (Level 2). Ingesta = ingest_document() (KV store -> chunking -> embed_batch -> ensure collection/tabla -> escritura SQLite primero -> upsert vectorial con rollback -> auto-indexado de metadatos). Busqueda = search_with_plan() con plan_query() eligiendo QueryStrategy::SqlFirst o VectorFirst, seguido de hydrate_ranked_documents(). Se omiten Level 1 (primitivas) y Level 3 (NS-Mem) por claridad; el hub es el orquestador mas representativo del negocio.", "kind": "flowchart", "source_sha": "cf506069f3c1b0a2f8860fa79b09d3b9d4359ccc"}
 -->
