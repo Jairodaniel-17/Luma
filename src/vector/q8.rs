@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Maximum dimension for which the i32 dot-product accumulator provably cannot
+/// overflow. Each product of two `i8` values is bounded by `127 * 127 = 16_129`,
+/// so a sum of `dim` products stays within `i32::MAX` while
+/// `dim <= i32::MAX / 16_129 = 133_143`. Beyond this the i32 accumulator (both
+/// the scalar loop and the AVX2 `_mm256_madd_epi16` lanes) could silently wrap;
+/// a debug_assert guards against it. All realistic embedding dims (<= a few
+/// thousand) are far below this ceiling.
+pub const MAX_SAFE_DIM: usize = (i32::MAX as usize) / (127 * 127);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QuantizedVec {
     pub scale: f32,
@@ -44,6 +53,14 @@ pub fn dot(a: &QuantizedVec, b: &QuantizedVec, simd_enabled: bool) -> f32 {
 }
 
 fn dot_i8_inner(a: &[i8], b: &[i8], simd_enabled: bool) -> i32 {
+    // The i32 accumulator can only wrap past MAX_SAFE_DIM (~133k dims); catch
+    // that in debug builds rather than returning a silently corrupted score.
+    debug_assert!(
+        a.len() <= MAX_SAFE_DIM,
+        "i8 dot product accumulator may overflow i32 for dim {} > {}",
+        a.len(),
+        MAX_SAFE_DIM
+    );
     if simd_enabled {
         #[cfg(target_arch = "x86_64")]
         {
@@ -103,6 +120,18 @@ unsafe fn dot_i8_avx2(a: &[i8], b: &[i8]) -> i32 {
 mod tests {
     use super::*;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    #[test]
+    fn max_safe_dim_does_not_overflow_i32() {
+        // The worst case is every element == 127 (or -128 for one side, but
+        // clamped quantization only yields [-127, 127]). At exactly MAX_SAFE_DIM
+        // the accumulated i32 must not overflow.
+        let dim = MAX_SAFE_DIM;
+        let worst = 127i32 * 127i32 * dim as i32;
+        assert!(worst > 0, "MAX_SAFE_DIM sum must stay positive (no i32 wrap)");
+        // And one dim beyond would overflow (checked arithmetic returns None).
+        assert!((127i32 * 127i32).checked_mul((dim + 1) as i32).is_none());
+    }
 
     #[test]
     fn quantize_preserves_length() {

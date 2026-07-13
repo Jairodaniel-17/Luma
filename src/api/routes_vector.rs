@@ -751,6 +751,11 @@ fn map_vector_error(err: VectorError) -> ApiError {
             "storage_quota_exceeded",
             "collection has reached its maximum vector limit",
         ),
+        VectorError::InvalidFilterField => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "metadata filter field contains invalid characters",
+        ),
     }
 }
 
