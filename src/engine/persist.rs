@@ -203,6 +203,8 @@ impl Persist {
             *self.0.current_segment.lock() = seg;
             path = self.segment_path(seg);
             ensure_file_exists(&path)?;
+            // New segment file created on rotation: make its directory entry durable.
+            fsync_dir(&self.0.dir)?;
         }
 
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -242,6 +244,8 @@ impl Persist {
         f.sync_data()?;
         drop(f);
         std::fs::rename(tmp, self.snapshot_path())?;
+        // Durably record the snapshot rename in the directory entry.
+        fsync_dir(&self.0.dir)?;
 
         let seg = {
             let mut current = self.0.current_segment.lock();
@@ -256,6 +260,8 @@ impl Persist {
             .open(path)?;
         f.flush()?;
         f.sync_data()?;
+        // Durably record the new segment file in the directory entry.
+        fsync_dir(&self.0.dir)?;
 
         self.enforce_retention_locked(seg)?;
         Ok(())
@@ -268,10 +274,9 @@ impl Persist {
         vectors: &VectorStore,
         events: &EventBus,
     ) -> std::io::Result<ReplayReport> {
-        self.for_each_decoded_event_since(since_offset, |ev, report| {
+        self.for_each_decoded_event_since(since_offset, |ev, _| {
             apply_event(state, vectors, &ev);
             events.set_next_offset(ev.offset.saturating_add(1));
-            report.applied += 1;
             Ok(true)
         })
     }
@@ -300,10 +305,7 @@ impl Persist {
     }
 
     pub fn replay_report(&self, since_offset: u64) -> std::io::Result<ReplayReport> {
-        self.for_each_decoded_event_since(since_offset, |_ev, report| {
-            report.applied += 1;
-            Ok(true)
-        })
+        self.for_each_decoded_event_since(since_offset, |_ev, _| Ok(true))
     }
 
     pub fn earliest_persisted_offset(&self) -> std::io::Result<Option<u64>> {
@@ -347,17 +349,42 @@ impl Persist {
         let mut report = ReplayReport::default();
         let mut last_seen_offset = since_offset;
 
-        for path in list_segments_sorted(&self.0.dir) {
+        let segments = list_segments_sorted(&self.0.dir);
+        let last_segment_idx = segments.len().saturating_sub(1);
+        for (seg_idx, path) in segments.iter().enumerate() {
             let file = File::open(path)?;
             let reader = BufReader::new(file);
-            for line in reader.lines() {
+            // Peekable so we can tell whether a bad record is the very last line
+            // (a torn/partial tail from an interrupted append, expected and safe
+            // to drop) versus mid-segment corruption (real data loss to surface).
+            let mut lines = reader.lines().peekable();
+            let mut skipped_in_segment = 0usize;
+            while let Some(line) = lines.next() {
                 let line = line?;
                 if line.trim().is_empty() {
                     continue;
                 }
                 let Some(ev) = decode_wal_record(&line) else {
                     report.corrupted_records = report.corrupted_records.saturating_add(1);
-                    break;
+                    skipped_in_segment = skipped_in_segment.saturating_add(1);
+                    // Torn tail: last non-empty line of the last (active) segment.
+                    let is_torn_tail = seg_idx == last_segment_idx && lines.peek().is_none();
+                    if is_torn_tail {
+                        tracing::debug!(
+                            segment = %path.display(),
+                            "dropping torn/partial WAL tail record"
+                        );
+                    } else {
+                        // Mid-segment corruption: skip this one record and keep
+                        // replaying the rest of the segment rather than silently
+                        // abandoning every valid record after it. The resulting
+                        // offset discontinuity is flagged via gap_detected below.
+                        tracing::warn!(
+                            segment = %path.display(),
+                            "skipping corrupt mid-segment WAL record; continuing replay"
+                        );
+                    }
+                    continue;
                 };
                 report.highest_offset_seen = report.highest_offset_seen.max(ev.offset);
                 if ev.offset <= since_offset {
@@ -368,9 +395,20 @@ impl Persist {
                     report.gap_detected = true;
                 }
                 last_seen_offset = ev.offset;
+                // Count every delivered record here so `applied` and gap detection
+                // are consistent across all callers (not just closures that happen
+                // to increment it themselves).
+                report.applied = report.applied.saturating_add(1);
                 if !f(ev, &mut report)? {
                     return Ok(report);
                 }
+            }
+            if skipped_in_segment > 0 {
+                tracing::warn!(
+                    segment = %path.display(),
+                    skipped = skipped_in_segment,
+                    "WAL segment had corrupt/undecodable records"
+                );
             }
         }
 
@@ -418,6 +456,22 @@ fn ensure_file_exists(path: &Path) -> std::io::Result<()> {
     }
     let _ = OpenOptions::new().create(true).append(true).open(path)?;
     Ok(())
+}
+
+/// Fsync the directory so a preceding file create/rename is durable (the entry
+/// itself, not just the file contents, survives a crash). Best-effort on
+/// platforms that reject opening a directory for fsync.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    match File::open(dir) {
+        Ok(f) => match f.sync_all() {
+            Ok(()) => Ok(()),
+            // ponytail: not all filesystems support fsync on a directory handle.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+            Err(e) => Err(e),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn list_segments_sorted(dir: &Path) -> Vec<PathBuf> {
@@ -550,6 +604,45 @@ mod tests {
         assert!(first_segment.contains("\"offset\":7"));
         assert!(dir.path().join("snapshot.json").exists());
         assert!(dir.path().join("events-000002.log").exists());
+    }
+
+    #[test]
+    fn mid_segment_corruption_skips_one_record_and_continues() {
+        use std::io::Write as _;
+
+        let dir = tempdir().unwrap();
+        let persist = Persist::new(dir.path(), 1024 * 1024, 4).unwrap();
+
+        // events-000001.log: valid(1), valid(2), <garbage>, valid(4).
+        // The corrupt line stands in for what would have been offset 3.
+        let seg_path = dir.path().join("events-000001.log");
+        {
+            let mut f = std::fs::File::create(&seg_path).unwrap();
+            for offset in [1u64, 2] {
+                f.write_all(&encode_wal_record(&sample_event(offset)).unwrap())
+                    .unwrap();
+                f.write_all(b"\n").unwrap();
+            }
+            f.write_all(b"{ this is not a valid wal record\n").unwrap();
+            f.write_all(&encode_wal_record(&sample_event(4)).unwrap())
+                .unwrap();
+            f.write_all(b"\n").unwrap();
+        }
+
+        let mut seen = Vec::new();
+        let report = persist
+            .try_for_each_event_since(0, |ev| {
+                seen.push(ev.offset);
+                Ok(true)
+            })
+            .unwrap();
+
+        // The valid record AFTER the corruption is still replayed (not abandoned).
+        assert_eq!(seen, vec![1, 2, 4]);
+        assert_eq!(report.applied, 3);
+        assert_eq!(report.corrupted_records, 1);
+        // The skipped record leaves a visible offset discontinuity.
+        assert!(report.gap_detected);
     }
 
     #[test]

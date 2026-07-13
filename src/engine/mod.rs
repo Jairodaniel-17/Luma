@@ -538,6 +538,9 @@ impl Engine {
         });
         let value = event_data["value"].clone();
         let key = event_data["key"].as_str().unwrap_or_default().to_string();
+        // Hold the append guard across offset allocation, WAL append and publish
+        // so offset order == WAL file order == publish order (no false gaps).
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("state_updated", event_data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
@@ -546,6 +549,7 @@ impl Engine {
             db.apply_state_updated(&event)?;
         }
         self.0.events.publish_record(event.clone());
+        drop(append);
         self.metrics().inc_events();
 
         self.metrics().inc_state_put();
@@ -582,6 +586,7 @@ impl Engine {
             "key": key,
             "reason": reason,
         });
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("state_deleted", data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
@@ -590,6 +595,7 @@ impl Engine {
             db.apply_state_deleted(&event)?;
         }
         self.0.events.publish_record(event);
+        drop(append);
         self.metrics().inc_events();
 
         let deleted = if self.0.state_db.is_some() {
@@ -713,6 +719,7 @@ impl Engine {
             "dim": dim,
             "metric": metric,
         });
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_collection_created", data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
@@ -720,6 +727,7 @@ impl Engine {
         self.0.vectors.create_collection(collection, dim, metric)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
+        drop(append);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
 
@@ -753,12 +761,14 @@ impl Engine {
             "vector": item.vector.clone(),
             "meta": item.meta.clone(),
         });
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_added", data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
         }
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
+        drop(append);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
@@ -781,12 +791,14 @@ impl Engine {
             "vector": item.vector.clone(),
             "meta": item.meta.clone(),
         });
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_upserted", data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
         }
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
+        drop(append);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
@@ -817,12 +829,14 @@ impl Engine {
             "vector": new_vec.clone(),
             "meta": new_meta.clone(),
         });
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_updated", data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
         }
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
+        drop(append);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
@@ -841,12 +855,14 @@ impl Engine {
             "collection": collection,
             "id": id,
         });
+        let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_deleted", data);
         if let Some(persist) = &self.0.persist {
             persist.append_event(&event)?;
         }
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
+        drop(append);
         self.metrics().inc_events();
         self.metrics().inc_vector_op();
         Ok(())
@@ -1004,6 +1020,7 @@ impl Engine {
                 "key": key,
                 "reason": "ttl",
             });
+            let append = self.0.events.append_guard();
             let event = self.0.events.next_record("state_deleted", data);
             if let Some(persist) = &self.0.persist {
                 persist.append_event(&event)?;
@@ -1017,6 +1034,7 @@ impl Engine {
                     .delete(event.data["key"].as_str().unwrap_or_default());
             }
             self.0.events.publish_record(event);
+            drop(append);
             self.metrics().inc_events();
             self.metrics().inc_state_delete();
             self.metrics().add_ttl_expired(1);
