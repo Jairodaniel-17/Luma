@@ -41,6 +41,9 @@ struct Inner {
 }
 
 const DEFAULT_SEGMENT_MAX: usize = 8_192;
+/// Upper bound on a single `scroll` page. Clamps a caller-supplied `limit` so
+/// `start + limit` cannot overflow `usize` (debug panic / release wrap).
+const MAX_SCROLL_LIMIT: usize = 65_536;
 const DEFAULT_PARALLEL_SEGMENT_MIN: usize = 4;
 const DEFAULT_DISKANN_SEARCH_LIST_SIZE: usize = 64;
 static RAYON_INIT: OnceLock<()> = OnceLock::new();
@@ -684,7 +687,10 @@ impl VectorStore {
         } else {
             0
         };
-        let end = (start + limit).min(ids.len());
+        // Clamp caller-supplied limit and use saturating_add so a huge limit
+        // (or start) can't overflow usize before the .min() bound applies.
+        let limit = limit.min(MAX_SCROLL_LIMIT);
+        let end = start.saturating_add(limit).min(ids.len());
         let has_more = end < ids.len();
 
         let items: Vec<ScrollItem> = ids[start..end]
@@ -2579,6 +2585,30 @@ mod tests {
             .unwrap();
         assert!(hits.iter().all(|hit| !hit.id.starts_with("doc-0")));
         assert!(hits.iter().any(|hit| hit.id == "doc-20"));
+    }
+
+    #[test]
+    fn scroll_huge_limit_does_not_overflow() {
+        let store = VectorStore::with_settings(VectorSettings::default());
+        store.create_collection("docs", 2, Metric::Cosine).unwrap();
+        for idx in 0..3usize {
+            store
+                .upsert(
+                    "docs",
+                    &format!("doc-{idx}"),
+                    VectorItem {
+                        vector: vec![1.0, idx as f32],
+                        meta: serde_json::Value::Null,
+                        mmap_offset: None,
+                    },
+                )
+                .unwrap();
+        }
+        // A caller-supplied limit at the top of usize must not overflow when
+        // added to `start`; it should simply return all available items.
+        let (items, next) = store.scroll("docs", None, usize::MAX, false).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(next.is_none());
     }
 
     #[test]

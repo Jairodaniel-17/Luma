@@ -13,6 +13,12 @@ pub(super) const DEFAULT_RUN_TARGET_BYTES: u64 = 134_217_728;
 pub(super) const DEFAULT_RUN_RETENTION: usize = 8;
 pub(super) const DEFAULT_COMPACTION_TRIGGER_TOMBSTONE_RATIO: f32 = 0.5;
 pub(super) const DEFAULT_COMPACTION_MAX_BYTES_PER_PASS: u64 = 1_073_741_824;
+/// Upper bound on a single on-disk record payload. Lengths are read from the
+/// file as untrusted u32 values; a flipped byte could otherwise request a ~4GiB
+/// allocation and OOM the process. 256 MiB is far larger than any legitimate
+/// record but small enough to keep a corrupt length from being weaponized.
+const MAX_RECORD_BYTES: usize = 256 * 1024 * 1024;
+
 const DEFAULT_IVF_CLUSTERS: usize = 1_024;
 const DEFAULT_IVF_NPROBE: usize = 8;
 const DEFAULT_Q8_REFINE_TOPK: usize = 512;
@@ -598,6 +604,14 @@ fn read_legacy_file(
             Err(err) => return Err(err.into()),
         }
         let len = u32::from_le_bytes(len_buf) as usize;
+        // Bound the untrusted length against a sane max and the file size before
+        // allocating, so a corrupt length can't trigger OOM. A record can never
+        // exceed the file itself; treat an over-large length as end-of-usable-
+        // data rather than erroring the whole load (this path already tolerates
+        // torn tail records via the UnexpectedEof handling below).
+        if len > MAX_RECORD_BYTES || len as u64 > file_len {
+            break;
+        }
         let mut payload = vec![0u8; len];
         if let Err(err) = reader.read_exact(&mut payload) {
             if err.kind() == io::ErrorKind::UnexpectedEof {
@@ -626,6 +640,7 @@ fn read_run_files(
         if !path.exists() {
             continue;
         }
+        let run_len = fs::metadata(&path)?.len();
         let mut file = BufReader::new(File::open(&path)?);
         loop {
             let mut header_buf = [0u8; RUN_HEADER_BYTES];
@@ -638,7 +653,15 @@ fn read_run_files(
                 break;
             };
             let header_op = header.op();
-            let mut payload = vec![0u8; header.len as usize];
+            // The header length is untrusted; bound it before allocating so a
+            // corrupt run header can't request a multi-GiB buffer. A payload
+            // can't exceed the run file, so stop reading this run on an
+            // over-large length (CRC would fail anyway on real corruption).
+            let payload_len = header.len as usize;
+            if payload_len > MAX_RECORD_BYTES || payload_len as u64 > run_len {
+                break;
+            }
+            let mut payload = vec![0u8; payload_len];
             if let Err(err) = file.read_exact(&mut payload) {
                 if err.kind() == io::ErrorKind::UnexpectedEof {
                     break;
@@ -659,7 +682,7 @@ fn read_run_files(
             }
             apply_disk_record(record, dim, state, Some(&run.file));
         }
-        state.file_len = state.file_len.saturating_add(fs::metadata(&path)?.len());
+        state.file_len = state.file_len.saturating_add(run_len);
     }
     Ok(())
 }
@@ -870,5 +893,72 @@ impl RunHeader {
         } else {
             RecordOp::Upsert
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("luma_persist_test_{}_{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn legacy_oversized_length_does_not_allocate() {
+        let dir = tmp_dir("legacy_oversized");
+        let layout = CollectionLayout::new(&dir, "coll");
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        // A single length prefix of ~4 GiB followed by nothing. Without the
+        // bound this would attempt a 4 GiB allocation; with it we stop cleanly.
+        std::fs::write(&layout.bin_path, u32::MAX.to_le_bytes()).unwrap();
+        let mut state = CollectionRecords::new(0);
+        let res = read_legacy_file(&layout, 4, &mut state);
+        assert!(res.is_ok(), "oversized legacy length must not error/OOM");
+        assert!(state.items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_length_beyond_file_stops() {
+        let dir = tmp_dir("legacy_beyond");
+        let layout = CollectionLayout::new(&dir, "coll");
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        // Claims 1000 bytes but the file holds only the 4-byte prefix.
+        std::fs::write(&layout.bin_path, 1000u32.to_le_bytes()).unwrap();
+        let mut state = CollectionRecords::new(0);
+        let res = read_legacy_file(&layout, 4, &mut state);
+        assert!(res.is_ok());
+        assert!(state.items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_oversized_length_does_not_allocate() {
+        let dir = tmp_dir("run_oversized");
+        let layout = CollectionLayout::new(&dir, "coll");
+        std::fs::create_dir_all(&layout.runs_dir).unwrap();
+        // Valid magic/version header advertising a ~4 GiB payload.
+        let header = RunHeader {
+            magic: RUN_MAGIC,
+            version: RUN_VERSION,
+            flags: 0,
+            len: u32::MAX,
+            crc32: 0,
+        };
+        let run = RunInfo {
+            file: "run-000001.log".to_string(),
+            ..RunInfo::default()
+        };
+        std::fs::write(layout.runs_dir.join(&run.file), header.encode()).unwrap();
+        let mut state = CollectionRecords::new(0);
+        let res = read_run_files(&layout, 4, std::slice::from_ref(&run), &mut state);
+        assert!(res.is_ok(), "oversized run length must not error/OOM");
+        assert!(state.items.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
