@@ -3,8 +3,6 @@ use crate::search::storage::AppendLog;
 use crate::search::types::{
     Document, DocumentResponse, LanguageFilter, SearchRequest, SearchResponse, SearchResult,
 };
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 use std::path::PathBuf;
@@ -27,10 +25,27 @@ impl SearchEngine {
     }
 
     pub fn search(&self, req: SearchRequest) -> anyhow::Result<SearchResponse> {
-        // 1. Embed
-        // Assume 384 dimensions for now.
-        let query_vector = self.embed(&req.query, 384);
+        // Sync entry point: only explicit `TEST_VEC:` query vectors are supported
+        // here. Production requests embed the query with the configured provider
+        // and call `search_with_query_vector` (see api/routes_search.rs) — there is
+        // deliberately no random/placeholder embedding fallback.
+        let query_vector = parse_test_vec(&req.query).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no query vector: the in-process search() only accepts TEST_VEC: queries; \
+                 use the /search HTTP endpoint which embeds the query"
+            )
+        })?;
+        self.search_with_query_vector(req, query_vector)
+    }
 
+    /// Rank documents against an already-embedded `query_vector`. This is the
+    /// real search path: the HTTP handler embeds the query with the configured
+    /// embedding provider and passes the resulting vector in here.
+    pub fn search_with_query_vector(
+        &self,
+        req: SearchRequest,
+        query_vector: Vec<f32>,
+    ) -> anyhow::Result<SearchResponse> {
         // 2. Filter & Version Resolution
         // Map group_id -> (offset, processed_at, grouping_key)
         let mut candidates = HashMap::new();
@@ -200,23 +215,23 @@ impl SearchEngine {
         })
     }
 
-    fn embed(&self, text: &str, dim: usize) -> Vec<f32> {
-        if let Some(stripped) = text.strip_prefix("TEST_VEC:") {
-            let parts: Vec<&str> = stripped.split(',').collect();
-            if let Ok(vec) = parts
-                .iter()
-                .map(|s| s.trim().parse::<f32>())
-                .collect::<Result<Vec<_>, _>>()
-            {
-                if !vec.is_empty() {
-                    return vec;
-                }
-            }
-        }
+}
 
-        let hash = crc32fast::hash(text.as_bytes());
-        let mut rng = StdRng::seed_from_u64(hash as u64);
-        (0..dim).map(|_| rng.gen::<f32>()).collect()
+/// Parse an explicit `TEST_VEC:v0,v1,...` query into a vector. Used by tests and
+/// honored by the HTTP handler so callers can bypass the embedding provider with
+/// a deterministic vector. Returns `None` for ordinary queries (which must be
+/// embedded by the caller).
+pub fn parse_test_vec(text: &str) -> Option<Vec<f32>> {
+    let stripped = text.strip_prefix("TEST_VEC:")?;
+    let vec: Vec<f32> = stripped
+        .split(',')
+        .map(|s| s.trim().parse::<f32>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if vec.is_empty() {
+        None
+    } else {
+        Some(vec)
     }
 }
 

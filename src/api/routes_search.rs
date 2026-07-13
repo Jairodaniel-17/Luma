@@ -25,7 +25,24 @@ pub async fn search(
             "top_k invalid",
         ));
     }
-    match state.search_engine.search(payload) {
+    // Embed the query with the configured provider (or honor an explicit
+    // TEST_VEC: vector). Previously this used a random placeholder vector, which
+    // made semantic search return meaningless results.
+    let query_vector = match crate::search::engine::parse_test_vec(&payload.query) {
+        Some(v) => v,
+        None => state.embeddings.embed(&payload.query).await.map_err(|err| {
+            tracing::error!(%err, "query embedding failed");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "query embedding failed",
+            )
+        })?,
+    };
+    match state
+        .search_engine
+        .search_with_query_vector(payload, query_vector)
+    {
         Ok(res) => Ok((StatusCode::OK, Json(res))),
         Err(err) => {
             tracing::error!(%err, "search failed");
