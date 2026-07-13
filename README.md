@@ -1,186 +1,162 @@
 <!-- RustKissVDB: el motor de datos convergente en Rust que impulsa Luma (búsqueda vectorial + KV + SQL + eventos en un solo binario). -->
-# Luma (rust-kiss-vdb): La Plataforma de Datos Convergente
+# Luma: La Plataforma de Datos Convergente
 
-Luma no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** diseñado para la era de la Inteligencia Artificial Generativa y los Agentes Autónomos.
+**Luma** (crate Cargo `luma`, versión **4.0.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
 
-Mientras que la arquitectura tradicional fragmenta tu stack tecnológico (PostgreSQL para datos, Redis para caché/colas, Pinecone para vectores), Luma unifica estas primitivas en un **único binario escrito en Rust**, eliminando la latencia de red, simplificando el despliegue y garantizando un rendimiento extremo.
+- **Búsqueda vectorial** (ANN) con índices conmutables HNSW / IVF-FLAT-Q8 / DiskANN.
+- **Estado clave-valor** (KV) con TTL, compare-and-swap e índices.
+- **SQL relacional** embebido (SQLite en modo WAL), con opción de backend remoto libSQL/Turso.
+- **Document store** JSON y **object storage** binario tipo R2.
+- **Colas** durables e **imágenes** transformadas on-the-fly.
+- **Bus de eventos** pub/sub con streaming SSE.
+- **NS-Mem**: una capa de memoria para agentes autónomos (episódica, semántica, procedural y de trabajo).
+- **Capa empresarial**: cuentas/organizaciones, roles, login con Argon2id, auditoría, respaldos, cifrado en reposo y un **panel de administración React incrustado en el propio binario**.
 
-## 🚀 ¿Por qué Luma?
+Todo corre en un mismo proceso, eliminando la latencia de red entre subsistemas y simplificando el despliegue a un solo ejecutable.
 
-La premisa es simple: **La IA necesita más que vectores.**
-
-Un agente de IA moderno necesita:
-1.  **Memoria Semántica:** Búsqueda vectorial para recuperar información relevante.
-2.  **Memoria Estructurada:** Metadatos relacionales (SQL) para filtrado preciso y datos de negocio.
-3.  **Estado Efímero:** Almacenamiento Key-Value (KV) de alta velocidad para sesiones y contexto.
-4.  **Sistema Nervioso:** Un bus de eventos (Pub/Sub) para comunicación en tiempo real entre agentes y usuarios.
-
-Luma ofrece todo esto "out-of-the-box" mediante una arquitectura orquestada.
+> Ver el estado real de cada pieza en la sección **Estado actual del proyecto** al final de este documento.
 
 ---
 
-## 🏛️ Arquitectura Multi-Motor
+## 🚀 ¿Por qué Luma?
 
-Luma no es un monolito, sino un **Orquestador de Alto Rendimiento** que gestiona y sincroniza múltiples motores especializados dentro de un mismo proceso. Al iniciar, el servidor (`src/server.rs`) levanta y conecta estos componentes:
+La premisa es simple: **la IA necesita más que vectores.** Mientras la arquitectura tradicional fragmenta el stack (PostgreSQL para datos, Redis para caché/colas, un servicio aparte para vectores), Luma converge esas primitivas en un binario Rust, con seguridad de memoria, concurrencia sobre Tokio y latencia interna cero entre motores.
 
-### 1. El Core Engine (`src/engine/`)
-Este es el corazón nativo de alto rendimiento, escrito puramente en Rust. Gestiona los datos que requieren latencia crítica y estructuras no relacionales.
-*   **Motor Vectorial:** Implementación de **DiskANN (Vamana)** y **IVF**. Maneja índices masivos en disco con optimizaciones SIMD y cuantización (Q8).
-*   **Motor de Estado (KV):** Impulsado por **redb**, ofrece almacenamiento ACID para documentos JSON y sesiones, con soporte nativo para TTL (expiración automática).
-*   **Bus de Eventos:** Un sistema de Pub/Sub (`tokio::sync::broadcast`) que actúa como el sistema nervioso, permitiendo streaming de datos y reactividad en tiempo real (SSE).
-*   **Unified WAL:** Un Write-Ahead Log personalizado garantiza la durabilidad y consistencia de estos componentes.
+---
 
-### 2. El Servicio SQL Relacional (`src/sqlite/`)
-Para cuando se necesita la robustez del modelo relacional estándar.
-*   Luma integra **SQLite** embebido (vía `rusqlite`), configurado en modo **WAL (Write-Ahead Logging)** para máxima concurrencia.
-*   Funciona como un motor paralelo al Core, permitiendo JOINS complejos, transacciones ACID estrictas y filtrado avanzado de metadatos.
-*   El servidor expone endpoints que permiten "cruzar" información entre el mundo vectorial y el relacional.
+## 🏛️ Arquitectura real por módulos
 
-### 3. La Capa de Orquestación (`src/server.rs` & `src/api/`)
-El "pegamento" que une los mundos.
-*   Expone una **API HTTP Unificada** (`src/api/`) que enruta las peticiones al motor correspondiente.
-*   Maneja la autenticación y la seguridad de forma centralizada.
-*   Permite que un solo binario sirva como la infraestructura completa para una aplicación de IA.
+El servidor (`src/server.rs`) valida la configuración, inicializa los subsistemas y arranca el router HTTP (`src/api/mod.rs`) sobre **axum 0.7 / hyper 1**.
+
+### Core Engine — `src/engine/`
+Corazón nativo de alto rendimiento en Rust. Coordina los subsistemas, reproduce el WAL al arrancar, expira TTLs y publica cada mutación como evento con offset monotónico (event sourcing).
+- **Estado (KV):** `state.rs` / `state_db.rs`. Store en memoria de valores JSON con TTL por clave y compare-and-swap vía `if_revision`; persistencia opcional respaldada por **redb**.
+- **Bus de eventos:** `events.rs`. Pub/Sub sobre `tokio::sync::broadcast`; los clientes SSE reciben el flujo en vivo y una señal de "gap" si quedan por detrás del buffer.
+- **Persistencia:** `persist.rs`. WAL segmentado (`events-XXXXXX.log`, JSON lines) con snapshots periódicos (`snapshot.json`); el snapshot dispara rotación y limpieza del WAL.
+- **Embeddings:** `embeddings.rs`. Cliente HTTP con proveedores conmutables (`none`/`mock`/`ollama`/`openai`/`azure`/`cohere`/`huggingface`), caché LRU, semáforo de concurrencia y reintentos con backoff exponencial + jitter.
+- **Parseo y chunking:** `parser.rs` (PDF/DOCX/imágenes vía `pdf-extract`, `docx-rs`, `quick-xml`, `zip`, `image`) y `chunking.rs` para trocear texto antes de embeber.
+- **Hub (`hub.rs`):** el orquestador `LumaDatabase` (ver Nivel 2).
+
+### Motor vectorial — `src/vector/`
+CRUD de vectores y búsqueda k-NN con tres estrategias de índice conmutables por config (`index_kind`):
+- **HNSW** — ANN aproximado en memoria (`hnsw_rs`).
+- **IVF_FLAT_Q8** *(por defecto)* — índice invertido con refinamiento por cuantización de 8 bits (`ivf.rs`, `q8.rs`).
+- **DiskANN** — grafo Vamana en disco para colecciones masivas (`diskann/`).
+
+Las colecciones se dividen en segmentos (~8 192 vectores); el segmento activo recibe upserts y los congelados son de solo lectura. Los vectores se persisten como binario (`vectors.bin`) con soporte **mmap zero-copy** (`mmap.rs`) y optimizaciones SIMD (`simd.rs`). El filtrado tipado compuesto vive en `filter.rs`.
+
+### Servicio SQL — `src/sqlite/`
+**SQLite** embebido (`rusqlite` *bundled*) en modo **WAL**, accedido mediante un **patrón actor** (canal MPSC de Tokio) para consultas async sin bloquear (`actor.rs`, `pool.rs`). Si se define `LIBSQL_URL`, el SQL se enruta a un backend **libSQL/Turso remoto** por Hrana sobre HTTPS (`hrana.rs`). Es la base del pre-filtro del hub, de NS-Mem, de la autenticación y de la capa empresarial.
+
+### Motor de búsqueda de texto — `src/search/`
+`SearchEngine` con almacenamiento propio (`storage.rs`), agrupación (`grouping.rs`) y motor de scoring (`engine.rs`), expuesto en los endpoints `/search` y `/search/ingest`.
+
+### Capa de orquestación HTTP — `src/api/`
+Router **axum** con autenticación (Bearer API key, claves estáticas y tokens de sesión), CORS configurable, timeouts, límite de tamaño de body, rate limiting opcional (`tower_governor`) y TLS opcional (`rustls`). Las rutas se dividen por dominio en `routes_*.rs`. Documentación interactiva **Scalar** servida en `/docs` desde `docs/openapi.yaml` incrustado.
+
+### Memoria de agentes (NS-Mem) — `src/memory/`
+Capa de memoria para agentes autónomos; ver el **Nivel 3** en la sección de API.
 
 ---
 
 ## 🏢 Capa Empresarial: Multi-Tenancy, Panel de Administración y Seguridad
 
-Luma incluye una capa "enterprise" **aditiva** montada sobre las primitivas del core. Todo vive en un único binario: no necesitas Node, ni el código fuente del panel, ni servicios externos en runtime.
+Capa "enterprise" **aditiva** montada sobre las primitivas del core. Todo vive en el mismo binario: no necesitas Node, ni el código fuente del panel, ni servicios externos en runtime. El `AccountsService` y las tablas `sys_*` se crean *lazily* la primera vez que se usan, siempre que SQLite esté habilitado.
 
-### Cuentas, sesiones y roles (`src/api/accounts.rs`)
-*   **Organizaciones y usuarios** en SQLite (`sys_orgs`, `sys_users`), más `sys_sessions` para tokens de sesión.
-*   **Login por email + contraseña**: las contraseñas se hashean con **Argon2id** (`src/crypto.rs`). El login emite un **token de sesión opaco** (`lums_…`) del que solo se guarda su hash SHA-256.
-*   **Roles**: `owner` > `admin` > `member` > `viewer`, integrados con el RBAC existente. Un middleware exige rol mínimo por ruta.
-*   Endpoints: `POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/logout`, `POST /v1/auth/refresh`; gestión admin en `/v1/admin/orgs`, `/v1/admin/users` (alta/baja/roles) y las API keys existentes en `/v1/auth/keys`.
+### Cuentas, sesiones y roles (`src/api/accounts.rs`, `routes_accounts.rs`)
+- **Organizaciones y usuarios** en SQLite (`sys_orgs`, `sys_users`), más `sys_sessions` para tokens de sesión y `sys_collections` para propiedad de recursos.
+- **Login por email + contraseña**: las contraseñas se hashean con **Argon2id** (`src/crypto.rs`). El login emite un **token de sesión opaco** (`lums_…`) del que solo se guarda su hash SHA-256; TTL de 7 días.
+- **Roles**: `owner` > `admin` > `member` > `viewer`, integrados con el RBAC existente (`rbac.rs`, niveles viewer=10, member=20, admin=30, owner=40). Un middleware exige rol mínimo por ruta.
+- Endpoints: `POST /v1/auth/register` · `login` · `logout` · `refresh`; gestión admin en `/v1/admin/orgs`, `/v1/admin/users` (alta/baja/roles), `/v1/admin/stats` y `/v1/admin/audit-events`.
 
-### Aislamiento de datos por organización
-*   Un **middleware de aislamiento** (`tenant_isolation_middleware`) asocia cada colección/documento/blob a la organización que la creó (tabla `sys_collections`). Otra organización que intente acceder a ese nombre recibe `404` — la existencia queda oculta entre tenants.
-*   El hub (`/v1/db`) y NS-Mem (`/v1/memory`) **comparten namespace a propósito** y ya aíslan internamente por el `tenant_id` del token, por lo que no se les impone propiedad exclusiva.
+### Aislamiento de datos por organización (`tenant_isolation_middleware`)
+Cada colección/documento/blob queda asociado a la organización que la creó (*first-touch* en `sys_collections`). Otra organización que intente acceder a ese nombre recibe `404` — la existencia queda oculta entre tenants. El hub (`/v1/db`) y NS-Mem (`/v1/memory`) **comparten namespace a propósito** y ya aíslan internamente por el `tenant_id` del token, por lo que no se les impone propiedad exclusiva.
 
 ### Panel de administración (React + Vite + TypeScript)
-*   El código fuente vive en `admin-ui/`; se compila (`npm ci && npm run build`) a `ui/dist` y se **incrusta en el binario** con `rust-embed`. Axum lo sirve en `/` con *fallback* SPA para las rutas del cliente.
-*   Páginas: login/registro, **dashboard de uso** (`/v1/admin/stats`), gestión de usuarios y organizaciones, API keys, **registro de auditoría** y estado de salud del servidor.
-*   React escapa el contenido por defecto y la respuesta de la API es siempre JSON, mitigando XSS reflejado/almacenado.
+- El código fuente vive en `admin-ui/` (`App.tsx`, `api.ts`, `main.tsx`); se compila (`npm ci && npm run build`) a `ui/dist/` (bundle real JS + CSS bajo `ui/dist/assets/`) y se **incrusta en el binario** con `rust-embed` (`routes_ui.rs`). Axum lo sirve en `/` con *fallback* SPA para las rutas del cliente.
+- Cubre login/registro, dashboard de uso (`/v1/admin/stats`), gestión de usuarios y organizaciones, API keys, registro de auditoría y estado de salud. Usa rutas relativas `/v1/*` (sin hosts hardcodeados).
+- React escapa el contenido por defecto y las respuestas de la API son siempre JSON, mitigando XSS reflejado/almacenado.
 
-### Respaldos automáticos (`src/backup.rs`)
-*   Copia **consistente** del SQLite (`VACUUM INTO`) + `snapshot.json` + segmentos del WAL a `backups/<timestamp>/`, con **retención configurable**.
-*   CLI: `luma backup` y `luma restore <ruta>`. Tarea de fondo opcional (`backup_enabled`) con `backup_interval_secs`.
+### Respaldos (`src/backup.rs`)
+- Copia **consistente** del SQLite (`VACUUM INTO`) + `snapshot.json` + segmentos del WAL a `backups/<timestamp>/`, con **retención configurable**.
+- CLI: `luma backup` y `luma restore <ruta>`. Tarea de fondo opcional (`backup_enabled`) con `backup_interval_secs`.
 
 ### Auditoría y cifrado
-*   **Auditoría semántica** (`sys_audit_events`): quién hizo qué (login, alta/baja de usuarios y keys, cambios de org), con IP y user-agent. Consultable en `/v1/admin/audit-events` y en el panel.
-*   **Cifrado en reposo** de campos sensibles con **ChaCha20-Poly1305** (AEAD), clave maestra derivada de `LUMA_MASTER_KEY`.
-*   **Cabeceras de seguridad** en todas las respuestas: `Content-Security-Policy` estricta (sin `unsafe-inline` para scripts), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` y **HSTS**.
+- **Auditoría de acceso** (`src/api/audit.rs`): middleware que registra `ts, api_key_id, ip, method, path, status, latency_ms` en SQLite; consultable en `GET /v1/admin/audit`. La auditoría "semántica" de negocio (login, altas/bajas) se guarda en `sys_audit_events` y se consulta en `/v1/admin/audit-events`.
+- **Cifrado en reposo** de campos sensibles con **ChaCha20-Poly1305** (AEAD), clave maestra derivada de `LUMA_MASTER_KEY`. Ciphertext auto-descriptivo `enc:v1:<b64(nonce||ct)>`.
+- **Cabeceras de seguridad** en todas las respuestas: `Content-Security-Policy` estricta (sin `unsafe-inline` para scripts; jsdelivr permitido para la doc Scalar), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` y **HSTS**.
 
-### Uso rápido (panel + login)
+---
+
+## 🛠️ Compilar y correr
+
+Requisitos: **Rust 1.88+** (edition 2021). SQLite va *bundled* (no requiere instalación externa).
 
 ```bash
-# 1) Compilar el panel (una vez / al cambiar la UI) e incrustarlo
+# Compilar
+cargo build --release
+
+# (Opcional) recompilar el panel de administración e incrustarlo en ui/dist
 cd admin-ui && npm ci && npm run build && cd ..
 
-# 2) Compilar y arrancar el binario (sirve el panel en http://127.0.0.1:1234/)
-cargo build --release
+# Arrancar el servidor (sirve API + panel en http://127.0.0.1:1234/)
 LUMA_MASTER_KEY="una-clave-secreta-fuerte" ./target/release/luma serve
+```
 
-# 3) Crear tu organización y entrar
+El binario `luma` acepta los siguientes subcomandos (`src/cli.rs`, `src/main.rs`):
+
+| Subcomando | Descripción |
+| :--- | :--- |
+| `luma serve` | Arranca el servidor HTTP (comando por defecto si no se pasa ninguno). |
+| `luma vacuum --collection <nombre>` | Compacta una colección vectorial. |
+| `luma diskann build …` / `tune …` / `status` | Construye, ajusta o consulta el estado de un grafo DiskANN (`src/diskann.rs`). |
+| `luma backup` | Genera un respaldo consistente (SQLite + snapshot + WAL). |
+| `luma restore <ruta>` | Restaura desde un directorio de respaldo. |
+
+### Panel y primer acceso
+
+```bash
+# Crear tu organización y entrar
 curl -X POST localhost:1234/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"org_name":"Acme","email":"owner@acme.com","password":"un-password-fuerte"}'
 ```
 
-> **Producción:** define siempre `LUMA_MASTER_KEY` (cifrado) y `LUMA_API_KEY` (bootstrap). Sin `LUMA_MASTER_KEY` se usa una clave de desarrollo conocida y el servidor lo advierte en los logs.
+Luego abre `http://127.0.0.1:1234/` en el navegador para el panel React, o `http://127.0.0.1:1234/docs` para la documentación interactiva (Scalar).
+
+> **Producción:** define siempre `LUMA_MASTER_KEY` (cifrado) y `LUMA_API_KEY` (bootstrap). Sin `LUMA_MASTER_KEY` se usa una clave de desarrollo conocida y el servidor lo advierte en los logs. El puerto por defecto es **1234** con bind a `127.0.0.1` (`luma.toml`); las variables de entorno sobrescriben el TOML.
+
+### Configuración
+
+`luma.toml` en la raíz (auto-generado si falta). Secciones clave: servidor (`port`, `bind_addr`, `api_key`), almacenamiento (`data_dir`, `snapshot_interval_secs`, `wal_segment_max_bytes`), vector (`index_kind` = `HNSW`|`IVF_FLAT_Q8`|`DiskANN`, `max_vector_dim`), IVF/DiskANN, embeddings, búsqueda (`pre_filter_threshold`), NS-Mem (`memory_*`), grafo/decay y respaldos (`backup_*`). Se puede leer/actualizar en caliente vía `GET`/`PUT /v1/config`. Fuente: `src/config.rs`.
 
 ---
 
-## 🛠️ Tecnologías Clave
+## 🧭 Niveles de API
 
-Luma está construido sobre el ecosistema de **Rust**, priorizando la seguridad de memoria, la concurrencia y la eficiencia.
+El router (`src/api/mod.rs`) monta las siguientes rutas. Todas requieren `Authorization: Bearer <api_key|token>` salvo `register`/`login`, `/v1/health`, `/docs` y los assets del panel.
 
-| Componente | Tecnología / Crate | Rol en la Arquitectura |
-| :--- | :--- | :--- |
-| **Orquestación** | `tokio` | Runtime asíncrono para manejar I/O no bloqueante y miles de conexiones concurrentes. |
-| **Core KV** | `redb` | Persistencia ACID pura en Rust para el Core Engine, sin dependencias externas. |
-| **Relacional** | `rusqlite` (SQLite) | Motor SQL embebido, gestionado como un servicio interno independiente. |
-| **Vectores** | Custom `DiskANN` | Algoritmos de grafos en disco desarrollados a medida para búsqueda semántica. |
-| **Serialización** | `serde` + `serde_json` | Lingua franca para el intercambio de datos entre motores y API. |
+### Nivel 1: Endpoints primitivos
 
-### Mapa del Código Fuente
+Cada motor funciona de forma aislada, para máxima velocidad y mínimo overhead.
 
-*   **`src/server.rs`**: El punto de entrada. Inicializa la configuración, levanta el Core Engine y el Servicio SQL, y arranca el servidor HTTP.
-*   **`src/engine/`**: Implementación del **Core Engine**. Agrupa los módulos de vectores, estado (KV) y eventos bajo una misma gestión de ciclo de vida.
-    *   `luma::engine::inner`: Contiene la lógica de sincronización y el bus de eventos.
-*   **`src/sqlite/`**: Contiene `SqliteService`, la abstracción que maneja el pool de conexiones y las consultas al motor SQL embebido.
-*   **`src/vector/`**: Lógica matemática pura y estructuras de datos para la indexación vectorial (DiskANN, IVF).
-*   **`src/api/`**: Controladores HTTP que exponen las capacidades de todos los motores al usuario final.
-*   **`src/memory/`**: NS-Mem — capa de memoria de agentes. Incluye ingesta episódica, facts semánticos, motor procedural DAG, consolidación LLM y retrieval híbrido.
+- **Vectorial** — `/v1/vector/...`: listar/crear colecciones; `add`, `upsert`, `upsert_batch`, `update`, `delete`, `delete_batch`, `get`; `search`, `search_batch` (hasta 100 queries en paralelo con `rayon`), `scroll` (paginación por cursor), `rerank` (reordenamiento por coseno), `aggregate` (conteos por campo); `diskann/build`, `diskann/tune`, `diskann/status`.
+- **Documentos JSON** — `/v1/doc/{collection}/{id}` (`PUT`/`GET`/`DELETE`) y `/v1/doc/{collection}/find`.
+- **Clave-Valor** — `/v1/state/...`: `GET`/`PUT`/`DELETE` por clave, `batch_put`, índices (`indexes`, `index/{field}/{value}`), listado y TTL/CAS.
+- **Object storage (R2-like)** — `/v1/blob/{bucket}/{key}` (`PUT`/`GET`/`DELETE`) y listado por bucket. Escritura atómica, endurecido contra path-traversal.
+- **Colas** — `/v1/queue/{queue}` (encolar y stats), `/receive` (entrega *at-least-once* con *visibility timeout*), `DELETE /{id}` (ack).
+- **Imágenes** — `GET /v1/image/{bucket}/{key}?w=&h=&format=&quality=`: resize (Lanczos3) + convert (`png`/`jpeg`) sobre objetos ya guardados en el blob store.
+- **Eventos** — `GET /v1/events` y `GET /v1/stream` (SSE en vivo con señal de gap).
+- **Búsqueda de texto** — `POST /search` y `POST /search/ingest` (motor `src/search/`).
 
----
+> El SQL relacional se usa **internamente** (pre-filtro del hub, NS-Mem, auth, auditoría) y opcionalmente contra un backend libSQL/Turso remoto; no se expone una ruta de query SQL cruda en el router actual.
 
+### Nivel 2: LumaDatabase Hub (RAG híbrido) — `/v1/db/{namespace}`
 
----
+El orquestador `LumaDatabase` (`src/engine/hub.rs`) fusiona los motores: segmenta documentos grandes (chunking), se conecta al modelo de embeddings configurado, crea la colección si no existe, guarda vectores y persiste metadatos en SQLite de forma transaccional (con *rollback* si falla I/O).
 
-## 🧭 Paradigma de Uso: Tres Niveles
-
-Luma está diseñado bajo una arquitectura "A la Carta", lo que significa que puedes usarlo como una base de datos simple de bajo nivel, o como un poderoso motor orquestador para flujos RAG completos.
-
-### Nivel 1: Endpoints Primitivos (Modo "A la Carta")
-Ideales para máxima velocidad y bajo overhead. Cada motor funciona de forma aislada para que tú gestiones la lógica desde tu backend.
-*   **Vectorial:** `/v1/vector/...` (Búsquedas KNN/ANN. Solo arrays de floats).
-*   **Documentos:** `/v1/doc/...` (Almacenamiento de JSON, como un MongoDB ligero).
-*   **Clave-Valor:** `/v1/state/...` (Para locks, coordinación, configuración).
-*   **Relacional:** `/v1/sql/...` (Ejecución cruda de queries SQLite).
-
-### Nivel 3: NS-Mem — Memoria de Agentes
-
-Una capa de memoria completa para agentes autónomos, construida encima del stack convergente de Luma:
-
-| Tipo | Almacenamiento | Descripción |
-| :--- | :--- | :--- |
-| **episodic** | Vector + SQLite | Eventos e interacciones concretas indexadas para recall semántico |
-| **semantic** | Vector + SQLite | Hechos y preferencias estables, promovidos desde episodic vía LLM |
-| **procedural** | SQLite (DAG) | Flujos de trabajo con nodos, edges tipados y evaluación de constraints |
-| **working** | KV + TTL | Contexto efímero de sesión, expira automáticamente |
-
-**Pipeline de consolidación**: `ingest_event` → extracción de facts (LLM o heurística local) → `semantic` (`active` si confianza ≥ 0.85, else `draft`).
-
-**Endpoints** (`/v1/memory/{namespace}/`):
-- `POST ingest_event` — ingesta episódica con embedding + working memory opcional
-- `POST upsert_fact` — crea o actualiza un fact semántico (versiona el anterior automáticamente)
-- `POST query` — recall híbrido con semantic walk BFS sobre grafo de memorias
-- `GET timeline/{entity_id}` — historial cronológico por entidad
-- `POST upsert_procedure` — registra/actualiza un DAG procedural
-- `POST next_step` — resuelve el siguiente nodo válido según contexto y constraints
-- `POST edges` — crear arista tipada entre memorias
-- `GET edges/{memory_id}` — aristas entrantes y salientes de un nodo
-- `POST edges/{edge_id}/delete` — eliminar arista
-- `GET beliefs/{fact_key}/history` — historial de versiones de un belief
-- `POST graph/centrality` — recomputar PageRank del namespace
-
-Proveedores LLM soportados: `none`, `mock`, `openai`, `ollama`. Ver `docs/NS_MEM.md`.
-
----
-
-### Nivel 2: LumaDatabase Hub (Modo Híbrido RAG)
-El orquestador interno (`LumaDatabase`) fusiona el poder de todos los motores para hacer el trabajo pesado por ti. Segmenta documentos grandes (Chunking), se conecta a modelos de Embeddings (Ollama/OpenAI) de forma automática, y hace **Pre-filtrado SQL estricto** a la velocidad de la luz antes de realizar la búsqueda vectorial, evitando los problemas clásicos del "Post-filtrado" vectorial.
-
-#### 1. Ingesta Automática (`POST /v1/db/{namespace}/ingest`)
-Luma procesa el texto, se conecta al modelo de IA configurado, crea la colección si no existe, divide el texto si es muy largo, guarda los vectores, y almacena tus metadatos en SQLite de forma transaccional (con *Rollback* automático si falla I/O).
-
-```json
-{
-  "id": "contrato_juan_perez", 
-  "text": "El arrendatario se compromete a pagar $500 mensuales...",
-  "metadata": {
-    "cliente": "Juan Perez",
-    "year": 2024,
-    "tipo": "alquiler",
-    "activo": true
-  }
-}
-```
-
-#### 2. Búsqueda Híbrida con Pre-filtrado Relacional (`POST /v1/db/{namespace}/search`)
-Busca semánticamente usando un modelo de embeddings y filtra rígidamente (Pre-filtro) usando SQLite para garantizar un 100% de precisión. Luma "colapsa" internamente los fragmentos (chunks) y te devuelve el documento padre hidratado con sus mejores *snippets*.
+- **`POST /v1/db/{namespace}/ingest`** — ingesta de `{ id, text, metadata }`: chunking → embedding → upsert.
+- **`POST /v1/db/{namespace}/search`** — búsqueda híbrida: **pre-filtro SQL** estricto (100% de precisión) antes de la fase vectorial, luego colapsa chunks y devuelve el documento padre hidratado.
 
 ```json
 {
@@ -190,162 +166,104 @@ Busca semánticamente usando un modelo de embeddings y filtra rígidamente (Pre-
 }
 ```
 
-*Incluso si existe un contrato de compra-venta de 2023 muy parecido semánticamente a la pregunta, Luma lo descartará instantáneamente en la fase SQLite (usando el canal de concurrencia MPSC en memoria) antes de desperdiciar CPU en el motor vectorial.*
+### Nivel 3: NS-Mem — Memoria de agentes — `/v1/memory/{namespace}`
 
-### 🔌 Configuración de Embeddings (BYOM - Bring Your Own Model)
-Para no engordar el binario con librerías pesadas de C++, Luma usa un cliente ligero HTTP integrado. Soporta 6 providers con retry automático:
+Capa de memoria completa para agentes autónomos (`src/memory/`), construida sobre el stack convergente.
 
-| Provider | Variable | Notas |
+| Tipo | Almacenamiento | Descripción |
+| :--- | :--- | :--- |
+| **episodic** | Vector + SQLite | Eventos e interacciones concretas indexadas para recall semántico |
+| **semantic** | Vector + SQLite | Hechos y preferencias estables, promovidos desde episodic vía LLM |
+| **procedural** | SQLite (DAG) | Flujos con nodos, aristas tipadas y evaluación de constraints |
+| **working** | KV + TTL | Contexto efímero de sesión, expira automáticamente |
+
+**Pipeline de consolidación**: `ingest_event` → extracción de facts (LLM o heurística local) → `semantic` (`active` si confianza ≥ 0.85, si no `draft`), creando una arista `TriggeredBy` (episodic → semantic).
+
+**Recall (semantic walk)**: seeds K-NN → expansión BFS por aristas tipadas → ranking por `coseno × edge_factor × (1 + centralidad PageRank)` → filtra archivados → top-k.
+
+**Endpoints**:
+- `POST ingest_event` · `POST upsert_fact` · `POST upsert_procedure`
+- `POST query` (recall híbrido) · `POST next_step` (siguiente nodo válido del DAG)
+- `GET timeline/{entity_id}`
+- `POST edges` · `GET edges/{memory_id}` · `POST edges/{edge_id}/delete`
+- `GET beliefs/{fact_key}/history` · `POST graph/centrality`
+
+Además: deduplicación de facts (cosine ≥ 0.95), decay exponencial opt-in (`memory_decay_enabled`) y detección de contradicciones (arista `Contradicts` si la similitud viejo↔nuevo < 0.55). Proveedores LLM: `none`, `mock`, `openai`, `ollama`. Ver `docs/NS_MEM.md`.
+
+### Administración y salud
+
+- `GET /v1/health`, `GET /v1/metrics` (percentiles p50/p95/p99).
+- `POST /v1/admin/backup` (dispara snapshot), `GET /v1/admin/audit` (log de acceso filtrable) — requieren rol `admin`.
+- API keys y RBAC: `/v1/auth/keys`, `/v1/auth/roles`.
+- `GET`/`PUT /v1/config`.
+
+---
+
+## 🔌 Embeddings (BYOM — Bring Your Own Model)
+
+Para no engordar el binario con librerías pesadas de C++, Luma usa un cliente HTTP ligero con reintentos automáticos. Soporta 6 proveedores además de `none` (sin embedding server-side, valor por defecto):
+
+| Provider | Variables | Notas |
 | :--- | :--- | :--- |
 | `ollama` | `EMBEDDING_URL`, `EMBEDDING_MODEL` | Local, sin API key |
 | `openai` | `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Batching ≤ 96 |
-| `azure` | `EMBEDDING_AZURE_API_BASE`, `EMBEDDING_AZURE_DEPLOYMENT` | API key header |
+| `azure` | `EMBEDDING_AZURE_API_BASE`, `EMBEDDING_AZURE_DEPLOYMENT` | `api-key` header |
 | `cohere` | `EMBEDDING_API_KEY`, `EMBEDDING_COHERE_INPUT_TYPE` | `search_document` / `search_query` |
 | `huggingface` | `EMBEDDING_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Inference API |
 | `mock` | `EMBEDDING_DIM` | Tests/CI sin red |
 
-```bash
-# Ejemplo: Azure OpenAI
-EMBEDDING_PROVIDER=azure
-EMBEDDING_AZURE_API_BASE=https://mi-recurso.openai.azure.com
-EMBEDDING_AZURE_DEPLOYMENT=text-embedding-3-small
-EMBEDDING_API_KEY=sk-...
-EMBEDDING_RETRY_ATTEMPTS=3
-```
-
-## 💡 Flujos de Trabajo Híbridos
-
-Gracias a esta arquitectura orquestada, puedes construir flujos imposibles con bases de datos aisladas:
-
-### RAG con Contexto de Negocio
-1.  **Vector (Core):** Encuentra los 10 documentos más parecidos semánticamente a la pregunta del usuario.
-2.  **SQL (Relacional):** Filtra esos documentos verificando en la tabla `usuarios_y_permisos` si el usuario actual tiene acceso nivel 'admin'.
-3.  **Eventos (Core):** Publica un evento `search_audit` que otros microservicios pueden escuchar en tiempo real.
-
-Todo esto ocurre dentro de una sola llamada al servidor Luma, con latencia de red interna cero.
-
-## 🚀 Novedades en v4.2.0 (Object Storage, Queues e Images)
-
-Tres nuevas primitivas que convierten a Luma en un stack completo tipo Cloudflare (R2 + Queues + Images), todas autenticadas con `Authorization: Bearer <api_key>` y endurecidas contra path-traversal. Ver detalle y ejemplos en [`docs/API.md`](docs/API.md).
-
-### Object Storage — R2-like (`/v1/blob`)
-Objetos binarios persistidos en disco (`{data_dir}/blobs/{bucket}/{key}`), fuera del document store — ideal para adjuntos, imágenes, PDFs, backups.
-
-- `PUT /v1/blob/:bucket/:key` — sube bytes crudos (escritura atómica), devuelve `{ bucket, key, size, etag }`.
-- `GET /v1/blob/:bucket/:key` — descarga los bytes.
-- `DELETE /v1/blob/:bucket/:key` — borra (idempotente).
-- `GET /v1/blob/:bucket` — lista las keys del bucket.
-
-```bash
-curl -X PUT http://localhost:1234/v1/blob/adjuntos/acta.pdf \
-  -H "Authorization: Bearer dev" --data-binary @acta.pdf
-```
-
-### Queues — colas de mensajes (`/v1/queue`)
-Cola durable en disco con entrega *at-least-once*, *visibility timeout* y *ack*.
-
-- `POST /v1/queue/:queue` — encola `{ "body": <json>, "delay_secs"?: n }` → `{ id }`.
-- `POST /v1/queue/:queue/receive` — recibe `{ "max"?: 1..100, "visibility_secs"?: 30 }` → `{ messages: [{ id, body, attempts }] }`.
-- `DELETE /v1/queue/:queue/:id` — ack/borra el mensaje (idempotente).
-- `GET /v1/queue/:queue` — stats `{ queue, depth, visible }`.
-
-```bash
-curl -X POST http://localhost:1234/v1/queue/jobs \
-  -H "Authorization: Bearer dev" -H 'Content-Type: application/json' \
-  -d '{"body":{"task":"enviar-email"}}'
-```
-
-### Images — transformación on-the-fly (`/v1/image`)
-Redimensiona y convierte imágenes ya guardadas en el blob store (sin estado, sin caché).
-
-- `GET /v1/image/:bucket/:key?w=&h=&format=&quality=` — resize (Lanczos3, preserva aspecto) + convert (`png`|`jpeg`). `w`/`h` ≤ 5000, `quality` 1..100.
-
-```bash
-curl "http://localhost:1234/v1/image/adjuntos/foto.png?w=256&format=jpeg&quality=82" \
-  -H "Authorization: Bearer dev" -o thumb.jpg
-```
-
-> Durable Objects y KV ya están cubiertos por el state store con CAS (`if_revision`) y los eventos pub/sub; Vectorize por el núcleo vectorial; D1 por el SQLite embebido.
-
-## 🚀 Novedades en v3.0.0 (Search, Observabilidad y NS-Mem Avanzado)
-
-### Búsqueda y exportación
-
-- **Batch search** (`POST /v1/vector/{collection}/search_batch`): hasta 100 queries ejecutadas en paralelo internamente (`rayon`). Reduce 100 round-trips a 1.
-- **Scroll / cursor API** (`GET /v1/vector/{collection}/scroll`): paginación lexicográfica con cursor opaco para exportar colecciones completas sin límite de `k`.
-- **Reranking por coseno** (`POST /v1/vector/{collection}/rerank`): recibe IDs + query (texto o vector), embebe si es texto, reordena por coseno real. Ideal para pipeline search-then-rerank.
-- **Aggregations** (`POST /v1/vector/{collection}/aggregate`): `{ "group_by": "campo", "filter": {...}, "limit": N }` — cuenta ítems por valor usando el keyword index. Fast path O(1) para campos indexados.
-- **Pre-filter threshold configurable** (`pre_filter_threshold`, default 10 000): brute-force automático sobre subconjuntos filtrados, más eficiente que HNSW + post-filter para corpus muy filtrados.
-
-### Embeddings
-
-- **4 nuevos providers**: `azure` (Azure OpenAI), `cohere` (v1/embed con input_type), `huggingface` (Inference API), añadidos a los existentes `openai`, `ollama`, `mock`.
-- **Retry con backoff exponencial + jitter**: `EMBEDDING_RETRY_ATTEMPTS` (default 3) y `EMBEDDING_RETRY_INITIAL_MS` (default 200). Resiste 429 y 503 transitorios sin fallar la request.
-
-### Observabilidad y operaciones
-
-- **Audit log** (`GET /v1/admin/audit`): cada request queda registrada en SQLite con `ts`, `api_key_id`, `ip`, `method`, `path`, `status`, `latency_ms`. Filtra por rango de tiempo, key e id.
-- **Backup endpoint** (`POST /v1/admin/backup`): dispara snapshot WAL y retorna `{ "ok": true, "offset": N }`. Ambos requieren rol `admin`.
-- **Bench CI**: `cargo bench --no-run` como job en GitHub Actions — bloquea merges que rompen compilación de benchmarks.
-- **RBAC tests** (`tests/auth_rbac.rs`): 7 tests de integración que cubren 401/403 en todas las combinaciones de token ausente, inválido, revocado y rol `user` vs `admin`.
-
-### NS-Mem — Memoria de agentes más inteligente
-
-- **Deduplicación de facts**: el consolidador verifica similitud semántica (cosine ≥ 0.95) antes de insertar. Facts redundantes extraídos de eventos distintos no se acumulan.
-- **Decay exponencial** (`memory_decay_enabled`): campo `decay_score` en cada fact semántico. Decae con semivida configurable (`memory_decay_half_life_days`, default 30d). Facts por debajo del umbral se archivan automáticamente.
-- **Detección de contradicciones**: al sobrescribir un fact (`upsert_fact`), si la similitud semántica entre el contenido viejo y el nuevo es < 0.55, se crea una arista `Contradicts` en lugar de `Supersedes` y se emite log de contradicción detectada.
+Retry con backoff exponencial + jitter: `EMBEDDING_RETRY_ATTEMPTS` (default 3), `EMBEDDING_RETRY_INITIAL_MS` (default 200).
 
 ---
 
-## 🚀 Novedades en v2.0.0 (NS-Mem Graph Layer)
+## 🧰 Tecnologías clave
 
-**Breaking change**: el recall de NS-Mem ya no es K-NN plano. Ahora usa un **semantic walk BFS** sobre un grafo de memorias tipado.
+| Componente | Crate | Rol |
+| :--- | :--- | :--- |
+| Runtime async / HTTP | `tokio`, `axum` 0.7, `hyper` 1 | I/O no bloqueante y router |
+| Core KV | `redb` | Persistencia ACID en Rust puro |
+| Relacional | `rusqlite` (SQLite bundled) | SQL embebido en modo WAL |
+| Vectores | `hnsw_rs` + IVF/DiskANN a medida | Índices ANN conmutables |
+| Panel embebido | `rust-embed` + React/Vite | SPA servida desde `ui/dist` |
+| Seguridad | `argon2`, `chacha20poly1305`, `rustls` | Hashing, cifrado, TLS |
+| Parseo | `pdf-extract`, `docx-rs`, `image` | Ingesta de formatos ricos |
 
-*   **Graph Layer** (`src/memory/graph.rs`): motor de grafo sobre SQLite con aristas tipadas entre memorias (`supports`, `contradicts`, `supersedes`, `triggered_by`, `related_to`).
-*   **Semantic Walk BFS**: seeds K-NN → expansión por aristas con factor por tipo → corte si coseno < 0.65 → ranking por `coseno × edge_factor × (1 + PageRank)`.
-*   **PageRank centralidad**: 15 iteraciones sobre aristas positivas, normalizado `[0,1]`, almacenado en `memory_records.centrality_score`. Recomputable vía API.
-*   **Versionado de beliefs**: `upsert_fact` sobre fact existente archiva la versión anterior en `memory_history` (tabla append-only) y crea una arista `Supersedes`.
-*   **Aristas automáticas**: consolidación crea arista `TriggeredBy` (episodic → semantic) en cada extracción de fact.
-*   **Nuevos endpoints** en `/v1/memory/{namespace}/`:
-    *   `POST edges` — crear arista manual
-    *   `GET edges/{memory_id}` — aristas de un nodo
-    *   `POST edges/{edge_id}/delete` — eliminar arista
-    *   `GET beliefs/{fact_key}/history` — historial de versiones de un belief
-    *   `POST graph/centrality` — disparar recomputo PageRank
+---
 
-## 🚀 Novedades en v1.4.0 (NS-Mem — Agent Memory Layer)
+## 🗂️ Layout en disco
 
-*   **NS-Mem**: Capa completa de memoria para agentes (`src/memory/`). Tipos: `episodic`, `semantic`, `procedural`, `working`. Pipeline de consolidación automática episodic → semantic vía LLM.
-*   **Motor procedural DAG**: Flujos de trabajo persistidos en SQLite con evaluación determinista de constraints en Rust (8 operadores).
-*   **LLM providers**: Extracción de facts vía `openai`, `ollama`, `mock` o heurísticas locales (`none`).
-*   **KV sharding**: Store fragmentado en 16 buckets independientes (menor contención).
-*   **WAL group commit**: Reducción de fsyncs en ingesta masiva.
-*   **Métricas con histogramas de latencia**: `/v1/metrics` con percentiles p50/p95/p99.
+```
+data/
+├── events-000001.log          # WAL segmentado (JSON lines)
+├── snapshot.json              # Último snapshot de estado
+├── vectors/<collection>/       # manifest.json, vectors.bin (mmap), diskann/
+└── sqlite/rustkiss.db          # Relacional + auth + docstore + tablas NS-Mem y sys_*
+backups/<timestamp>/           # Respaldos (VACUUM INTO + snapshot + WAL)
+```
 
-## 🚀 Novedades en v1.3.2 (Mmap & Zero-Copy Architecture)
+---
 
-La versión 1.3.2 marca un hito en la eficiencia de recursos, permitiendo a Luma escalar a millones de vectores con un consumo de RAM mínimo:
-*   **Motor de Almacenamiento Zero-Copy:** Implementación de `VectorMmap` usando memoria mapeada (`memmap2`). Los vectores ya no residen obligatoriamente en el heap de Rust, sino que se acceden directamente desde el disco a través del Page Cache del SO.
-*   **Latencia de Ingesta Ultra-Baja:** Reducción de la latencia de escritura a ~2.4 microsegundos por vector (dim 1536), eliminando pases de serialización intermedios.
-*   **Arranque Instantáneo:** El mapeo de archivos permite que colecciones masivas estén listas para buscar en milisegundos, delegando la carga de datos al Kernel bajo demanda.
-*   **Mapeo ID-to-Offset O(1):** Integración de offsets binarios en `VectorItem` para saltar directamente a la posición física del vector en disco durante la fase de refinamiento.
-*   **Migración Automática Silenciosa:** Los datos existentes en el formato WAL heredado se migran automáticamente al nuevo motor binario al primer arranque.
+## ✅ Estado actual del proyecto
 
-## 🚀 Novedades en v1.3.1 (Mejoras de Arquitectura Nivel 2)
+Implementado y verificable en el código de hoy (crate `luma` v4.0.0):
 
-La versión 1.3.1 introduce cambios radicales para eliminar cuellos de botella y maximizar el rendimiento en escenarios de alta concurrencia:
-*   **Push-Down Filtering Verdadero:** Integración directa de filtrado relacional con DiskANN/IVF. Los nodos descartados por SQLite nunca son evaluados, reduciendo la complejidad a `O(M)` sobre el subgrafo válido.
-*   **Ingesta Concurrente Controlada:** El orquestador usa `tokio::sync::Semaphore` para limitar inteligentemente peticiones HTTP masivas a modelos de embeddings remotos, manteniendo el throughput máximo sin ahogar la red.
-*   **Locking Granular:** Se eliminó el `commit_lock` global en el motor principal por un `DashMap`, permitiendo ingestas multi-hilo completamente paralelas y sin bloqueos entre diferentes colecciones.
-*   **Hydration Nativo:** Sustituimos `serde_json::Value` por `structs` nativos en el hot path, eliminando la presión en el GC y mejorando drásticamente los tiempos de latencia y uso de CPU al buscar.
-*   **Auto-Schema en Background:** La auto-creación de índices (`CREATE INDEX`) de SQLite ahora se gestiona de forma asíncrona mediante una cola MPSC dedicada y de un solo worker, resolviendo definitivamente el overhead de locks (tipo `SQLITE_BUSY`).
-*   **Modelo de Consistencia Explícito:** Patrón Eventual Consistency por compensación de *rollback* (Garantiza revertir estados relacionales o en `redb` si falla el vector store).
+- **Núcleo convergente**: motor vectorial (HNSW / IVF-FLAT-Q8 / DiskANN), KV con TTL/CAS, WAL segmentado + snapshots, SQLite embebido vía actor, bus de eventos SSE, hub RAG híbrido y motor de búsqueda de texto. Todo montado en el router y cubierto por `tests/`.
+- **Object storage, colas e imágenes**: primitivas tipo R2 + Queues + Images ya montadas en `/v1/blob`, `/v1/queue`, `/v1/image`.
+- **NS-Mem**: memoria de agentes con grafo tipado, semantic walk BFS, PageRank, versionado de beliefs, deduplicación y detección de contradicciones. Decay opt-in.
+- **Capa empresarial**: cuentas/orgs/usuarios, roles owner/admin/member/viewer, login Argon2id + tokens de sesión, aislamiento multi-tenant por organización, auditoría, cifrado en reposo, respaldos (CLI + tarea de fondo) y **panel de administración React realmente compilado e incrustado** (`admin-ui/` → `ui/dist`).
+- **Operación**: TLS opcional, rate limiting opt-in, CORS configurable, timeouts, cabeceras de seguridad y documentación Scalar en `/docs`.
+
+Notas de honestidad:
+- Varias capacidades pesadas vienen **deshabilitadas por defecto** (`embedding_provider = "none"`, consolidación/decay/centralidad de memoria, `rate_limit_rps = 0`) — es un perfil de desarrollo; en producción se activan por configuración/entorno.
+- El backend remoto **libSQL/Turso** solo se activa si `LIBSQL_URL` está definido; de lo contrario se usa el SQLite local.
+- La durabilidad depende de montar un volumen persistente para `data_dir` cuando se corre en contenedor (`FROM scratch`).
 
 ---
 
 ## 🏁 Conclusión
 
-Luma (rust-kiss-vdb) redefine el backend para IA mediante la **convergencia**. No es un simple wrapper; es un sistema de ingeniería cuidadosa que orquesta los mejores motores de su clase (DiskANN para vectores, SQLite para relaciones, redb para KV) en una sola plataforma cohesionada.
+Luma redefine el backend para IA mediante la **convergencia**: orquesta motores de primer nivel (índices vectoriales, SQLite, redb) más una capa empresarial completa en una sola plataforma cohesionada y un solo binario.
 
 > **Keep It Simple, Stupid (KISS). Keep It Fast, Rust.**
+
 Proyecto de prueba interno
