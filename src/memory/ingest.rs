@@ -1,6 +1,6 @@
 use crate::memory::service::MemoryService;
 use crate::memory::types::{
-    EdgeType, IngestEventRequest, MemoryEdge, MemoryKind, MemoryRecord, MemoryStatus,
+    EdgeType, IngestEventRequest, MemoryKind, MemoryRecord, MemoryStatus,
     UpsertFactRequest,
 };
 use crate::vector::{Metric, VectorItem};
@@ -60,61 +60,58 @@ impl MemoryService {
         }
 
         // ── Belief versioning: snapshot old record before overwriting ──────
-        // Also detect semantic contradictions: if the new content diverges
-        // significantly from the old (cosine < CONTRADICTION_THRESHOLD), create
-        // a Contradicts edge in addition to the Supersedes/archive path.
-        const CONTRADICTION_THRESHOLD: f32 = 0.55;
+        // A contradiction is when the new fact is about the SAME subject as the
+        // old one (high embedding cosine, i.e. we're overwriting the same
+        // fact_key) AND the stored value actually changed. Low cosine means the
+        // new content is unrelated — that is NOT a contradiction. We label the
+        // former `Contradicts` and everything else `Supersedes`.
         if let Some(graph) = &self.graph {
             if let Ok(Some(existing)) = self.get_memory_record(namespace, &memory_id).await {
-                // Detect contradiction via embedding similarity
                 let is_contradiction = 'check: {
+                    let content_changed = request.content.trim() != existing.content.trim();
+                    if !content_changed {
+                        break 'check false;
+                    }
                     let Ok(new_vec) = self.embeddings.embed(&request.content).await else {
                         break 'check false;
                     };
                     let Ok(old_vec) = self.embeddings.embed(&existing.content).await else {
                         break 'check false;
                     };
-                    let dot: f32 = new_vec.iter().zip(old_vec.iter()).map(|(a, b)| a * b).sum();
-                    let n1: f32 = new_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let n2: f32 = old_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let cosine = if n1 > 0.0 && n2 > 0.0 {
-                        dot / (n1 * n2)
-                    } else {
-                        1.0
-                    };
-                    cosine < CONTRADICTION_THRESHOLD
+                    is_semantic_contradiction(cosine_similarity(&new_vec, &old_vec), content_changed)
                 };
 
-                // Append old version to history
-                if let Ok(history_id) = graph.append_belief_history(&existing, now_ms).await {
-                    let edge_type = if is_contradiction {
-                        EdgeType::Contradicts
-                    } else {
-                        EdgeType::Supersedes
-                    };
-                    let edge = MemoryEdge {
-                        id: format!("{}::{memory_id}::{history_id}", edge_type),
-                        namespace: namespace.to_string(),
-                        source_id: memory_id.clone(),
-                        target_id: existing.id.clone(),
+                // Overwriting a fact_key is always a belief *supersession* (the new
+                // value replaces the old, temporally). Whether the values actually
+                // conflict is an orthogonal property recorded as the `contradiction`
+                // metadata flag on that same edge — a low-cosine unrelated update is
+                // NOT a contradiction; a same-subject value change is.
+                // ponytail: representing contradiction as a flag on the supersedes
+                // edge keeps versioning intact; a distinct Contradicts edge_type
+                // isn't consumed anywhere, so it would only complicate the graph.
+                let edge_type = EdgeType::Supersedes;
+
+                // Snapshot history + belief edge + archive in one transaction so
+                // a mid-sequence failure can't corrupt the belief chain.
+                match graph
+                    .supersede_with_history(
+                        namespace,
+                        &existing,
+                        &memory_id,
                         edge_type,
-                        weight: 1.0,
-                        metadata: serde_json::json!({"reason": "upsert_fact_overwrite", "contradiction": is_contradiction}),
-                        created_at_ms: now_ms,
-                    };
-                    if let Err(e) = graph.upsert_edge(&edge).await {
-                        tracing::warn!("Failed to create belief edge: {}", e);
-                    }
-                    if is_contradiction {
-                        tracing::info!(
-                            namespace = %namespace,
-                            fact_id = %memory_id,
-                            "detected belief contradiction (cosine < {CONTRADICTION_THRESHOLD})"
-                        );
-                    }
+                        is_contradiction,
+                        now_ms,
+                    )
+                    .await
+                {
+                    Ok(_) if is_contradiction => tracing::info!(
+                        namespace = %namespace,
+                        fact_id = %memory_id,
+                        "detected belief contradiction (same subject, value changed)"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("Failed to version belief: {}", e),
                 }
-                // Archive the old version in memory_records
-                let _ = self.archive_memory_record(namespace, &existing.id).await;
             }
         }
 
@@ -137,27 +134,6 @@ impl MemoryService {
         self.persist_memory_record(&record).await?;
         self.index_memory_record(&record).await?;
         Ok(record)
-    }
-
-    pub(crate) async fn archive_memory_record(
-        &self,
-        namespace: &str,
-        id: &str,
-    ) -> anyhow::Result<()> {
-        let Some(sqlite) = &self.sqlite else {
-            return Ok(());
-        };
-        sqlite
-            .execute(
-                "UPDATE memory_records SET status = 'archived' WHERE namespace = ? AND id = ?"
-                    .to_string(),
-                vec![
-                    serde_json::Value::String(namespace.to_string()),
-                    serde_json::Value::String(id.to_string()),
-                ],
-            )
-            .await
-            .map(|_| ())
     }
 
     pub(crate) async fn persist_memory_record(&self, record: &MemoryRecord) -> anyhow::Result<()> {
@@ -328,4 +304,65 @@ fn opt_u64(value: Option<u64>) -> serde_json::Value {
     value
         .map(serde_json::Value::from)
         .unwrap_or(serde_json::Value::Null)
+}
+
+// ── Contradiction heuristic ─────────────────────────────────────────────────
+
+/// Cosine at/above this means the two texts are about the SAME subject, so an
+/// overwrite of the same `fact_key` is replacing the value of a known fact.
+const SAME_SUBJECT_COSINE: f32 = 0.75;
+
+/// A contradiction is a *same-subject* overwrite whose value changed.
+///
+// ponytail: embedding cosine is only a coarse proxy for "same subject" — it
+// can't tell "the sky is blue" from "the sky is not blue", both high-cosine.
+// A proper NLI / entailment check would be the real fix, but that's out of
+// scope here; high cosine + a changed value is a defensible cheap signal.
+fn is_semantic_contradiction(cosine: f32, content_changed: bool) -> bool {
+    content_changed && cosine >= SAME_SUBJECT_COSINE
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cosine_similarity, is_semantic_contradiction};
+
+    #[test]
+    fn same_subject_changed_value_is_contradiction() {
+        // Two facts about the same subject sit close in embedding space.
+        let old_vec = [1.0_f32, 0.2, 0.1];
+        let new_vec = [0.98_f32, 0.25, 0.12];
+        let cosine = cosine_similarity(&new_vec, &old_vec);
+        assert!(cosine >= 0.75, "expected high cosine, got {cosine}");
+        assert!(is_semantic_contradiction(cosine, true));
+    }
+
+    #[test]
+    fn unrelated_topic_is_not_contradiction() {
+        // Orthogonal vectors => cosine ~0 => unrelated, not a contradiction.
+        let old_vec = [1.0_f32, 0.0, 0.0];
+        let new_vec = [0.0_f32, 1.0, 0.0];
+        let cosine = cosine_similarity(&new_vec, &old_vec);
+        assert!(cosine < 0.75, "expected low cosine, got {cosine}");
+        assert!(!is_semantic_contradiction(cosine, true));
+    }
+
+    #[test]
+    fn unchanged_value_is_not_contradiction() {
+        // Identical content (cosine ~1.0) but nothing changed => just a rewrite.
+        assert!(!is_semantic_contradiction(1.0, false));
+    }
 }
