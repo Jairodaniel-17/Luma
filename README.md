@@ -348,3 +348,4 @@ La versión 1.3.1 introduce cambios radicales para eliminar cuellos de botella y
 Luma (rust-kiss-vdb) redefine el backend para IA mediante la **convergencia**. No es un simple wrapper; es un sistema de ingeniería cuidadosa que orquesta los mejores motores de su clase (DiskANN para vectores, SQLite para relaciones, redb para KV) en una sola plataforma cohesionada.
 
 > **Keep It Simple, Stupid (KISS). Keep It Fast, Rust.**
+Proyecto de prueba interno
