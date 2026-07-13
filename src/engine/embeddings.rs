@@ -4,9 +4,29 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 type EmbedCache = Arc<Mutex<LruCache<String, Vec<f32>>>>;
+
+/// Default per-request timeout (connect + full round trip) applied to every
+/// embedding HTTP client. Mirrors `Config::request_timeout_secs`'s default so
+/// behaviour is unchanged unless a caller overrides it via `with_timeout`.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Build a reqwest client with connect + total request timeouts so a hung or
+/// slow embedding provider can never pin a request (and the inflight/ingest
+/// permits held around it) forever. Falls back to a default client only if the
+/// builder rejects the options, which should not happen for plain timeouts.
+fn build_http_client(timeout_secs: u64) -> reqwest::Client {
+    let total = Duration::from_secs(timeout_secs.max(1));
+    let connect = Duration::from_secs(timeout_secs.min(10).max(1));
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
@@ -67,7 +87,7 @@ impl Default for EmbeddingClient {
     fn default() -> Self {
         Self {
             provider: EmbeddingProvider::None,
-            client: reqwest::Client::new(),
+            client: build_http_client(DEFAULT_REQUEST_TIMEOUT_SECS),
             cache: None,
             metrics: None,
             max_inflight_requests: 16,
@@ -83,7 +103,7 @@ impl EmbeddingClient {
     pub fn new(provider: EmbeddingProvider) -> Self {
         Self {
             provider,
-            client: reqwest::Client::new(),
+            client: build_http_client(DEFAULT_REQUEST_TIMEOUT_SECS),
             cache: None,
             metrics: None,
             max_inflight_requests: 16,
@@ -115,7 +135,7 @@ impl EmbeddingClient {
             NonZeroUsize::new(cache_size).map(|cap| Arc::new(Mutex::new(LruCache::new(cap))));
         Self {
             provider,
-            client: reqwest::Client::new(),
+            client: build_http_client(DEFAULT_REQUEST_TIMEOUT_SECS),
             cache,
             metrics,
             max_inflight_requests: n,
@@ -129,6 +149,14 @@ impl EmbeddingClient {
     pub fn with_retry(mut self, attempts: u32, initial_ms: u64) -> Self {
         self.retry_attempts = attempts.max(1);
         self.retry_initial_ms = initial_ms;
+        self
+    }
+
+    /// Override the per-request HTTP timeout (seconds). Additive: callers that
+    /// want config-driven timeouts (e.g. `Config::request_timeout_secs`) can
+    /// chain this after construction.
+    pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
+        self.client = build_http_client(timeout_secs);
         self
     }
 
@@ -232,6 +260,18 @@ impl EmbeddingClient {
         self.embed_batch_uncached(texts).await
     }
 
+    /// Sleep with exponential backoff + jitter before a retry attempt.
+    /// Shared by the single-embed and batch-embed retry loops.
+    async fn retry_backoff_sleep(&self, attempt: u32) {
+        let base_ms = self.retry_initial_ms << (attempt - 1).min(5);
+        let jitter_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_millis() as u64)
+            .unwrap_or(0)
+            % (base_ms / 4 + 1);
+        tokio::time::sleep(Duration::from_millis(base_ms + jitter_ms)).await;
+    }
+
     async fn embed_uncached(&self, text: &str) -> Result<Vec<f32>> {
         let _permit = if let Some(sem) = &self.inflight_semaphore {
             Some(
@@ -254,13 +294,7 @@ impl EmbeddingClient {
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..max_attempts {
             if attempt > 0 {
-                let base_ms = self.retry_initial_ms << (attempt - 1).min(5);
-                let jitter_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_millis() as u64)
-                    .unwrap_or(0)
-                    % (base_ms / 4 + 1);
-                tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+                self.retry_backoff_sleep(attempt).await;
             }
             let result = self.call_provider_single(text).await;
             match result {
@@ -320,7 +354,40 @@ impl EmbeddingClient {
         }
     }
 
+    /// Batch embedding with the same retry/backoff policy as `embed_uncached`.
     async fn embed_batch_uncached(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let is_network = !matches!(
+            &self.provider,
+            EmbeddingProvider::None | EmbeddingProvider::Mock { .. }
+        );
+        let max_attempts = if is_network {
+            self.retry_attempts.max(1)
+        } else {
+            1
+        };
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                self.retry_backoff_sleep(attempt).await;
+            }
+            match self.embed_batch_dispatch(texts).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = max_attempts,
+                        error = %e,
+                        "batch embedding attempt failed"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| anyhow!("batch embedding failed after {max_attempts} attempts")))
+    }
+
+    async fn embed_batch_dispatch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         match &self.provider {
             EmbeddingProvider::None => Err(anyhow::anyhow!("Embeddings are not configured")),
             EmbeddingProvider::OpenAI {
@@ -364,6 +431,28 @@ impl EmbeddingClient {
                 Ok(texts.iter().map(|t| self.embed_mock(*dim, t)).collect())
             }
         }
+    }
+
+    /// Validate a returned embedding's length against the configured `dim`.
+    /// A `dim` of 0 means "unspecified" and disables the check. Prevents a
+    /// misconfigured/misbehaving provider from silently poisoning the index
+    /// with wrong-width vectors.
+    fn check_dim(&self, got: usize) -> Result<()> {
+        if self.dim != 0 && got != self.dim {
+            return Err(anyhow!(
+                "embedding dimension mismatch: expected {}, got {}",
+                self.dim,
+                got
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_dims(&self, vecs: &[Vec<f32>]) -> Result<()> {
+        for v in vecs {
+            self.check_dim(v.len())?;
+        }
+        Ok(())
     }
 
     fn embed_mock(&self, dim: usize, text: &str) -> Vec<f32> {
@@ -413,7 +502,9 @@ impl EmbeddingClient {
         if parsed.data.is_empty() {
             return Err(anyhow::anyhow!("No embeddings returned from OpenAI"));
         }
-        Ok(parsed.data.remove(0).embedding)
+        let embedding = parsed.data.remove(0).embedding;
+        self.check_dim(embedding.len())?;
+        Ok(embedding)
     }
 
     /// OpenAI batch — splits into chunks of at most 96 texts to stay within API limits.
@@ -478,6 +569,7 @@ impl EmbeddingClient {
                 .map(|row| (row.index, row.embedding))
                 .collect();
             let ordered = reorder_openai_embeddings(rows, chunk.len())?;
+            self.check_dims(&ordered)?;
             all_vecs.extend(ordered);
         }
 
@@ -511,6 +603,7 @@ impl EmbeddingClient {
         }
 
         let parsed: Resp = resp.json().await?;
+        self.check_dim(parsed.embedding.len())?;
         Ok(parsed.embedding)
     }
 
@@ -604,11 +697,13 @@ impl EmbeddingClient {
             embedding: Vec<f32>,
         }
         let mut parsed: Resp = resp.json().await?;
-        parsed
+        let embedding = parsed
             .data
             .pop()
             .map(|d| d.embedding)
-            .ok_or_else(|| anyhow!("Azure OpenAI returned no embeddings"))
+            .ok_or_else(|| anyhow!("Azure OpenAI returned no embeddings"))?;
+        self.check_dim(embedding.len())?;
+        Ok(embedding)
     }
 
     async fn embed_batch_azure(
@@ -667,7 +762,9 @@ impl EmbeddingClient {
                 .into_iter()
                 .map(|d| (d.index, d.embedding))
                 .collect();
-            all.extend(reorder_openai_embeddings(rows, chunk.len())?);
+            let ordered = reorder_openai_embeddings(rows, chunk.len())?;
+            self.check_dims(&ordered)?;
+            all.extend(ordered);
         }
         Ok(all)
     }
@@ -698,6 +795,7 @@ impl EmbeddingClient {
         input_type: &str,
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>> {
+        const COHERE_BATCH_LIMIT: usize = 96;
         let url = format!("{}/v1/embed", api_url.trim_end_matches('/'));
         #[derive(Serialize)]
         struct Req<'a> {
@@ -710,31 +808,43 @@ impl EmbeddingClient {
             embeddings: Vec<Vec<f32>>,
         }
 
-        let _permit = if let Some(sem) = &self.inflight_semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| anyhow!("semaphore closed: {e}"))?,
-            )
-        } else {
-            None
-        };
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(api_key)
-            .json(&Req {
-                texts,
-                model,
-                input_type,
-            })
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("Cohere error: {}", resp.text().await?));
+        let mut all: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(COHERE_BATCH_LIMIT) {
+            let _permit = if let Some(sem) = &self.inflight_semaphore {
+                Some(
+                    sem.acquire()
+                        .await
+                        .map_err(|e| anyhow!("semaphore closed: {e}"))?,
+                )
+            } else {
+                None
+            };
+            let resp = self
+                .client
+                .post(&url)
+                .bearer_auth(api_key)
+                .json(&Req {
+                    texts: chunk,
+                    model,
+                    input_type,
+                })
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Err(anyhow!("Cohere error: {}", resp.text().await?));
+            }
+            let parsed: Resp = resp.json().await?;
+            if parsed.embeddings.len() != chunk.len() {
+                return Err(anyhow!(
+                    "Cohere batch response size mismatch: expected {}, got {}",
+                    chunk.len(),
+                    parsed.embeddings.len()
+                ));
+            }
+            all.extend(parsed.embeddings);
         }
-        let parsed: Resp = resp.json().await?;
-        Ok(parsed.embeddings)
+        self.check_dims(&all)?;
+        Ok(all)
     }
 
     // ── HuggingFace Inference API ─────────────────────────────────────────────
@@ -793,16 +903,20 @@ impl EmbeddingClient {
             }
             if arr[0].is_array() {
                 // batch: [[f32]]
-                arr.iter()
+                let vecs = arr
+                    .iter()
                     .map(|row| {
                         serde_json::from_value::<Vec<f32>>(row.clone())
                             .map_err(|e| anyhow!("HuggingFace parse error: {e}"))
                     })
-                    .collect()
+                    .collect::<Result<Vec<Vec<f32>>>>()?;
+                self.check_dims(&vecs)?;
+                Ok(vecs)
             } else {
                 // single text returned as [f32]
                 let vec = serde_json::from_value::<Vec<f32>>(body)
                     .map_err(|e| anyhow!("HuggingFace parse error: {e}"))?;
+                self.check_dim(vec.len())?;
                 Ok(vec![vec])
             }
         } else {
@@ -875,6 +989,27 @@ mod tests {
         let err = reorder_openai_embeddings(vec![(0, vec![1.0])], 2).unwrap_err();
 
         assert!(err.to_string().contains("size mismatch"));
+    }
+
+    #[test]
+    fn check_dim_rejects_mismatched_width() {
+        let client =
+            EmbeddingClient::with_limits_and_dim(EmbeddingProvider::Mock { dim: 4 }, 0, 4, None, 4);
+        // Exact match passes.
+        assert!(client.check_dim(4).is_ok());
+        assert!(client.check_dims(&[vec![0.0; 4], vec![1.0; 4]]).is_ok());
+        // Wrong width is rejected.
+        let err = client.check_dim(3).unwrap_err();
+        assert!(err.to_string().contains("dimension mismatch"));
+        assert!(client.check_dims(&[vec![0.0; 4], vec![0.0; 3]]).is_err());
+    }
+
+    #[test]
+    fn check_dim_disabled_when_dim_zero() {
+        // dim == 0 means "unspecified": any width is accepted.
+        let client = EmbeddingClient::new(EmbeddingProvider::Mock { dim: 8 });
+        assert!(client.check_dim(8).is_ok());
+        assert!(client.check_dim(123).is_ok());
     }
 
     #[tokio::test]
