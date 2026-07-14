@@ -1,7 +1,7 @@
 use crate::engine::events::EventRecord;
 use crate::engine::state::{StateError, StateItem};
 use anyhow::Context;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -224,8 +224,35 @@ impl StateDb {
             }
         }
         set_applied_offset(&mut wtx, ev.offset)?;
+        // Eventual durability: don't fsync on every write. The WAL is the durable
+        // source of truth; this store is a projection rebuilt from it on replay.
+        // `flush()` (an Immediate commit) is called at each snapshot/checkpoint to
+        // make it durable and let WAL retention advance. On crash, redb rolls back
+        // to the last Immediate commit and replay re-applies the rest.
+        wtx.set_durability(Durability::Eventual);
         wtx.commit()?;
         Ok(())
+    }
+
+    /// Force all pending Eventual commits durable (a checkpoint) and return the
+    /// offset now guaranteed persistent. Called before a snapshot records its
+    /// offset and WAL segments at/below the returned offset are pruned.
+    ///
+    /// The applied_offset is read inside this exclusive write transaction, so no
+    /// concurrent Eventual apply can advance it between the read and the fsync —
+    /// the returned value is exactly what this Immediate commit makes durable.
+    pub fn flush(&self) -> anyhow::Result<u64> {
+        let wtx = self.db.begin_write()?;
+        let meta = wtx.open_table(META)?;
+        let offset = meta
+            .get(META_APPLIED_OFFSET)?
+            .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or([0; 8])))
+            .unwrap_or(0);
+        drop(meta); // release the table borrow before consuming wtx in commit()
+        // Default durability is Immediate → fsync, persisting every prior Eventual
+        // commit up to `offset`.
+        wtx.commit()?;
+        Ok(offset)
     }
 
     pub fn apply_state_deleted(&self, ev: &EventRecord) -> anyhow::Result<()> {
@@ -256,6 +283,7 @@ impl StateDb {
             };
         }
         set_applied_offset(&mut wtx, ev.offset)?;
+        wtx.set_durability(Durability::Eventual);
         wtx.commit()?;
         Ok(())
     }
@@ -332,4 +360,59 @@ fn next_prefix_boundary(prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StateDb;
+    use crate::engine::events::EventRecord;
+
+    fn ev(offset: u64, key: &str, val: u64) -> EventRecord {
+        EventRecord {
+            offset,
+            ts_ms: 1,
+            event_type: "state_updated".to_string(),
+            data: serde_json::json!({ "key": key, "value": val, "revision": 1 }),
+        }
+    }
+
+    #[test]
+    fn eventual_apply_flush_and_reopen_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = StateDb::open(dir.path()).unwrap();
+            for i in 1..=3u64 {
+                db.apply_state_updated(&ev(i, &format!("k{i}"), i)).unwrap();
+            }
+            // Checkpoint: flush reports the offset it makes durable.
+            assert_eq!(db.flush().unwrap(), 3);
+            // Eventual writes after the checkpoint.
+            for i in 4..=5u64 {
+                db.apply_state_updated(&ev(i, &format!("k{i}"), i)).unwrap();
+            }
+            assert_eq!(db.applied_offset().unwrap(), 5);
+        }
+        // Reopen: applied_offset and all values persist across the store's lifetime.
+        let db2 = StateDb::open(dir.path()).unwrap();
+        assert_eq!(db2.applied_offset().unwrap(), 5);
+        for i in 1..=5u64 {
+            let item = db2.get_state(&format!("k{i}")).unwrap().unwrap();
+            assert_eq!(item.value, serde_json::json!(i));
+        }
+    }
+
+    #[test]
+    fn apply_is_idempotent_below_applied_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        db.apply_state_updated(&ev(5, "k", 5)).unwrap();
+        // Replaying an older offset (as happens when replay starts below
+        // applied_offset) must be a no-op and must not regress state.
+        db.apply_state_updated(&ev(3, "k", 999)).unwrap();
+        assert_eq!(db.applied_offset().unwrap(), 5);
+        assert_eq!(
+            db.get_state("k").unwrap().unwrap().value,
+            serde_json::json!(5)
+        );
+    }
 }
