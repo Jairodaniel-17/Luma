@@ -184,13 +184,6 @@ impl Q8Mmap {
         Some((scale, codes))
     }
 
-    /// Materialize the record at `index` as an owned `QuantizedVec` (for the
-    /// few paths that still need ownership, e.g. building the disk graph).
-    pub fn get_owned(&self, index: usize) -> Option<QuantizedVec> {
-        let (scale, codes) = self.get(index)?;
-        Some(QuantizedVec::new(scale, codes.to_vec()))
-    }
-
     pub fn flush(&self) -> io::Result<()> {
         self.mmap.flush()
     }
@@ -221,7 +214,7 @@ mod tests {
         let (sc, codes) = s.get(1).unwrap();
         assert_eq!(sc, 1.25);
         assert_eq!(codes, &[-5i8, 6, -7, 8]);
-        assert_eq!(s.get_owned(2).unwrap().data, vec![9i8, 9, 9, 9]);
+        assert_eq!(s.get(2).unwrap().1, &[9i8, 9, 9, 9]);
         assert!(s.get(3).is_none());
         let _ = std::fs::remove_file(&path);
     }
