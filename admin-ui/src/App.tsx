@@ -9,9 +9,18 @@ import {
   type KeyRow,
   type AuditRow,
   type AccessPolicy,
+  type HubResult,
 } from "./api";
 
-type Tab = "dashboard" | "users" | "orgs" | "keys" | "access" | "audit" | "health";
+type Tab =
+  | "dashboard"
+  | "data"
+  | "users"
+  | "orgs"
+  | "keys"
+  | "access"
+  | "audit"
+  | "health";
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean>(!!getToken());
@@ -108,7 +117,16 @@ function Console({ onLogout }: { onLogout: () => void }) {
     clearToken();
     onLogout();
   }
-  const tabs: Tab[] = ["dashboard", "users", "orgs", "keys", "access", "audit", "health"];
+  const tabs: Tab[] = [
+    "dashboard",
+    "data",
+    "users",
+    "orgs",
+    "keys",
+    "access",
+    "audit",
+    "health",
+  ];
   return (
     <div className="app">
       <aside className="sidebar">
@@ -132,6 +150,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
       </aside>
       <main className="content">
         {tab === "dashboard" && <Dashboard />}
+        {tab === "data" && <Data />}
         {tab === "users" && <Users />}
         {tab === "orgs" && <Orgs />}
         {tab === "keys" && <Keys />}
@@ -184,6 +203,192 @@ function Dashboard() {
       </div>
     </div>
   );
+}
+
+function Data() {
+  const [namespace, setNamespace] = useState("docs");
+
+  const [text, setText] = useState("");
+  const [metadata, setMetadata] = useState("");
+  const [ingestMsg, setIngestMsg] = useState<string | null>(null);
+  const [ingesting, setIngesting] = useState(false);
+
+  async function ingest(e: React.FormEvent) {
+    e.preventDefault();
+    setIngestMsg(null);
+    setIngesting(true);
+    try {
+      let meta: unknown;
+      if (metadata.trim()) {
+        try {
+          meta = JSON.parse(metadata);
+        } catch {
+          throw new Error("Metadata must be valid JSON");
+        }
+      }
+      const r = await api.hubIngest(namespace.trim(), text, meta);
+      setIngestMsg(`Ingested — doc_id: ${r.doc_id}`);
+      setText("");
+    } catch (err) {
+      setIngestMsg((err as Error).message);
+    } finally {
+      setIngesting(false);
+    }
+  }
+
+  const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(10);
+  const [sqlFilter, setSqlFilter] = useState("");
+  const [results, setResults] = useState<HubResult[] | null>(null);
+  const [searchErr, setSearchErr] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  async function search(e: React.FormEvent) {
+    e.preventDefault();
+    setSearchErr(null);
+    setSearching(true);
+    try {
+      const r = await api.hubSearch(
+        namespace.trim(),
+        query,
+        limit,
+        sqlFilter.trim() || undefined,
+      );
+      setResults(r.results ?? []);
+    } catch (err) {
+      setSearchErr((err as Error).message);
+      setResults(null);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  return (
+    <div>
+      <h2>
+        Data playground <span className="muted">/v1/db</span>
+      </h2>
+      <label className="field">
+        <span>Namespace</span>
+        <input value={namespace} onChange={(e) => setNamespace(e.target.value)} />
+      </label>
+
+      <div className="card">
+        <h3>Ingest a document</h3>
+        <form onSubmit={ingest}>
+          <label className="field">
+            <span>Text</span>
+            <textarea
+              rows={4}
+              value={text}
+              placeholder="Document text to embed & index…"
+              onChange={(e) => setText(e.target.value)}
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Metadata (JSON, optional)</span>
+            <textarea
+              rows={2}
+              value={metadata}
+              placeholder={'{"category":"docs"}'}
+              onChange={(e) => setMetadata(e.target.value)}
+            />
+          </label>
+          <button disabled={ingesting} type="submit">
+            {ingesting ? "…" : "Ingest"}
+          </button>
+        </form>
+        {ingestMsg && (
+          <div className={ingestMsg.startsWith("Ingested") ? "card notice" : "error"}>
+            {ingestMsg}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h3>Semantic search</h3>
+        <form onSubmit={search}>
+          <label className="field">
+            <span>Query</span>
+            <input
+              value={query}
+              placeholder="natural-language query…"
+              onChange={(e) => setQuery(e.target.value)}
+              required
+            />
+          </label>
+          <div className="row">
+            <label className="field" style={{ flex: 1 }}>
+              <span>SQL metadata filter (optional)</span>
+              <input
+                value={sqlFilter}
+                placeholder="json_extract(metadata,'$.category') = 'docs'"
+                onChange={(e) => setSqlFilter(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Limit</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={limit}
+                onChange={(e) => setLimit(Number(e.target.value) || 10)}
+              />
+            </label>
+          </div>
+          <button disabled={searching} type="submit">
+            {searching ? "…" : "Search"}
+          </button>
+        </form>
+        {searchErr && <ErrorBox msg={searchErr} />}
+        {results && <SearchResults results={results} />}
+      </div>
+    </div>
+  );
+}
+
+function SearchResults({ results }: { results: HubResult[] }) {
+  if (!results.length) return <p className="muted">No matches.</p>;
+  return (
+    <div>
+      {results.map((r, i) => {
+        const id = (r.id ?? r.doc_id ?? `#${i + 1}`) as string;
+        const score = r.score as number | undefined;
+        const snippet = firstString(r, ["snippet", "content", "text", "text_snippet"]);
+        const snippets = Array.isArray(r.snippets)
+          ? (r.snippets as unknown[]).map(String).join(" … ")
+          : undefined;
+        return (
+          <div className="card result" key={i}>
+            <div className="result-head">
+              <code>{String(id)}</code>
+              {typeof score === "number" && (
+                <span className="score">{score.toFixed(4)}</span>
+              )}
+            </div>
+            {(snippet || snippets) && <p className="snippet">{snippet || snippets}</p>}
+            <details>
+              <summary className="muted">raw</summary>
+              <pre>{JSON.stringify(r, null, 2)}</pre>
+            </details>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function firstString(
+  obj: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return undefined;
 }
 
 function Users() {
