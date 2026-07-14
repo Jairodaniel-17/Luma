@@ -178,12 +178,22 @@ impl Engine {
         };
 
         let mut since_offset = 0u64;
-        if let Some(db) = &self.0.state_db {
-            since_offset = since_offset.max(db.applied_offset().unwrap_or(0));
-        }
         if let Some(snapshot) = persist.load_snapshot().context("read snapshot")? {
             self.0.events.set_next_offset(snapshot.last_offset + 1);
             since_offset = snapshot.last_offset;
+        }
+        if let Some(db) = &self.0.state_db {
+            // redb uses Eventual durability, so after a crash it may sit BELOW the
+            // snapshot offset (rolled back to the last checkpoint). Replay from
+            // redb's own durable applied offset — never above it — so no state
+            // event it lost is skipped. WAL retention keeps everything above this
+            // floor, so those records are still on disk. Vectors fsync per write
+            // (Immediate) and are idempotent, so replaying from this possibly-lower
+            // offset only re-applies work they already have. Enabling the floor
+            // here also gates retention for the whole run (see set_durable_floor).
+            let applied = db.applied_offset().unwrap_or(0);
+            since_offset = applied;
+            persist.set_durable_floor(applied);
         }
 
         if let Some(db) = &self.0.state_db {
@@ -302,6 +312,23 @@ impl Engine {
                 Err(err) => {
                     tracing::warn!(error = %err, "ttl expire during snapshot failed");
                     break;
+                }
+            }
+        }
+        // Flush the WAL buffer first so the durable WAL is a superset of whatever
+        // redb is about to checkpoint (redb can never end up ahead of the WAL).
+        persist.flush_buffer()?;
+        // Checkpoint the derived store before recording the snapshot and pruning
+        // WAL segments. redb now uses Eventual durability (no per-write fsync), so
+        // flush it to a durable point and set that as the WAL retention floor:
+        // retention may only drop segments whose records are all durably applied.
+        // Vector segments already fsync per write, so redb is the only lossy store.
+        if let Some(db) = &self.0.state_db {
+            match db.flush() {
+                Ok(durable_offset) => persist.set_durable_floor(durable_offset),
+                Err(err) => {
+                    tracing::warn!(error = %err, "state_db checkpoint flush failed; skipping snapshot");
+                    return Ok(());
                 }
             }
         }

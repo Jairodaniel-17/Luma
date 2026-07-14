@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// PR5: WAL sync mode.
@@ -53,6 +54,15 @@ struct Inner {
     /// PR5: group-commit buffer (None when mode is PerWrite)
     group_buffer: Option<Mutex<GroupBuffer>>,
     sync_mode: WalSyncMode,
+    /// Highest offset durably applied to all derived stores (redb, vectors).
+    /// When gating is enabled, retention only prunes segments lying entirely
+    /// at/below this. See `set_durable_floor`.
+    durable_floor: AtomicU64,
+    /// Whether floor gating is active. Set the first time `set_durable_floor` is
+    /// called (i.e. when a derived store uses deferred durability). While gating
+    /// is on, a floor of 0 means "prune nothing" (nothing is durable yet) — the
+    /// opposite of the legacy count-only pruning used when gating is off.
+    floor_gated: AtomicBool,
 }
 
 const WAL_RECORD_VERSION: u8 = 1;
@@ -118,6 +128,8 @@ impl Persist {
             current_segment: Mutex::new(current_segment),
             group_buffer,
             sync_mode,
+            durable_floor: AtomicU64::new(0),
+            floor_gated: AtomicBool::new(false),
         })))
     }
 
@@ -325,13 +337,34 @@ impl Persist {
         self.0.dir.join("snapshot.json")
     }
 
+    /// Records the highest offset durably applied to every derived store (redb,
+    /// vectors). WAL segments are pruned only when they lie entirely at/below
+    /// this floor, so retention can never delete a record a derived store hasn't
+    /// persisted yet — required now that redb uses Eventual durability. A floor
+    /// of 0 keeps the legacy count-only behavior.
+    pub fn set_durable_floor(&self, offset: u64) {
+        self.0.durable_floor.store(offset, Ordering::Relaxed);
+        self.0.floor_gated.store(true, Ordering::Relaxed);
+    }
+
     fn enforce_retention_locked(&self, current_seg: u64) -> std::io::Result<()> {
         let keep = self.0.retention_segments;
         let start_keep = current_seg.saturating_sub(keep as u64).saturating_add(1);
+        let gated = self.0.floor_gated.load(Ordering::Relaxed);
+        let floor = self.0.durable_floor.load(Ordering::Relaxed);
         for path in list_segments_sorted(&self.0.dir) {
             if let Some(seg) = parse_segment_id(&path) {
                 if seg < start_keep {
-                    let _ = std::fs::remove_file(path);
+                    if !gated {
+                        // Legacy (no deferred-durability store): prune by count.
+                        let _ = std::fs::remove_file(path);
+                    } else if segment_max_offset(&path).is_some_and(|max| max <= floor) {
+                        // Gated: every record in this segment is durably applied.
+                        // (floor == 0 => nothing durable yet => keep all.)
+                        let _ = std::fs::remove_file(path);
+                    }
+                    // Otherwise keep: not durable yet (or unreadable) — never drop
+                    // records a derived store still needs to rebuild from.
                 }
             }
         }
@@ -474,6 +507,24 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Highest record offset in a WAL segment (offsets are monotonic within a
+/// segment, so this is effectively the last decodable record). None if the
+/// segment is empty or can't be read — callers treat that as "not prunable".
+fn segment_max_offset(path: &Path) -> Option<u64> {
+    let file = File::open(path).ok()?;
+    let mut max = None;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { return max };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(ev) = decode_wal_record(&line) {
+            max = Some(ev.offset.max(max.unwrap_or(0)));
+        }
+    }
+    max
+}
+
 fn list_segments_sorted(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<(u64, PathBuf)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -540,7 +591,9 @@ fn decode_wal_record(line: &str) -> Option<EventRecord> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_wal_record, encode_wal_record, Persist, Snapshot, WalSyncMode};
+    use super::{
+        decode_wal_record, encode_wal_record, segment_max_offset, Persist, Snapshot, WalSyncMode,
+    };
     use crate::engine::events::EventRecord;
     use tempfile::tempdir;
 
@@ -555,6 +608,28 @@ mod tests {
                 "revision": 1
             }),
         }
+    }
+
+    #[test]
+    fn segment_max_offset_reads_highest_record() {
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events-000001.log");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            for off in [3u64, 7, 42] {
+                f.write_all(&encode_wal_record(&sample_event(off)).unwrap())
+                    .unwrap();
+                f.write_all(b"\n").unwrap();
+            }
+        }
+        // Highest offset drives the retention floor gate.
+        assert_eq!(segment_max_offset(&path), Some(42));
+        // Empty and missing segments are treated as "not prunable".
+        let empty = dir.path().join("events-000002.log");
+        std::fs::File::create(&empty).unwrap();
+        assert_eq!(segment_max_offset(&empty), None);
+        assert_eq!(segment_max_offset(&dir.path().join("nope.log")), None);
     }
 
     #[test]
