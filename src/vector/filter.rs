@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 // ─────────────────────────────────────────────────────────────────
 // Public types
@@ -196,13 +197,13 @@ fn evaluate_condition(meta: &Value, cond: &FilterCondition) -> bool {
 /// - `Not`, `Gt`, `Lt`, `Contains`, …: not resolvable via index.
 pub fn index_candidates(
     filter: &MetadataFilter,
-    index: &HashMap<String, HashMap<String, HashSet<String>>>,
+    index: &HashMap<String, HashMap<String, HashSet<Arc<str>>>>,
 ) -> Option<HashSet<String>> {
     match filter {
         MetadataFilter::Condition(c) if c.op == FilterOp::Eq => {
             let s = c.value.as_str()?;
             let ids = index.get(&c.field)?.get(s)?;
-            Some(ids.iter().cloned().collect())
+            Some(ids.iter().map(|a| a.to_string()).collect())
         }
         MetadataFilter::Condition(c) if c.op == FilterOp::AnyOf => {
             // Union of all indexed sets for each query value (strings only).
@@ -215,7 +216,7 @@ pub fn index_candidates(
             for qv in &query_vals {
                 if let Some(s) = qv.as_str() {
                     if let Some(ids) = by_field.get(s) {
-                        union.extend(ids.iter().cloned());
+                        union.extend(ids.iter().map(|a| a.to_string()));
                     }
                     // If a query string has no entries, it contributes nothing to the union.
                 }
@@ -647,14 +648,14 @@ mod tests {
 
     fn build_index(
         entries: &[(&str, &str, &str)],
-    ) -> HashMap<String, HashMap<String, HashSet<String>>> {
-        let mut idx: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+    ) -> HashMap<String, HashMap<String, HashSet<Arc<str>>>> {
+        let mut idx: HashMap<String, HashMap<String, HashSet<Arc<str>>>> = HashMap::new();
         for (field, value, id) in entries {
             idx.entry(field.to_string())
                 .or_default()
                 .entry(value.to_string())
                 .or_default()
-                .insert(id.to_string());
+                .insert(Arc::from(*id));
         }
         idx
     }
@@ -857,7 +858,7 @@ mod tests {
     #[test]
     fn any_of_index_candidates_fast_path() {
         // Verify the keyword index fast path resolves AnyOf correctly
-        let mut index: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        let mut index: HashMap<String, HashMap<String, HashSet<Arc<str>>>> = HashMap::new();
         // Simulate indexing two docs:
         //   doc1: tax_system: ["suitetax", "legacy"]
         //   doc2: tax_system: ["legacy"]
@@ -866,19 +867,19 @@ mod tests {
             .or_default()
             .entry("suitetax".to_string())
             .or_default()
-            .insert("doc1".to_string());
+            .insert(Arc::from("doc1"));
         index
             .entry("tax_system".to_string())
             .or_default()
             .entry("legacy".to_string())
             .or_default()
-            .insert("doc1".to_string());
+            .insert(Arc::from("doc1"));
         index
             .entry("tax_system".to_string())
             .or_default()
             .entry("legacy".to_string())
             .or_default()
-            .insert("doc2".to_string());
+            .insert(Arc::from("doc2"));
 
         let f = any_of_cond("tax_system", vec![json!("suitetax")]);
         let candidates = index_candidates(&f, &index).unwrap();
