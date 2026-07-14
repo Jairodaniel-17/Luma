@@ -8,9 +8,10 @@ import {
   type OrgRow,
   type KeyRow,
   type AuditRow,
+  type AccessPolicy,
 } from "./api";
 
-type Tab = "dashboard" | "users" | "orgs" | "keys" | "audit" | "health";
+type Tab = "dashboard" | "users" | "orgs" | "keys" | "access" | "audit" | "health";
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean>(!!getToken());
@@ -107,7 +108,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
     clearToken();
     onLogout();
   }
-  const tabs: Tab[] = ["dashboard", "users", "orgs", "keys", "audit", "health"];
+  const tabs: Tab[] = ["dashboard", "users", "orgs", "keys", "access", "audit", "health"];
   return (
     <div className="app">
       <aside className="sidebar">
@@ -134,6 +135,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         {tab === "users" && <Users />}
         {tab === "orgs" && <Orgs />}
         {tab === "keys" && <Keys />}
+        {tab === "access" && <Access />}
         {tab === "audit" && <Audit />}
         {tab === "health" && <Health />}
       </main>
@@ -296,6 +298,94 @@ function Keys() {
           </button>
         )}
       />
+    </div>
+  );
+}
+
+function Access() {
+  const { data, error } = useAsync(() => api.getAccessPolicy());
+  const [domains, setDomains] = useState("");
+  const [emails, setEmails] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Seed the editable text areas once the current policy arrives.
+  useEffect(() => {
+    if (data && !loaded) {
+      setDomains((data.domains ?? []).join("\n"));
+      setEmails((data.emails ?? []).join("\n"));
+      setLoaded(true);
+    }
+  }, [data, loaded]);
+
+  function parse(text: string): string[] {
+    return text
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    setBusy(true);
+    try {
+      const policy: AccessPolicy = {
+        domains: parse(domains),
+        emails: parse(emails),
+      };
+      const saved = await api.setAccessPolicy(policy);
+      setDomains(saved.domains.join("\n"));
+      setEmails(saved.emails.join("\n"));
+      setMsg("Saved.");
+    } catch (err) {
+      setMsg((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error) return <ErrorBox msg={error} />;
+  const open =
+    parse(domains).length === 0 && parse(emails).length === 0;
+
+  return (
+    <div>
+      <h2>Access control</h2>
+      <p className="muted">
+        Restrict who can self-register. List allowed email domains and/or exact
+        addresses (one per line). Leave both empty to allow open registration.
+      </p>
+      <div className={open ? "card notice" : "card"}>
+        {open
+          ? "Registration is OPEN — anyone with a valid email can create an organization."
+          : "Registration is RESTRICTED to the domains / emails below."}
+      </div>
+      <form onSubmit={save}>
+        <label className="field">
+          <span>Allowed domains</span>
+          <textarea
+            rows={5}
+            placeholder={"acme.com\npartner.io"}
+            value={domains}
+            onChange={(e) => setDomains(e.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Allowed emails (exact)</span>
+          <textarea
+            rows={4}
+            placeholder={"ceo@vendor.com"}
+            value={emails}
+            onChange={(e) => setEmails(e.target.value)}
+          />
+        </label>
+        <button disabled={busy} type="submit">
+          {busy ? "…" : "Save policy"}
+        </button>
+      </form>
+      {msg && <div className={msg === "Saved." ? "card notice" : "error"}>{msg}</div>}
     </div>
   );
 }

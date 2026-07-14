@@ -73,7 +73,16 @@ export const api = {
   revokeKey: (id: string) => request<void>("DELETE", `/v1/auth/keys/${id}`),
   auditEvents: () =>
     request<{ events: AuditRow[] }>("GET", "/v1/admin/audit-events?limit=100"),
+  getAccessPolicy: () =>
+    request<AccessPolicy>("GET", "/v1/auth/access-policy"),
+  setAccessPolicy: (policy: AccessPolicy) =>
+    request<AccessPolicy>("PUT", "/v1/auth/access-policy", policy),
 };
+
+export interface AccessPolicy {
+  domains: string[];
+  emails: string[];
+}
 
 export interface UserRow {
   id: string;
