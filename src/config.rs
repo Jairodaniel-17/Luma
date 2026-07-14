@@ -251,7 +251,13 @@ impl Default for Config {
             hnsw_segment_compaction_enabled: false,
             hnsw_segment_compaction_threshold: 0.35,
             hnsw_segment_compaction_interval_secs: 300,
-            wal_sync_mode: "per_write".to_string(),
+            // Group commit by default: the WAL fsync is amortized across a batch
+            // instead of paid on every write, which is the dominant single-node
+            // write bottleneck. Durability of acked writes is preserved because
+            // the state store (redb) and vector segments still fsync immediately,
+            // so a lost WAL-buffer tail is always recoverable from them on replay.
+            // Set WAL_SYNC_MODE=per_write for a fully synchronous WAL.
+            wal_sync_mode: "group".to_string(),
             wal_flush_interval_ms: 10,
             wal_batch_size: 64,
             max_collection_vectors: 0,
@@ -583,7 +589,7 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300);
         let wal_sync_mode =
-            std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "per_write".to_string());
+            std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "group".to_string());
         let wal_flush_interval_ms = std::env::var("WAL_FLUSH_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
