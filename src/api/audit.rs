@@ -8,10 +8,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc;
+
+/// One buffered audit record, flushed to SQLite in batches by a background task.
+struct AuditRow {
+    ts_ms: i64,
+    api_key_id: Option<String>,
+    ip: Option<String>,
+    method: String,
+    path: String,
+    status: u16,
+    latency_ms: u64,
+}
+
+/// How many buffered records to coalesce into a single transaction.
+const AUDIT_MAX_BATCH: usize = 256;
+/// Bounded buffer; when full, records are dropped rather than blocking requests.
+const AUDIT_BUFFER: usize = 10_000;
 
 #[derive(Clone)]
 pub struct AuditLog {
     sqlite: Arc<SqliteService>,
+    tx: mpsc::Sender<AuditRow>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,7 +46,12 @@ pub struct AuditEntry {
 
 impl AuditLog {
     pub fn new(sqlite: Arc<SqliteService>) -> Self {
-        Self { sqlite }
+        let (tx, rx) = mpsc::channel(AUDIT_BUFFER);
+        // Background flusher: batches buffered records into one transaction per
+        // drain, so audit writes never sit on the request path or hammer the
+        // single SQLite writer one INSERT at a time.
+        tokio::spawn(audit_flush_loop(sqlite.clone(), rx));
+        Self { sqlite, tx }
     }
 
     pub async fn init(&self) -> anyhow::Result<()> {
@@ -57,8 +80,11 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Enqueue an audit record. Non-blocking and best-effort: if the buffer is
+    /// full the record is dropped rather than slowing the request. The actual
+    /// SQLite write happens in `audit_flush_loop`, off the request path.
     #[allow(clippy::too_many_arguments)]
-    pub async fn record(
+    pub fn record(
         &self,
         ts_ms: i64,
         api_key_id: Option<&str>,
@@ -68,23 +94,19 @@ impl AuditLog {
         status: u16,
         latency_ms: u64,
     ) {
-        let _ = self
-            .sqlite
-            .execute(
-                "INSERT INTO sys_audit_log (ts_ms, api_key_id, ip, method, path, status, latency_ms)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
-                    .to_string(),
-                vec![
-                    json!(ts_ms),
-                    json!(api_key_id),
-                    json!(ip),
-                    json!(method),
-                    json!(path),
-                    json!(status),
-                    json!(latency_ms),
-                ],
-            )
-            .await;
+        let row = AuditRow {
+            ts_ms,
+            api_key_id: api_key_id.map(str::to_string),
+            ip: ip.map(str::to_string),
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+            latency_ms,
+        };
+        if self.tx.try_send(row).is_err() {
+            // Buffer full (or flusher gone): drop rather than block the request.
+            tracing::debug!("audit buffer full; dropping record");
+        }
     }
 
     pub async fn query(
@@ -120,6 +142,48 @@ impl AuditLog {
         );
 
         self.sqlite.query(sql, params).await
+    }
+}
+
+/// Drains buffered audit records and writes them to SQLite in batches (one
+/// transaction per drain). Each drain collects exactly what queued while the
+/// previous batch was being written, so it self-batches under load and stays a
+/// single INSERT under light load — always off the request path.
+async fn audit_flush_loop(sqlite: Arc<SqliteService>, mut rx: mpsc::Receiver<AuditRow>) {
+    const INSERT: &str = "INSERT INTO sys_audit_log \
+         (ts_ms, api_key_id, ip, method, path, status, latency_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)";
+    loop {
+        let Some(first) = rx.recv().await else {
+            return; // all senders dropped
+        };
+        let mut batch = vec![first];
+        while batch.len() < AUDIT_MAX_BATCH {
+            match rx.try_recv() {
+                Ok(row) => batch.push(row),
+                Err(_) => break,
+            }
+        }
+        let stmts: Vec<(String, Vec<serde_json::Value>)> = batch
+            .into_iter()
+            .map(|r| {
+                (
+                    INSERT.to_string(),
+                    vec![
+                        json!(r.ts_ms),
+                        json!(r.api_key_id),
+                        json!(r.ip),
+                        json!(r.method),
+                        json!(r.path),
+                        json!(r.status),
+                        json!(r.latency_ms),
+                    ],
+                )
+            })
+            .collect();
+        if let Err(e) = sqlite.execute_tx(stmts).await {
+            tracing::debug!("audit batch flush failed: {e}");
+        }
     }
 }
 
@@ -161,8 +225,7 @@ pub async fn audit_middleware(
             &path,
             status,
             latency_ms,
-        )
-        .await;
+        );
     }
 
     response
