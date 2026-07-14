@@ -580,9 +580,16 @@ impl Engine {
         self.metrics().inc_events();
 
         self.metrics().inc_state_put();
-        let item = if let Some(db) = &self.0.state_db {
-            db.get_state(&key)?
-                .ok_or_else(|| anyhow::anyhow!("state missing after put"))?
+        // state_db path: we just applied this exact (key,value,revision,expires)
+        // above, so build the returned item directly instead of paying a second
+        // redb read transaction to read back what we already know.
+        let item = if self.0.state_db.is_some() {
+            state::StateItem {
+                key,
+                value,
+                revision,
+                expires_at_ms,
+            }
         } else {
             self.0
                 .state
