@@ -195,10 +195,7 @@ impl Iterator for MetadataIterator {
     type Item = io::Result<(u64, u32, DocumentMetadata)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let reader = match &mut self.reader {
-            Some(r) => r,
-            None => return None,
-        };
+        let reader = self.reader.as_mut()?;
 
         let start_offset = self.offset;
         let mut len_buf = [0u8; 4];
