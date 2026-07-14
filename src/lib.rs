@@ -27,6 +27,8 @@ pub mod docstore;
 pub mod engine;
 /// NS-Mem: the agent memory layer (episodic, semantic, procedural, working).
 pub mod memory;
+
+pub mod router;
 /// Search primitives shared across the vector and hybrid query paths.
 pub mod search;
 /// Embedded SQLite access via the thread-safe async actor pattern.

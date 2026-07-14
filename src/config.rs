@@ -110,6 +110,13 @@ pub struct Config {
     pub wal_flush_interval_ms: u64,
     /// PR5: Group commit batch size (flush after N events). Default 64.
     pub wal_batch_size: usize,
+    /// Process role: "node" (default, runs the engine) or "router" (forwards
+    /// requests to `router_nodes` by namespace-sharding). See `crate::router`.
+    #[serde(default = "default_role")]
+    pub role: String,
+    /// Backend node base URLs when `role == "router"` (e.g. http://10.0.0.1:1234).
+    #[serde(default)]
+    pub router_nodes: Vec<String>,
     /// Maximum vectors per collection (0 = unlimited). Applies to add and upsert.
     pub max_collection_vectors: usize,
     /// Emit a tracing::warn! for vector searches that exceed this threshold in ms (0 = disabled).
@@ -260,6 +267,8 @@ impl Default for Config {
             wal_sync_mode: "group".to_string(),
             wal_flush_interval_ms: 10,
             wal_batch_size: 64,
+            role: default_role(),
+            router_nodes: Vec::new(),
             max_collection_vectors: 0,
             slow_query_threshold_ms: 0,
             pre_filter_threshold: 10_000,
@@ -598,6 +607,16 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(64);
+        let role = std::env::var("ROLE").unwrap_or_else(|_| default_role());
+        let router_nodes = std::env::var("ROUTER_NODES")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             port,
@@ -680,6 +699,8 @@ impl Config {
             wal_sync_mode,
             wal_flush_interval_ms,
             wal_batch_size,
+            role,
+            router_nodes,
             max_collection_vectors: std::env::var("MAX_COLLECTION_VECTORS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -735,6 +756,10 @@ impl Config {
                 .unwrap_or_else(default_backup_retention),
         })
     }
+}
+
+fn default_role() -> String {
+    "node".to_string()
 }
 
 fn resolve_port() -> u16 {

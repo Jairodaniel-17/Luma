@@ -9,6 +9,12 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
+    // Router role: forward requests to backend nodes by namespace sharding
+    // instead of running the engine locally. See `luma::router`.
+    if config.role.eq_ignore_ascii_case("router") {
+        return run_router(config).await;
+    }
+
     // ---------------------------------------------------------
     // 1. Config Validation & Logging (Anti-DoS Order)
     // ---------------------------------------------------------
@@ -142,6 +148,35 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     tracing::info!("Server stopped.");
+    Ok(())
+}
+
+/// Run in router role: forward requests to backend nodes by namespace sharding.
+async fn run_router(config: Config) -> anyhow::Result<()> {
+    if config.router_nodes.is_empty() {
+        anyhow::bail!(
+            "role=router requires ROUTER_NODES (comma-separated backend base URLs, \
+             e.g. http://node-a:1234,http://node-b:1234)"
+        );
+    }
+    let addr = SocketAddr::new(config.bind_addr, config.port);
+    tracing::info!(
+        nodes = ?config.router_nodes,
+        %addr,
+        "starting Luma in ROUTER mode (namespace sharding)"
+    );
+    let state = luma::router::RouterState::new(
+        config.router_nodes.clone(),
+        config.max_body_bytes,
+        config.request_timeout_secs,
+    );
+    let app = luma::router::build_app(state);
+    let shutdown_token = CancellationToken::new();
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal(shutdown_token))
+        .await?;
+    tracing::info!("Router stopped.");
     Ok(())
 }
 
