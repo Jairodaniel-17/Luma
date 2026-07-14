@@ -363,8 +363,8 @@ enum HnswIndex {
 
 struct SegmentIndex {
     hnsw: HnswIndex,
-    data_ids: HashMap<String, usize>,
-    id_by_data_id: Vec<String>,
+    data_ids: HashMap<Arc<str>, usize>,
+    id_by_data_id: Vec<Arc<str>>,
     deleted: Vec<bool>,
     live: usize,
     capacity: usize,
@@ -382,7 +382,7 @@ impl SegmentIndex {
         }
     }
 
-    fn insert(&mut self, id: String, vector: Vec<f32>) {
+    fn insert(&mut self, id: Arc<str>, vector: Vec<f32>) {
         let data_id = self.id_by_data_id.len();
         self.id_by_data_id.push(id.clone());
         self.deleted.push(false);
@@ -425,7 +425,7 @@ impl SegmentIndex {
             if self.deleted.get(data_id).copied().unwrap_or(true) {
                 continue;
             }
-            let id = self.id_by_data_id[data_id].clone();
+            let id = self.id_by_data_id[data_id].to_string();
             let score = 1.0 - n.distance;
             hits.push((id, score));
             if hits.len() >= candidate_k {
@@ -1770,7 +1770,8 @@ impl Collection {
             .map(|(a, _)| a.clone())
             .unwrap_or_else(|| Arc::from(id));
         if let Some(seg) = self.segments.get_mut(idx) {
-            seg.insert(id.to_string(), vector);
+            // Share the SAME canonical Arc<str> with the segment's id maps.
+            seg.insert(interned.clone(), vector);
             self.item_segments.insert(interned, idx);
         }
     }
@@ -2661,9 +2662,9 @@ fn build_segments_from_items(
             segments.push(current);
             current = SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
         }
-        // SegmentIndex keeps its own String id (not part of this refactor's scope);
-        // item_segments shares the canonical Arc<str> passed in.
-        current.insert(id.to_string(), vector.clone());
+        // Share the SAME canonical Arc<str> across the segment's id maps and
+        // item_segments instead of allocating a fresh String per id.
+        current.insert(id.clone(), vector.clone());
         item_segments.insert(id.clone(), segments.len());
     }
     segments.push(current);
@@ -3012,10 +3013,14 @@ mod tests {
         let mut collection = collection.write();
         collection.rebuild_segments();
 
-        let ordered_ids = &collection.segments[0].id_by_data_id;
+        let ordered_ids: Vec<String> = collection.segments[0]
+            .id_by_data_id
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
         assert_eq!(
             ordered_ids,
-            &vec![
+            vec![
                 "doc-a".to_string(),
                 "doc-b".to_string(),
                 "doc-c".to_string()
