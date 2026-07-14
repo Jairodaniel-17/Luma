@@ -109,3 +109,19 @@ button.danger { background: var(--danger); }
 }
 .table th { color: var(--muted); font-weight: 600; text-transform: capitalize; }
 pre.card { overflow: auto; }
+
+/* Access policy editor */
+.field { display: block; margin: 12px 0; }
+.field > span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+.field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  resize: vertical;
+}
