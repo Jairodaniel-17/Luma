@@ -238,10 +238,8 @@ pub fn index_candidates(
         MetadataFilter::Or { or } => {
             let mut union: HashSet<String> = HashSet::new();
             for sub in or {
-                match index_candidates(sub, index) {
-                    Some(candidates) => union.extend(candidates),
-                    None => return None, // Any unresolvable child → can't safely pre-filter
-                }
+                // Any unresolvable child → can't safely pre-filter (? returns None).
+                union.extend(index_candidates(sub, index)?);
             }
             Some(union)
         }

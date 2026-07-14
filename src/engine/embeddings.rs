@@ -20,7 +20,7 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// builder rejects the options, which should not happen for plain timeouts.
 fn build_http_client(timeout_secs: u64) -> reqwest::Client {
     let total = Duration::from_secs(timeout_secs.max(1));
-    let connect = Duration::from_secs(timeout_secs.min(10).max(1));
+    let connect = Duration::from_secs(timeout_secs.clamp(1, 10));
     reqwest::Client::builder()
         .timeout(total)
         .connect_timeout(connect)
