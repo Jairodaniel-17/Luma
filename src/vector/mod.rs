@@ -1126,8 +1126,9 @@ impl VectorStore {
         let layout = c.layout.clone().ok_or(VectorError::Persistence)?;
         let materialized = c.materialize_items();
         let materialized_q8 = c.materialize_q8();
-        let result = persist::rewrite_collection(&layout, &c.manifest, &materialized, &materialized_q8)
-            .map_err(|_| VectorError::Persistence)?;
+        let result =
+            persist::rewrite_collection(&layout, &c.manifest, &materialized, &materialized_q8)
+                .map_err(|_| VectorError::Persistence)?;
         c.manifest = result.manifest;
         // Re-key persist's String-keyed item_runs onto the canonical Arc<str>
         // from `items` so the shared allocation is preserved.
@@ -1302,11 +1303,9 @@ impl Collection {
                                     // q8 in lockstep: reuse a loaded code if present,
                                     // else derive it from the raw vector.
                                     if let Some(q8) = q8_store_mmap.as_mut() {
-                                        let q = c
-                                            .q8_store
-                                            .get(&id)
-                                            .cloned()
-                                            .unwrap_or_else(|| q8ops::quantize_per_vector(&item.vector));
+                                        let q = c.q8_store.get(&id).cloned().unwrap_or_else(|| {
+                                            q8ops::quantize_per_vector(&item.vector)
+                                        });
                                         let _ = q8.append(&q);
                                     }
                                 }
@@ -1399,8 +1398,9 @@ impl Collection {
         self.items
             .keys()
             .filter_map(|id| {
-                self.get_q8_codes(id)
-                    .map(|(scale, codes)| (id.to_string(), QuantizedVec::new(scale, codes.to_vec())))
+                self.get_q8_codes(id).map(|(scale, codes)| {
+                    (id.to_string(), QuantizedVec::new(scale, codes.to_vec()))
+                })
             })
             .collect()
     }
@@ -2059,8 +2059,9 @@ impl Collection {
             .items
             .keys()
             .filter_map(|id| {
-                self.get_q8_codes(id)
-                    .map(|(scale, codes)| (id.to_string(), QuantizedVec::new(scale, codes.to_vec())))
+                self.get_q8_codes(id).map(|(scale, codes)| {
+                    (id.to_string(), QuantizedVec::new(scale, codes.to_vec()))
+                })
             })
             .collect();
         nodes.sort_by(|a, b| a.0.cmp(&b.0));

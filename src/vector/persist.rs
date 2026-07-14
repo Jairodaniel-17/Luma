@@ -69,8 +69,8 @@ fn default_ivf_retrain_min_vectors() -> usize {
 pub struct CollectionLayout {
     pub dir: PathBuf,
     pub manifest_path: PathBuf,
-    pub bin_path: PathBuf,  // legacy WAL
-    pub mmap_path: PathBuf, // new mmap
+    pub bin_path: PathBuf,     // legacy WAL
+    pub mmap_path: PathBuf,    // new mmap
     pub q8_mmap_path: PathBuf, // disk-backed q8 codes
     pub centroids_meta_path: PathBuf,
     pub centroids_bin_path: PathBuf,
