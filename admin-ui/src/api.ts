@@ -77,7 +77,26 @@ export const api = {
     request<AccessPolicy>("GET", "/v1/auth/access-policy"),
   setAccessPolicy: (policy: AccessPolicy) =>
     request<AccessPolicy>("PUT", "/v1/auth/access-policy", policy),
+  hubIngest: (namespace: string, text: string, metadata?: unknown) =>
+    request<{ status: string; doc_id: string }>(
+      "POST",
+      `/v1/db/${encodeURIComponent(namespace)}/ingest`,
+      metadata === undefined ? { text } : { text, metadata },
+    ),
+  hubSearch: (
+    namespace: string,
+    query: string,
+    limit: number,
+    sql_filter?: string,
+  ) =>
+    request<{ results: HubResult[] }>(
+      "POST",
+      `/v1/db/${encodeURIComponent(namespace)}/search`,
+      sql_filter ? { query, limit, sql_filter } : { query, limit },
+    ),
 };
+
+export type HubResult = Record<string, unknown>;
 
 export interface AccessPolicy {
   domains: string[];

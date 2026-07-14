@@ -125,3 +125,23 @@ pre.card { overflow: auto; }
   color: inherit;
   resize: vertical;
 }
+
+/* Data playground */
+.card h3 { margin: 0 0 10px; font-size: 15px; }
+.result { padding: 12px 14px; }
+.result-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.result-head code { font-size: 13px; word-break: break-all; }
+.score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--accent, #4f8cff);
+}
+.snippet { margin: 8px 0 4px; font-size: 14px; line-height: 1.4; }
+.result details pre {
+  overflow: auto;
+  font-size: 12px;
+  background: var(--bg);
+  padding: 8px;
+  border-radius: 6px;
+  margin-top: 6px;
+}
