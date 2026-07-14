@@ -6,6 +6,10 @@ pub mod mmap;
 mod persist;
 pub mod q8;
 mod q8mmap;
+// Binary-quantization primitive (phase 3 foundation): resident 1-bit-per-dim
+// codes for cheap candidate shortlisting at scale. Not yet wired into search.
+#[allow(dead_code)]
+mod binquant;
 mod simd;
 
 pub use index::{DiskAnnIndex, DiskVectorIndex, VectorIndex};
