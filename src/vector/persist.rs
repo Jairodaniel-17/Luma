@@ -377,6 +377,26 @@ pub fn append_record(
     manifest: &mut Manifest,
     record: &Record,
 ) -> std::io::Result<u64> {
+    append_record_opt(layout, manifest, record, true)
+}
+
+/// Like `append_record` but skips the per-record `sync_data`. Used by the batch
+/// apply path, which issues a single `sync_active_run` after the whole batch is
+/// written (amortizing the fsync over N records instead of paying it per record).
+pub fn append_record_no_sync(
+    layout: &CollectionLayout,
+    manifest: &mut Manifest,
+    record: &Record,
+) -> std::io::Result<u64> {
+    append_record_opt(layout, manifest, record, false)
+}
+
+fn append_record_opt(
+    layout: &CollectionLayout,
+    manifest: &mut Manifest,
+    record: &Record,
+    sync: bool,
+) -> std::io::Result<u64> {
     std::fs::create_dir_all(&layout.runs_dir)?;
     ensure_active_run(layout, manifest)?;
     let run = manifest
@@ -394,7 +414,9 @@ pub fn append_record(
     file.write_all(&header.encode())?;
     file.write_all(&payload)?;
     file.flush()?;
-    file.sync_data()?;
+    if sync {
+        file.sync_data()?;
+    }
     let appended = (RUN_HEADER_BYTES + payload.len()) as u64;
     run.bytes = run.bytes.saturating_add(appended);
     run.records = run.records.saturating_add(1);
@@ -403,6 +425,19 @@ pub fn append_record(
     }
     manifest.file_len = manifest.file_len.saturating_add(appended);
     Ok(appended)
+}
+
+/// fsync the active run file. Call once after a batch of `append_record_no_sync`
+/// to make the whole batch durable with a single sync.
+pub fn sync_active_run(layout: &CollectionLayout, manifest: &Manifest) -> std::io::Result<()> {
+    if let Some(run) = manifest.runs.last() {
+        let path = layout.runs_dir.join(&run.file);
+        // A fresh handle's sync_data() still flushes the OS page cache written by
+        // the append handles, so this makes all no-sync appends durable.
+        let file = OpenOptions::new().append(true).open(&path)?;
+        file.sync_data()?;
+    }
+    Ok(())
 }
 
 pub fn store_manifest(layout: &CollectionLayout, manifest: &Manifest) -> std::io::Result<()> {

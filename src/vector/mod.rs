@@ -970,6 +970,39 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Batched WAL-durable apply for a run of upsert events (same durability as
+    /// `apply_event` per record, but one collection lock + one run-WAL fsync +
+    /// one compaction/training pass for the whole batch). Each item is
+    /// `(engine_offset, id, vector, meta)`; already-applied offsets are skipped
+    /// so replay is idempotent.
+    pub fn apply_upserts_batch(
+        &self,
+        collection: &str,
+        items: Vec<(u64, String, Vec<f32>, serde_json::Value)>,
+    ) -> Result<(), VectorError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let c_arc = self
+            .0
+            .collections
+            .get(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+        let mut c = c_arc.write();
+        let records = items
+            .into_iter()
+            .map(|(offset, id, vector, meta)| Record {
+                offset,
+                op: RecordOp::Upsert,
+                id,
+                vector: Some(vector),
+                meta: Some(meta),
+                quantized: None,
+            })
+            .collect();
+        c.apply_upsert_batch(records)
+    }
+
     pub fn update(
         &self,
         collection: &str,
@@ -1170,6 +1203,10 @@ impl Default for VectorStore {
 #[derive(Clone, Copy)]
 enum ApplyMode {
     InMemoryOnly,
+    /// Batch member: append to the run WAL without a per-record fsync and defer
+    /// compaction / IVF training. The caller (`apply_upsert_batch`) issues one
+    /// `sync_active_run` and one compact/train pass for the whole batch.
+    BatchAppend,
 }
 
 impl Collection {
@@ -1703,11 +1740,17 @@ impl Collection {
             None
         };
 
+        let batch_append = matches!(mode, Some(ApplyMode::BatchAppend));
         let mut mmap_idx: Option<u64> = None;
         if let Some(layout) = &self.layout {
-            if mode.is_none() {
-                let _ = persist::append_record(layout, &mut self.manifest, &record)
-                    .map_err(|_| VectorError::Persistence)?;
+            if mode.is_none() || batch_append {
+                if batch_append {
+                    persist::append_record_no_sync(layout, &mut self.manifest, &record)
+                        .map_err(|_| VectorError::Persistence)?;
+                } else {
+                    persist::append_record(layout, &mut self.manifest, &record)
+                        .map_err(|_| VectorError::Persistence)?;
+                }
 
                 // Also append to new mmap store if it's an upsert
                 if record.op == RecordOp::Upsert {
@@ -1788,6 +1831,8 @@ impl Collection {
 
         self.manifest.live_count = self.items.len();
 
+        // BatchAppend defers compaction/training/manifest-persist to the batch
+        // caller so they run once per batch, not once per record.
         if self.layout.is_some() && mode.is_none() {
             let compacted = self.maybe_compact_runs(false)?;
             if !compacted {
@@ -1796,8 +1841,40 @@ impl Collection {
             }
         }
 
-        self.maybe_train_ivf()?;
+        if mode.is_none() {
+            self.maybe_train_ivf()?;
+        }
 
+        Ok(())
+    }
+
+    /// Apply a batch of records under a single collection lock, one run-WAL
+    /// fsync, and one compaction/training pass. This is the write-batching fast
+    /// path for `upsert_batch`: per-record it was paying an fsync + lock + tail
+    /// pass; here those are amortized across the whole batch.
+    fn apply_upsert_batch(&mut self, records: Vec<Record>) -> Result<(), VectorError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        for record in records {
+            if record.offset > 0 && record.offset <= self.applied_offset {
+                continue;
+            }
+            self.apply_record(record, Some(ApplyMode::BatchAppend))?;
+        }
+        if let Some(layout) = &self.layout {
+            // ponytail: one fsync for the batch. Run rotation can't happen inside
+            // a single upsert_batch (<= max_vector_batch * vector bytes << run
+            // target of 128 MiB), so syncing the active run covers every append.
+            persist::sync_active_run(layout, &self.manifest)
+                .map_err(|_| VectorError::Persistence)?;
+            let compacted = self.maybe_compact_runs(false)?;
+            if !compacted {
+                self.persist_manifest()
+                    .map_err(|_| VectorError::Persistence)?;
+            }
+        }
+        self.maybe_train_ivf()?;
         Ok(())
     }
 
