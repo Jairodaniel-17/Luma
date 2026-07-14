@@ -335,7 +335,6 @@ struct Collection {
     q8_store: HashMap<String, QuantizedVec>,
     mmap_store: Option<mmap::VectorMmap>,
     q8_mmap: Option<q8mmap::Q8Mmap>,
-    item_mmap_offsets: HashMap<String, usize>,
     applied_offset: u64,
     segments: Vec<SegmentIndex>,
     item_segments: HashMap<String, usize>,
@@ -1233,7 +1232,6 @@ impl Collection {
             q8_store: quantized,
             mmap_store: None,
             q8_mmap: None,
-            item_mmap_offsets: HashMap::new(),
             item_runs,
             applied_offset,
             segments: Vec::new(),
@@ -1262,7 +1260,6 @@ impl Collection {
                             if let Some(item) = c.items.get_mut(&id) {
                                 if let Ok(idx) = store.append(&item.vector) {
                                     item.mmap_offset = Some(idx as u64);
-                                    c.item_mmap_offsets.insert(id.clone(), idx);
                                     // q8 in lockstep: reuse a loaded code if present,
                                     // else derive it from the raw vector.
                                     if let Some(q8) = q8_store_mmap.as_mut() {
@@ -1325,7 +1322,12 @@ impl Collection {
             return;
         }
         let q8_paged = self.q8_mmap.is_some();
-        let mmapped: Vec<String> = self.item_mmap_offsets.keys().cloned().collect();
+        let mmapped: Vec<String> = self
+            .items
+            .iter()
+            .filter(|(_, i)| i.mmap_offset.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
         for id in &mmapped {
             if let Some(item) = self.items.get_mut(id) {
                 item.vector = Vec::new();
@@ -1343,8 +1345,8 @@ impl Collection {
     /// The returned slice borrows from whichever store holds it.
     fn get_q8_codes(&self, id: &str) -> Option<(f32, &[i8])> {
         if let Some(q8m) = &self.q8_mmap {
-            if let Some(&idx) = self.item_mmap_offsets.get(id) {
-                if let Some((scale, codes)) = q8m.get(idx) {
+            if let Some(idx) = self.items.get(id).and_then(|i| i.mmap_offset) {
+                if let Some((scale, codes)) = q8m.get(idx as usize) {
                     return Some((scale, codes));
                 }
             }
@@ -1489,9 +1491,8 @@ impl Collection {
             .iter()
             // Skip items whose q8 already lives in the disk-backed q8 mmap —
             // re-populating q8_store for them would defeat the RAM saving.
-            .filter(|(id, _)| {
-                !self.q8_store.contains_key(*id)
-                    && !(q8_paged && self.item_mmap_offsets.contains_key(*id))
+            .filter(|(id, item)| {
+                !self.q8_store.contains_key(*id) && !(q8_paged && item.mmap_offset.is_some())
             })
             // Read via get_vector_slice so this works when the raw vector lives in
             // the mmap (disk) rather than in the in-RAM VectorItem.
@@ -1833,7 +1834,6 @@ impl Collection {
                             match mmap.append(vec) {
                                 Ok(idx) => {
                                     mmap_idx = Some(idx as u64);
-                                    self.item_mmap_offsets.insert(record.id.clone(), idx);
                                     // Append the q8 code in lockstep so its index
                                     // matches the raw index. If the append fails or
                                     // desyncs, drop the q8 mmap and fall back to the
@@ -2332,10 +2332,10 @@ impl Collection {
     }
 
     #[inline(always)]
-    fn get_vector_slice<'a>(&'a self, id: &str, item: &'a VectorItem) -> &'a [f32] {
+    fn get_vector_slice<'a>(&'a self, _id: &str, item: &'a VectorItem) -> &'a [f32] {
         if let Some(mmap) = &self.mmap_store {
-            if let Some(&idx) = self.item_mmap_offsets.get(id) {
-                if let Some(slice) = mmap.get_vector(idx) {
+            if let Some(idx) = item.mmap_offset {
+                if let Some(slice) = mmap.get_vector(idx as usize) {
                     return slice;
                 }
             }
