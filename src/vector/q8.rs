@@ -47,9 +47,15 @@ pub fn quantize_per_vector(vec: &[f32]) -> QuantizedVec {
 }
 
 pub fn dot(a: &QuantizedVec, b: &QuantizedVec, simd_enabled: bool) -> f32 {
-    debug_assert_eq!(a.data.len(), b.data.len());
-    let raw = dot_i8_inner(&a.data, &b.data, simd_enabled) as f32;
-    raw * (a.scale * b.scale)
+    dot_slices(&a.data, a.scale, &b.data, b.scale, simd_enabled)
+}
+
+/// Dot product of two q8 vectors given as raw code slices + scales. Lets callers
+/// score against a memory-mapped q8 record without materializing a QuantizedVec.
+pub fn dot_slices(a: &[i8], a_scale: f32, b: &[i8], b_scale: f32, simd_enabled: bool) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let raw = dot_i8_inner(a, b, simd_enabled) as f32;
+    raw * (a_scale * b_scale)
 }
 
 fn dot_i8_inner(a: &[i8], b: &[i8], simd_enabled: bool) -> i32 {
