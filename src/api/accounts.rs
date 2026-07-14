@@ -41,6 +41,50 @@ pub struct UserRecord {
     pub created_at_ms: i64,
 }
 
+/// Self-registration allowlist. An empty policy (no domains and no emails)
+/// means registration is open to anyone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AccessPolicy {
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub emails: Vec<String>,
+}
+
+impl AccessPolicy {
+    /// Whether `email` may register. Empty policy = open. Otherwise the address
+    /// must exactly match an allowed email or fall under an allowed domain
+    /// (case-insensitive).
+    pub fn permits(&self, email: &str) -> bool {
+        if self.domains.is_empty() && self.emails.is_empty() {
+            return true;
+        }
+        let email = email.trim().to_ascii_lowercase();
+        if self.emails.iter().any(|e| e.eq_ignore_ascii_case(&email)) {
+            return true;
+        }
+        if !email.contains('@') {
+            return false;
+        }
+        let domain = email.rsplit('@').next().unwrap_or_default();
+        self.domains
+            .iter()
+            .any(|d| d.trim_start_matches('@').eq_ignore_ascii_case(domain))
+    }
+}
+
+/// Normalize an allowlist: trim, strip a leading `@`, lowercase, drop empties,
+/// dedupe (order-preserving).
+fn normalize_access_list(items: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .map(|s| s.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
 /// Resolved identity behind a valid session token.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
@@ -155,6 +199,26 @@ impl AccountsService {
                         vec![],
                     )
                     .await?;
+                // Access policy: an optional allowlist of email domains / exact
+                // addresses that may self-register. Empty = open registration.
+                self.sqlite
+                    .execute(
+                        "CREATE TABLE IF NOT EXISTS sys_access_policy (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            domains TEXT NOT NULL DEFAULT '[]',
+                            emails TEXT NOT NULL DEFAULT '[]'
+                        )"
+                        .to_string(),
+                        vec![],
+                    )
+                    .await?;
+                self.sqlite
+                    .execute(
+                        "INSERT OR IGNORE INTO sys_access_policy (id, domains, emails) VALUES (1, '[]', '[]')"
+                            .to_string(),
+                        vec![],
+                    )
+                    .await?;
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
@@ -239,6 +303,58 @@ impl AccountsService {
         let org = self.create_org(org_name).await?;
         let user = self.create_user(&org.id, email, password, "owner").await?;
         Ok((org, user))
+    }
+
+    // ---- Access policy (self-registration allowlist) ----
+
+    /// Read the current access policy (allowed email domains / exact addresses).
+    pub async fn get_access_policy(&self) -> anyhow::Result<AccessPolicy> {
+        self.ensure_init().await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT domains, emails FROM sys_access_policy WHERE id = 1".to_string(),
+                vec![],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(AccessPolicy::default());
+        };
+        let parse = |field: &str| {
+            row.get(field)
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .unwrap_or_default()
+        };
+        Ok(AccessPolicy {
+            domains: parse("domains"),
+            emails: parse("emails"),
+        })
+    }
+
+    /// Replace the access policy. Entries are normalized (trimmed, lowercased,
+    /// deduped; leading `@` stripped from domains).
+    pub async fn set_access_policy(&self, policy: &AccessPolicy) -> anyhow::Result<AccessPolicy> {
+        self.ensure_init().await?;
+        let normalized = AccessPolicy {
+            domains: normalize_access_list(&policy.domains),
+            emails: normalize_access_list(&policy.emails),
+        };
+        self.sqlite
+            .execute(
+                "UPDATE sys_access_policy SET domains = ?, emails = ? WHERE id = 1".to_string(),
+                vec![
+                    json!(serde_json::to_string(&normalized.domains)?),
+                    json!(serde_json::to_string(&normalized.emails)?),
+                ],
+            )
+            .await?;
+        Ok(normalized)
+    }
+
+    /// Whether `email` is permitted to self-register under the current policy.
+    pub async fn is_email_allowed(&self, email: &str) -> anyhow::Result<bool> {
+        Ok(self.get_access_policy().await?.permits(email))
     }
 
     pub async fn create_user(
@@ -632,5 +748,40 @@ impl AccountsService {
             "collections": collections,
             "audit_events": audit_events,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_access_list, AccessPolicy};
+
+    #[test]
+    fn empty_policy_allows_everyone() {
+        assert!(AccessPolicy::default().permits("anyone@anywhere.com"));
+    }
+
+    #[test]
+    fn domain_and_email_allowlist() {
+        let policy = AccessPolicy {
+            domains: vec!["acme.com".into()],
+            emails: vec!["ceo@partner.io".into()],
+        };
+        assert!(policy.permits("jane@acme.com"));
+        assert!(policy.permits("JANE@ACME.COM")); // case-insensitive
+        assert!(policy.permits("ceo@partner.io")); // exact email
+        assert!(!policy.permits("bob@evil.com")); // wrong domain
+        assert!(!policy.permits("intern@partner.io")); // email not exactly allowed
+        assert!(!policy.permits("notanemail")); // no domain
+    }
+
+    #[test]
+    fn normalize_dedupes_and_strips() {
+        let out = normalize_access_list(&[
+            "  @Acme.com ".into(),
+            "acme.com".into(),
+            "".into(),
+            "Foo.IO".into(),
+        ]);
+        assert_eq!(out, vec!["acme.com".to_string(), "foo.io".to_string()]);
     }
 }
