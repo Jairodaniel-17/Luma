@@ -5,6 +5,7 @@ mod ivf;
 pub mod mmap;
 mod persist;
 pub mod q8;
+mod q8mmap;
 mod simd;
 
 pub use index::{DiskAnnIndex, DiskVectorIndex, VectorIndex};
@@ -333,6 +334,7 @@ struct Collection {
     items: HashMap<String, VectorItem>,
     q8_store: HashMap<String, QuantizedVec>,
     mmap_store: Option<mmap::VectorMmap>,
+    q8_mmap: Option<q8mmap::Q8Mmap>,
     item_mmap_offsets: HashMap<String, usize>,
     applied_offset: u64,
     segments: Vec<SegmentIndex>,
@@ -1116,7 +1118,8 @@ impl VectorStore {
         let mut c = c_arc.write();
         let layout = c.layout.clone().ok_or(VectorError::Persistence)?;
         let materialized = c.materialize_items();
-        let result = persist::rewrite_collection(&layout, &c.manifest, &materialized, &c.q8_store)
+        let materialized_q8 = c.materialize_q8();
+        let result = persist::rewrite_collection(&layout, &c.manifest, &materialized, &materialized_q8)
             .map_err(|_| VectorError::Persistence)?;
         c.manifest = result.manifest;
         c.item_runs = result.item_runs;
@@ -1229,6 +1232,7 @@ impl Collection {
             items,
             q8_store: quantized,
             mmap_store: None,
+            q8_mmap: None,
             item_mmap_offsets: HashMap::new(),
             item_runs,
             applied_offset,
@@ -1244,6 +1248,10 @@ impl Collection {
         };
         if let Some(layout) = &c.layout {
             let initial_capacity = (manifest.total_records as usize * 2).max(1024);
+            // Open the q8 mmap alongside the raw one; append to both in lockstep so
+            // an id's index is the same in each (see get_q8_slice / apply_record).
+            let mut q8_store_mmap =
+                q8mmap::Q8Mmap::create_or_open(&layout.q8_mmap_path, dim, initial_capacity).ok();
             match mmap::VectorMmap::create_or_open(&layout.mmap_path, dim, initial_capacity) {
                 Ok(mut store) => {
                     if store.header().count == 0 && !c.items.is_empty() {
@@ -1254,18 +1262,43 @@ impl Collection {
                             if let Some(item) = c.items.get_mut(&id) {
                                 if let Ok(idx) = store.append(&item.vector) {
                                     item.mmap_offset = Some(idx as u64);
-                                    c.item_mmap_offsets.insert(id, idx);
+                                    c.item_mmap_offsets.insert(id.clone(), idx);
+                                    // q8 in lockstep: reuse a loaded code if present,
+                                    // else derive it from the raw vector.
+                                    if let Some(q8) = q8_store_mmap.as_mut() {
+                                        let q = c
+                                            .q8_store
+                                            .get(&id)
+                                            .cloned()
+                                            .unwrap_or_else(|| q8ops::quantize_per_vector(&item.vector));
+                                        let _ = q8.append(&q);
+                                    }
                                 }
                             }
                         }
                         let _ = store.flush();
+                        if let Some(q8) = q8_store_mmap.as_ref() {
+                            let _ = q8.flush();
+                        }
                     } else if store.header().count > 0 {
-                        // If mmap has data but we don't have offsets (e.g. restart),
-                        // we need a way to recover. For now, we'll re-migrate to be safe if
-                        // offsets are missing, but this is a placeholder for a real mapping storage.
-                        // For simplicity in this step, we just populate from whatever we have.
+                        // mmap has data but offsets are only in RAM (lost on restart):
+                        // recovering the id->index mapping needs the persisted index
+                        // planned for the id-map phase. Until then the raw vectors
+                        // remain the fallback via get_vector_slice.
+                        //
+                        // If the q8 mmap is out of sync with the raw one (e.g. added
+                        // for an existing collection), drop it so we fall back to the
+                        // in-RAM q8_store rather than read misaligned codes.
+                        if q8_store_mmap
+                            .as_ref()
+                            .map(|q| q.count() != store.header().count as usize)
+                            .unwrap_or(false)
+                        {
+                            q8_store_mmap = None;
+                        }
                     }
                     c.mmap_store = Some(store);
+                    c.q8_mmap = q8_store_mmap;
                 }
                 Err(e) => tracing::warn!("Failed to initialize mmap store: {}", e),
             }
@@ -1283,17 +1316,52 @@ impl Collection {
         Ok(c)
     }
 
-    /// Drop the in-RAM `Vec<f32>` copy for items whose raw vector is in the mmap.
+    /// Drop the in-RAM `Vec<f32>` copy for items whose raw vector is in the mmap,
+    /// and the in-RAM q8 code when the q8 mmap covers it. Both then resolve from
+    /// disk (get_vector_slice / get_q8_codes), so per-vector heap stops growing
+    /// with N.
     fn release_mmapped_vectors_from_ram(&mut self) {
         if self.mmap_store.is_none() {
             return;
         }
+        let q8_paged = self.q8_mmap.is_some();
         let mmapped: Vec<String> = self.item_mmap_offsets.keys().cloned().collect();
-        for id in mmapped {
-            if let Some(item) = self.items.get_mut(&id) {
+        for id in &mmapped {
+            if let Some(item) = self.items.get_mut(id) {
                 item.vector = Vec::new();
             }
         }
+        if q8_paged {
+            for id in &mmapped {
+                self.q8_store.remove(id);
+            }
+        }
+    }
+
+    /// Resolve an id's q8 code as `(scale, codes)`, from the disk-backed q8 mmap
+    /// when available (index shared with the raw mmap), else the in-RAM q8_store.
+    /// The returned slice borrows from whichever store holds it.
+    fn get_q8_codes(&self, id: &str) -> Option<(f32, &[i8])> {
+        if let Some(q8m) = &self.q8_mmap {
+            if let Some(&idx) = self.item_mmap_offsets.get(id) {
+                if let Some((scale, codes)) = q8m.get(idx) {
+                    return Some((scale, codes));
+                }
+            }
+        }
+        self.q8_store.get(id).map(|q| (q.scale, q.data.as_slice()))
+    }
+
+    /// Owned q8 map for every item (from the mmap or q8_store), for the paths
+    /// that need ownership (compaction rewrite, disk-index build).
+    fn materialize_q8(&self) -> HashMap<String, QuantizedVec> {
+        self.items
+            .keys()
+            .filter_map(|id| {
+                self.get_q8_codes(id)
+                    .map(|(scale, codes)| (id.clone(), QuantizedVec::new(scale, codes.to_vec())))
+            })
+            .collect()
     }
 
     /// Items with their raw vectors resolved from the mmap when they're not held
@@ -1415,10 +1483,16 @@ impl Collection {
 
     fn ensure_quantized_store(&mut self) {
         self.q8_store.retain(|id, _| self.items.contains_key(id));
+        let q8_paged = self.q8_mmap.is_some();
         let missing: Vec<(String, Vec<f32>)> = self
             .items
             .iter()
-            .filter(|(id, _)| !self.q8_store.contains_key(*id))
+            // Skip items whose q8 already lives in the disk-backed q8 mmap —
+            // re-populating q8_store for them would defeat the RAM saving.
+            .filter(|(id, _)| {
+                !self.q8_store.contains_key(*id)
+                    && !(q8_paged && self.item_mmap_offsets.contains_key(*id))
+            })
             // Read via get_vector_slice so this works when the raw vector lives in
             // the mmap (disk) rather than in the in-RAM VectorItem.
             .map(|(id, item)| (id.clone(), self.get_vector_slice(id, item).to_vec()))
@@ -1760,6 +1834,19 @@ impl Collection {
                                 Ok(idx) => {
                                     mmap_idx = Some(idx as u64);
                                     self.item_mmap_offsets.insert(record.id.clone(), idx);
+                                    // Append the q8 code in lockstep so its index
+                                    // matches the raw index. If the append fails or
+                                    // desyncs, drop the q8 mmap and fall back to the
+                                    // in-RAM q8_store rather than read misaligned data.
+                                    if let Some(q8m) = self.q8_mmap.as_mut() {
+                                        let q = quantized_vec
+                                            .clone()
+                                            .unwrap_or_else(|| q8ops::quantize_per_vector(vec));
+                                        match q8m.append(&q) {
+                                            Ok(q_idx) if q_idx == idx => {}
+                                            _ => self.q8_mmap = None,
+                                        }
+                                    }
                                 }
                                 Err(e) => tracing::warn!("Failed to append to mmap store: {}", e),
                             }
@@ -1820,7 +1907,13 @@ impl Collection {
                 // the in-RAM index structures.
                 self.insert_into_segments(&record.id, vec.clone());
                 if let Some(qvec) = quantized_vec {
-                    self.q8_store.insert(record.id.clone(), qvec);
+                    // If the q8 code was appended to the disk-backed q8 mmap
+                    // (lockstep with the raw vector), don't also keep it in the
+                    // in-RAM q8_store — that's the whole point of paging it out.
+                    let paged_q8 = mmap_idx.is_some() && self.q8_mmap.is_some();
+                    if !paged_q8 {
+                        self.q8_store.insert(record.id.clone(), qvec);
+                    }
                 }
                 self.assign_cluster_for(&record.id, &vec);
                 if previous.is_none() {
@@ -1885,13 +1978,16 @@ impl Collection {
         let params = params.sanitized();
         let layout = self.layout.clone().ok_or(VectorError::Persistence)?;
         self.ensure_quantized_store();
-        // ensure_quantized_store() (called just above) guarantees a q8 entry for
-        // every item, so read from q8_store directly — no need to touch the raw
-        // vector, which may now live only in the mmap.
+        // Read q8 via get_q8_codes so we cover both the in-RAM q8_store and the
+        // disk-backed q8 mmap (ensure_quantized_store only fills q8_store for
+        // items not already paged).
         let mut nodes: Vec<(String, QuantizedVec)> = self
             .items
             .keys()
-            .filter_map(|id| self.q8_store.get(id).map(|q| (id.clone(), q.clone())))
+            .filter_map(|id| {
+                self.get_q8_codes(id)
+                    .map(|(scale, codes)| (id.clone(), QuantizedVec::new(scale, codes.to_vec())))
+            })
             .collect();
         nodes.sort_by(|a, b| a.0.cmp(&b.0));
         let status = diskann::build_disk_index(
@@ -1958,11 +2054,12 @@ impl Collection {
             return Ok(false);
         }
         let materialized = self.materialize_items();
+        let materialized_q8 = self.materialize_q8();
         let result = compact_runs(
             layout,
             &self.manifest,
             &materialized,
-            &self.q8_store,
+            &materialized_q8,
             &self.item_runs,
             self.settings.compaction_max_bytes_per_pass,
         )
@@ -2320,10 +2417,16 @@ impl Collection {
                 if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
                     continue;
                 }
-                let Some(qvec) = self.q8_store.get(id) else {
+                let Some((qscale, qcodes)) = self.get_q8_codes(id) else {
                     continue;
                 };
-                let approx = q8ops::dot(qvec, &q_query, self.settings.simd_enabled);
+                let approx = q8ops::dot_slices(
+                    qcodes,
+                    qscale,
+                    &q_query.data,
+                    q_query.scale,
+                    self.settings.simd_enabled,
+                );
                 scored.push((id.clone(), approx));
             }
         }
