@@ -97,6 +97,12 @@ pub struct SessionIdentity {
 pub struct AccountsService {
     sqlite: Arc<SqliteService>,
     init: Arc<OnceCell<()>>,
+    /// Cache of collection-name → owning org_id. Ownership is first-touch and
+    /// never changes (nothing deletes sys_collections), so a value read from
+    /// SQLite is valid forever — this removes a per-request SQLite query from
+    /// the tenant-isolation middleware on the hot path. Only positive results
+    /// are cached, and only from an authoritative SQLite read.
+    owner_cache: Arc<dashmap::DashMap<String, String>>,
 }
 
 fn now_ms() -> i64 {
@@ -117,6 +123,7 @@ impl AccountsService {
         Self {
             sqlite,
             init: Arc::new(OnceCell::new()),
+            owner_cache: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -591,6 +598,9 @@ impl AccountsService {
 
     /// Return the org that owns a collection/namespace, if recorded.
     pub async fn collection_owner(&self, name: &str) -> anyhow::Result<Option<String>> {
+        if let Some(owner) = self.owner_cache.get(name) {
+            return Ok(Some(owner.clone()));
+        }
         self.ensure_init().await?;
         let rows = self
             .sqlite
@@ -599,10 +609,16 @@ impl AccountsService {
                 vec![json!(name)],
             )
             .await?;
-        Ok(rows
+        let owner = rows
             .into_iter()
             .next()
-            .and_then(|r| r.get("org_id").and_then(|v| v.as_str()).map(String::from)))
+            .and_then(|r| r.get("org_id").and_then(|v| v.as_str()).map(String::from));
+        // Cache only a positive, authoritative result. An unowned name must stay
+        // uncached because it is about to be claimed via register_collection.
+        if let Some(o) = &owner {
+            self.owner_cache.insert(name.to_string(), o.clone());
+        }
+        Ok(owner)
     }
 
     /// Record ownership of a collection/namespace by an org (first-touch).
