@@ -700,7 +700,7 @@ impl VectorStore {
             .filter_map(|id| {
                 c.items.get(id).map(|item| ScrollItem {
                     id: id.clone(),
-                    vector: include_vectors.then(|| item.vector.clone()),
+                    vector: include_vectors.then(|| c.get_vector_slice(id, item).to_vec()),
                     meta: item.meta.clone(),
                 })
             })
@@ -973,7 +973,12 @@ impl VectorStore {
             .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         let current = c.items.get(id).cloned().ok_or(VectorError::IdNotFound)?;
-        let new_vec = vector.unwrap_or(current.vector);
+        // The stored vector may live in the mmap (empty in RAM), so resolve it
+        // through get_vector_slice for the "keep existing vector" case.
+        let new_vec = match vector {
+            Some(v) => v,
+            None => c.get_vector_slice(id, &current).to_vec(),
+        };
         if new_vec.len() != c.dim {
             return Err(VectorError::DimMismatch);
         }
@@ -1066,7 +1071,8 @@ impl VectorStore {
             .ok_or(VectorError::CollectionNotFound)?;
         let mut c = c_arc.write();
         let layout = c.layout.clone().ok_or(VectorError::Persistence)?;
-        let result = persist::rewrite_collection(&layout, &c.manifest, &c.items, &c.q8_store)
+        let materialized = c.materialize_items();
+        let result = persist::rewrite_collection(&layout, &c.manifest, &materialized, &c.q8_store)
             .map_err(|_| VectorError::Persistence)?;
         c.manifest = result.manifest;
         c.item_runs = result.item_runs;
@@ -1222,7 +1228,44 @@ impl Collection {
         c.load_disk_graph().map_err(|_| VectorError::Persistence)?;
         c.rebuild_index();
         c.sync_manifest_run_settings()?;
+        // RAM optimization: after the in-RAM indexes are built, release the raw
+        // Vec<f32> for every item that is durably backed by the mmap — reads go
+        // through get_vector_slice (mmap). Items without an mmap offset keep it.
+        c.release_mmapped_vectors_from_ram();
         Ok(c)
+    }
+
+    /// Drop the in-RAM `Vec<f32>` copy for items whose raw vector is in the mmap.
+    fn release_mmapped_vectors_from_ram(&mut self) {
+        if self.mmap_store.is_none() {
+            return;
+        }
+        let mmapped: Vec<String> = self.item_mmap_offsets.keys().cloned().collect();
+        for id in mmapped {
+            if let Some(item) = self.items.get_mut(&id) {
+                item.vector = Vec::new();
+            }
+        }
+    }
+
+    /// Items with their raw vectors resolved from the mmap when they're not held
+    /// in RAM. Used by run compaction/rewrite, which must persist full vectors.
+    /// ponytail: materializes all vectors transiently during a (rare) compaction;
+    /// stream from the mmap per-record if compaction memory ever matters.
+    fn materialize_items(&self) -> HashMap<String, VectorItem> {
+        self.items
+            .iter()
+            .map(|(id, item)| {
+                (
+                    id.clone(),
+                    VectorItem {
+                        vector: self.get_vector_slice(id, item).to_vec(),
+                        meta: item.meta.clone(),
+                        mmap_offset: item.mmap_offset,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn rebuild_index(&mut self) {
@@ -1302,7 +1345,9 @@ impl Collection {
         self.item_clusters.clear();
         self.cluster_members.clear();
         if let Some(ivf) = &self.ivf {
-            let assigned = assign_all_clusters(ivf, &self.items, self.settings.simd_enabled);
+            // Resolve vectors from the mmap — item.vector is empty when offloaded.
+            let materialized = self.materialize_items();
+            let assigned = assign_all_clusters(ivf, &materialized, self.settings.simd_enabled);
             for (id, cluster) in assigned.iter() {
                 self.cluster_members
                     .entry(*cluster)
@@ -1319,7 +1364,9 @@ impl Collection {
             .items
             .iter()
             .filter(|(id, _)| !self.q8_store.contains_key(*id))
-            .map(|(id, item)| (id.clone(), item.vector.clone()))
+            // Read via get_vector_slice so this works when the raw vector lives in
+            // the mmap (disk) rather than in the in-RAM VectorItem.
+            .map(|(id, item)| (id.clone(), self.get_vector_slice(id, item).to_vec()))
             .collect();
         for (id, vector) in missing {
             let q = q8ops::quantize_per_vector(&vector);
@@ -1397,7 +1444,7 @@ impl Collection {
         entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut vectors: Vec<Vec<f32>> = entries
             .into_iter()
-            .map(|(_, item)| item.vector.clone())
+            .map(|(id, item)| self.get_vector_slice(id, item).to_vec())
             .collect();
         let limit = self.settings.ivf.training_sample.min(vectors.len());
         if limit == 0 {
@@ -1689,8 +1736,17 @@ impl Collection {
                 self.manifest.upsert_count = self.manifest.upsert_count.saturating_add(1);
                 let vec = normalized_vec.clone().ok_or(VectorError::InvalidManifest)?;
                 let meta = record.meta.take().unwrap_or(serde_json::Value::Null);
+                // RAM optimization: once the raw vector is durably in the mmap
+                // (offset known), don't also keep a Vec<f32> in RAM — reads go
+                // through get_vector_slice, which returns the mmap slice. Keep the
+                // in-RAM copy only when there's no mmap (in-memory-only collection).
+                let stored_vector = if mmap_idx.is_some() {
+                    Vec::new()
+                } else {
+                    vec.clone()
+                };
                 let new_item = VectorItem {
-                    vector: vec.clone(),
+                    vector: stored_vector,
                     meta,
                     mmap_offset: mmap_idx,
                 };
@@ -1699,11 +1755,13 @@ impl Collection {
                     self.remove_meta_from_index(&record.id, Some(&prev.meta));
                 }
                 self.add_meta_to_index(&record.id, &new_item.meta);
-                self.insert_into_segments(&record.id, new_item.vector.clone());
+                // Use the local `vec` (new_item.vector may now be empty) to feed
+                // the in-RAM index structures.
+                self.insert_into_segments(&record.id, vec.clone());
                 if let Some(qvec) = quantized_vec {
                     self.q8_store.insert(record.id.clone(), qvec);
                 }
-                self.assign_cluster_for(&record.id, &new_item.vector);
+                self.assign_cluster_for(&record.id, &vec);
                 if previous.is_none() {
                     self.manifest.live_count += 1;
                 }
@@ -1732,17 +1790,13 @@ impl Collection {
         let params = params.sanitized();
         let layout = self.layout.clone().ok_or(VectorError::Persistence)?;
         self.ensure_quantized_store();
+        // ensure_quantized_store() (called just above) guarantees a q8 entry for
+        // every item, so read from q8_store directly — no need to touch the raw
+        // vector, which may now live only in the mmap.
         let mut nodes: Vec<(String, QuantizedVec)> = self
             .items
-            .iter()
-            .map(|(id, item)| {
-                let q = self
-                    .q8_store
-                    .entry(id.clone())
-                    .or_insert_with(|| q8ops::quantize_per_vector(&item.vector))
-                    .clone();
-                (id.clone(), q)
-            })
+            .keys()
+            .filter_map(|id| self.q8_store.get(id).map(|q| (id.clone(), q.clone())))
             .collect();
         nodes.sort_by(|a, b| a.0.cmp(&b.0));
         let status = diskann::build_disk_index(
@@ -1808,10 +1862,11 @@ impl Collection {
         if self.manifest.runs.is_empty() || (!force && !self.manifest.should_compact()) {
             return Ok(false);
         }
+        let materialized = self.materialize_items();
         let result = compact_runs(
             layout,
             &self.manifest,
-            &self.items,
+            &materialized,
             &self.q8_store,
             &self.item_runs,
             self.settings.compaction_max_bytes_per_pass,
@@ -1859,7 +1914,7 @@ impl Collection {
             for (id, item) in self.items.iter() {
                 let score = exact_score(
                     self.metric,
-                    &item.vector,
+                    self.get_vector_slice(id, item),
                     &query,
                     self.settings.simd_enabled,
                 );
@@ -2262,7 +2317,9 @@ fn collect_segment_rebuild_items(collection: &Collection) -> Vec<(String, Vec<f3
     let mut items = collection
         .items
         .iter()
-        .map(|(id, item)| (id.clone(), item.vector.clone()))
+        // Read via get_vector_slice so segment rebuilds work when the raw vector
+        // lives in the mmap (disk) rather than in the in-RAM VectorItem.
+        .map(|(id, item)| (id.clone(), collection.get_vector_slice(id, item).to_vec()))
         .collect::<Vec<_>>();
     items.sort_by(|a, b| a.0.cmp(&b.0));
     items
