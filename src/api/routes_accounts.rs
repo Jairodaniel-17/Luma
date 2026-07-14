@@ -2,7 +2,7 @@
 //! login, session lifecycle, and admin management of users/orgs plus dashboard
 //! stats. See [`crate::api::accounts`].
 
-use crate::api::accounts::{AccountsService, SessionIdentity};
+use crate::api::accounts::{AccessPolicy, AccountsService, SessionIdentity};
 use crate::api::errors::ApiError;
 use crate::api::rbac::{require_platform_admin, require_role, role_strictly_below};
 use crate::api::{AppState, TenantContext};
@@ -62,6 +62,15 @@ pub async fn register(
             StatusCode::BAD_REQUEST,
             "weak_password",
             "password must be at least 8 characters",
+        ));
+    }
+    // Access policy: when an allowlist is configured, only approved email
+    // domains / addresses may self-register.
+    if !svc.is_email_allowed(&body.email).await.map_err(internal)? {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "email_not_permitted",
+            "registration is restricted to approved email domains",
         ));
     }
     // Generic 409 on any conflict (e.g. duplicate email) — do not echo the raw
@@ -496,4 +505,27 @@ pub async fn audit_events(
         .map_err(internal)?;
     let count = events.len();
     Ok(Json(json!({ "events": events, "count": count })))
+}
+
+// ---- Platform admin: self-registration access policy ----
+
+pub async fn get_access_policy(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_platform_admin(&ctx)?;
+    let svc = accounts(&state)?;
+    let policy = svc.get_access_policy().await.map_err(internal)?;
+    Ok(Json(json!({ "domains": policy.domains, "emails": policy.emails })))
+}
+
+pub async fn set_access_policy(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Json(body): Json<AccessPolicy>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_platform_admin(&ctx)?;
+    let svc = accounts(&state)?;
+    let saved = svc.set_access_policy(&body).await.map_err(internal)?;
+    Ok(Json(json!({ "domains": saved.domains, "emails": saved.emails })))
 }

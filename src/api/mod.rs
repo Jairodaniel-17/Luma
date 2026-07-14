@@ -265,6 +265,10 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/auth/logout", post(routes_accounts::logout))
         .route("/v1/auth/refresh", post(routes_accounts::refresh))
         .route(
+            "/v1/auth/access-policy",
+            get(routes_accounts::get_access_policy).put(routes_accounts::set_access_policy),
+        )
+        .route(
             "/v1/admin/orgs",
             get(routes_accounts::list_orgs).post(routes_accounts::create_org),
         )
