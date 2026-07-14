@@ -134,6 +134,24 @@ impl LumaDatabase {
             }
         });
 
+        // Rebuild the SQLite doc-filter projection from event-sourced state so a
+        // crash/restore can't leave docs_<ns> diverged from the WAL. Additive
+        // (INSERT OR REPLACE, never drops rows), so legacy docs that predate
+        // projection entries keep working. Runs once, shortly after startup.
+        // ponytail: O(docs) reconciliation on every boot; a dirty-marker to skip
+        // clean restarts is the upgrade path if startup latency ever matters.
+        {
+            let engine = engine.clone();
+            let sql_opt = sqlite.clone();
+            tokio::spawn(async move {
+                if let Some(sql) = sql_opt {
+                    if let Err(e) = rebuild_sql_projection(&engine, &sql).await {
+                        tracing::error!("SQL projection rebuild failed: {}", e);
+                    }
+                }
+            });
+        }
+
         Self {
             engine,
             sqlite,
@@ -294,6 +312,27 @@ impl LumaDatabase {
             .metrics()
             .hybrid_vector_write_latency
             .record_us(vector_stage.elapsed().as_micros() as u64);
+
+        // Event-source the SQL filter projection. The docs_<ns> row is derived
+        // data (id + metadata), so persist it as WAL-backed state keyed by
+        // (table, id). On restart the SQLite table is rebuilt from these entries
+        // (see LumaDatabase::new), so the filter store can never silently diverge
+        // from the WAL after a crash/restore. Written last, only on full success,
+        // so an aborted/rolled-back ingest leaves no projection entry behind.
+        if self.sqlite.is_some() {
+            let table = sql_doc_table(namespace);
+            let proj_key = sql_projection_key(&table, doc_id);
+            let proj_val = serde_json::json!({
+                "table": table,
+                "id": doc_id,
+                "metadata": metadata.clone().unwrap_or_else(|| serde_json::json!({})),
+            });
+            let engine = self.engine.clone();
+            tokio::task::spawn_blocking(move || engine.put_state(proj_key, proj_val, None, None))
+                .await
+                .context("join sqlproj put_state task")?
+                .context("persist sql projection entry")?;
+        }
 
         self.enqueue_metadata_indexes(namespace, metadata.as_ref());
         tracing::info!(
@@ -934,6 +973,77 @@ fn sql_doc_table(namespace: &str) -> String {
     format!("docs_{}", sanitize_sql_identifier(namespace))
 }
 
+/// State key under which a document's SQL-filter projection row is event-sourced.
+/// The value is `{table, id, metadata}`; `rebuild_sql_projection` replays these
+/// into the docs_<ns> tables on startup so SQLite can't diverge from the WAL.
+fn sql_projection_key(table: &str, doc_id: &str) -> String {
+    format!("__sqlproj__:{table}:{doc_id}")
+}
+
+/// Whether a table name is a safe, self-generated docs_<ns> identifier. Defends
+/// the rebuild against a tampered projection entry before interpolating it.
+fn is_safe_doc_table(table: &str) -> bool {
+    table.starts_with("docs_")
+        && table
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Rebuild the SQLite doc-filter tables from the event-sourced `__sqlproj__:`
+/// state entries. Idempotent and additive (CREATE TABLE IF NOT EXISTS +
+/// INSERT OR REPLACE); it never drops rows, so documents that predate projection
+/// entries are left intact. This makes the SQLite filter store a reconstructible
+/// projection of the WAL-backed state rather than a separate, divergeable store.
+async fn rebuild_sql_projection(engine: &Engine, sql: &SqliteService) -> anyhow::Result<()> {
+    let entries = engine.list_state(Some("__sqlproj__:"), usize::MAX);
+    let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut restored = 0usize;
+    for item in &entries {
+        let (Some(table), Some(id)) = (
+            item.value.get("table").and_then(|v| v.as_str()),
+            item.value.get("id").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if !is_safe_doc_table(table) {
+            tracing::warn!(%table, "skipping projection entry with unsafe table name");
+            continue;
+        }
+        if created.insert(table.to_string()) {
+            sql.execute(
+                format!("CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, metadata JSON)"),
+                vec![],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("projection rebuild create table: {e}"))?;
+        }
+        let meta_str = item
+            .value
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}))
+            .to_string();
+        sql.execute(
+            format!("INSERT OR REPLACE INTO {table} (id, metadata) VALUES (?, ?)"),
+            vec![
+                serde_json::Value::String(id.to_string()),
+                serde_json::Value::String(meta_str),
+            ],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("projection rebuild insert: {e}"))?;
+        restored += 1;
+    }
+    if restored > 0 {
+        tracing::info!(
+            docs = restored,
+            tables = created.len(),
+            "rebuilt SQLite doc-filter projection from WAL-backed state"
+        );
+    }
+    Ok(())
+}
+
 /// Validate a user-supplied sql_filter expression using full AST parsing.
 ///
 /// Wraps the filter in `SELECT 1 FROM __t__ WHERE <filter>` and parses it with
@@ -1052,9 +1162,68 @@ fn sanitize_sql_identifier(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_hits, expand_vector_first_limit, sql_doc_table, validate_sql_filter,
-        ChunkMetadata, FilterApplication, QueryPlan, QueryStrategy,
+        collapse_hits, expand_vector_first_limit, is_safe_doc_table, rebuild_sql_projection,
+        sql_doc_table, sql_projection_key, validate_sql_filter, ChunkMetadata, FilterApplication,
+        QueryPlan, QueryStrategy,
     };
+
+    #[test]
+    fn projection_key_and_table_guard() {
+        assert_eq!(
+            sql_projection_key("docs_ns", "doc-1"),
+            "__sqlproj__:docs_ns:doc-1"
+        );
+        assert!(is_safe_doc_table("docs_tenant__a__ns"));
+        assert!(!is_safe_doc_table("users")); // wrong prefix
+        assert!(!is_safe_doc_table("docs_ns; DROP TABLE x")); // injection chars
+    }
+
+    // The core of the event-sourcing redesign: the SQLite filter row is derived
+    // data, so rebuilding from a WAL-backed `__sqlproj__:` state entry must
+    // recreate it even when SQLite has no such row (the post-crash divergence).
+    #[tokio::test]
+    async fn rebuild_restores_doc_row_from_state_projection() {
+        use crate::config::Config;
+        use crate::engine::Engine;
+        use crate::sqlite::SqliteService;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: Some(dir.path().to_str().unwrap().to_string()),
+            ..Config::default()
+        };
+        let engine = Engine::new(config, CancellationToken::new()).unwrap();
+        let sql = SqliteService::new(dir.path().join("meta.db")).unwrap();
+
+        // Event-sourced projection entry exists, but SQLite has NO docs table/row
+        // (simulates a crash/restore where the filter store fell behind the WAL).
+        engine
+            .put_state(
+                sql_projection_key("docs_ns", "doc-1"),
+                serde_json::json!({
+                    "table": "docs_ns",
+                    "id": "doc-1",
+                    "metadata": {"status": "active"}
+                }),
+                None,
+                None,
+            )
+            .unwrap();
+
+        rebuild_sql_projection(&engine, &sql).await.unwrap();
+
+        let rows = sql
+            .query(
+                "SELECT metadata FROM docs_ns WHERE id = ?".to_string(),
+                vec![serde_json::Value::String("doc-1".to_string())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "row should be reconstructed from the WAL projection");
+        let meta = rows[0]["metadata"].as_str().unwrap();
+        assert!(meta.contains("active"), "metadata preserved: {meta}");
+    }
 
     #[test]
     fn validate_sql_filter_rejects_comment_tokens() {
