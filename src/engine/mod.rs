@@ -855,6 +855,74 @@ impl Engine {
         Ok(())
     }
 
+    /// Batched upsert: one append_guard, one collection lock, one run-WAL fsync
+    /// and one compaction/training pass for the whole batch (vs. paying each of
+    /// those per item in a loop of `vector_upsert`). Returns a per-item outcome
+    /// aligned with `items` order: `Ok(())` = upserted, `Err(DimMismatch)` for
+    /// items whose dimension doesn't match the collection. A missing collection
+    /// or a persistence failure fails the whole call.
+    pub fn vector_upsert_batch(
+        &self,
+        collection: &str,
+        items: Vec<(String, Vec<f32>, serde_json::Value)>,
+    ) -> Result<Vec<Result<(), VectorError>>, EngineError> {
+        let (dim, _metric) = self
+            .0
+            .vectors
+            .get_collection(collection)
+            .ok_or(VectorError::CollectionNotFound)?;
+
+        let mut outcomes: Vec<Result<(), VectorError>> = Vec::with_capacity(items.len());
+        let mut valid: Vec<(String, Vec<f32>, serde_json::Value)> = Vec::with_capacity(items.len());
+        for (id, vector, meta) in items {
+            if vector.len() != dim {
+                outcomes.push(Err(VectorError::DimMismatch));
+            } else {
+                outcomes.push(Ok(()));
+                valid.push((id, vector, meta));
+            }
+        }
+        if valid.is_empty() {
+            return Ok(outcomes);
+        }
+
+        let count = valid.len();
+        let append = self.0.events.append_guard();
+        let mut store_items: Vec<(u64, String, Vec<f32>, serde_json::Value)> =
+            Vec::with_capacity(count);
+        let mut events: Vec<crate::engine::EventRecord> = Vec::with_capacity(count);
+        for (id, vector, meta) in valid {
+            // Build the durable event from references so the originals can move
+            // into the apply batch without a second copy or a JSON round-trip.
+            let data = serde_json::json!({
+                "collection": collection,
+                "id": &id,
+                "vector": &vector,
+                "meta": &meta,
+            });
+            let event = self.0.events.next_record("vector_upserted", data);
+            if let Some(persist) = &self.0.persist {
+                persist.append_event(&event)?;
+            }
+            store_items.push((event.offset, id, vector, meta));
+            events.push(event);
+        }
+
+        self.0
+            .vectors
+            .apply_upserts_batch(collection, store_items)?;
+
+        for event in events {
+            self.0.events.publish_record(event);
+        }
+        drop(append);
+        for _ in 0..count {
+            self.metrics().inc_events();
+            self.metrics().inc_vector_op();
+        }
+        Ok(outcomes)
+    }
+
     pub fn vector_update(
         &self,
         collection: &str,

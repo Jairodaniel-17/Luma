@@ -346,11 +346,17 @@ pub async fn upsert_batch(
             "too many items",
         ));
     }
-    let mut results = Vec::with_capacity(body.items.len());
-    for op in body.items {
+    // Per-item validation first (preserving order via slots), then a single
+    // batched engine call for everything that passed. Batching amortizes the
+    // append_guard, collection lock, run-WAL fsync and compaction/training pass
+    // over the whole batch instead of paying them per item.
+    let mut results: Vec<Option<VectorBatchResult>> = (0..body.items.len()).map(|_| None).collect();
+    let mut batch: Vec<(usize, String)> = Vec::new();
+    let mut batch_items: Vec<(String, Vec<f32>, serde_json::Value)> = Vec::new();
+    for (idx, op) in body.items.into_iter().enumerate() {
         let AddBody { id, vector, meta } = op;
         if id.len() > state.config.max_id_len {
-            results.push(VectorBatchResult::Error {
+            results[idx] = Some(VectorBatchResult::Error {
                 id,
                 error: ErrorBody {
                     error: "invalid_argument",
@@ -360,7 +366,7 @@ pub async fn upsert_batch(
             continue;
         }
         if vector.len() > state.config.max_vector_dim {
-            results.push(VectorBatchResult::Error {
+            results[idx] = Some(VectorBatchResult::Error {
                 id,
                 error: ErrorBody {
                     error: "invalid_argument",
@@ -372,7 +378,7 @@ pub async fn upsert_batch(
         if let Some(meta) = &meta {
             let estimated = serde_json::to_vec(meta).map(|v| v.len()).unwrap_or(0);
             if estimated > state.config.max_json_bytes {
-                results.push(VectorBatchResult::Error {
+                results[idx] = Some(VectorBatchResult::Error {
                     id,
                     error: ErrorBody {
                         error: "payload_too_large",
@@ -382,24 +388,32 @@ pub async fn upsert_batch(
                 continue;
             }
         }
-        match state.engine.vector_upsert(
-            &collection,
-            &id,
-            VectorItem {
-                vector,
-                meta: meta.unwrap_or(serde_json::Value::Null),
-                mmap_offset: None,
-            },
-        ) {
-            Ok(_) => results.push(VectorBatchResult::Upserted { id }),
-            Err(EngineError::Vector(VectorError::DimMismatch)) => {
-                results.push(VectorBatchResult::Error {
-                    id,
-                    error: ErrorBody {
-                        error: "dim_mismatch",
-                        message: "vector dimension mismatch".into(),
-                    },
-                });
+        batch.push((idx, id.clone()));
+        batch_items.push((id, vector, meta.unwrap_or(serde_json::Value::Null)));
+    }
+
+    if !batch_items.is_empty() {
+        match state.engine.vector_upsert_batch(&collection, batch_items) {
+            Ok(outcomes) => {
+                for ((idx, id), outcome) in batch.into_iter().zip(outcomes) {
+                    results[idx] = Some(match outcome {
+                        Ok(()) => VectorBatchResult::Upserted { id },
+                        Err(VectorError::DimMismatch) => VectorBatchResult::Error {
+                            id,
+                            error: ErrorBody {
+                                error: "dim_mismatch",
+                                message: "vector dimension mismatch".into(),
+                            },
+                        },
+                        Err(_) => VectorBatchResult::Error {
+                            id,
+                            error: ErrorBody {
+                                error: "internal",
+                                message: "upsert failed".into(),
+                            },
+                        },
+                    });
+                }
             }
             Err(EngineError::Vector(VectorError::CollectionNotFound)) => {
                 return Err(map_vector_error(VectorError::CollectionNotFound));
@@ -409,15 +423,6 @@ pub async fn upsert_batch(
             }
             Err(EngineError::Vector(VectorError::Persistence)) => {
                 return Err(map_vector_error(VectorError::Persistence));
-            }
-            Err(EngineError::Vector(VectorError::IdExists)) => {
-                results.push(VectorBatchResult::Error {
-                    id,
-                    error: ErrorBody {
-                        error: "already_exists",
-                        message: "id already exists".into(),
-                    },
-                });
             }
             Err(EngineError::Persistence(_)) => {
                 return Err(ApiError::new(
@@ -438,6 +443,8 @@ pub async fn upsert_batch(
             }
         }
     }
+
+    let results: Vec<VectorBatchResult> = results.into_iter().flatten().collect();
     Ok(axum::Json(VectorBatchResponse { results }))
 }
 
