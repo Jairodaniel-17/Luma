@@ -128,7 +128,10 @@ mod tests {
         // the accumulated i32 must not overflow.
         let dim = MAX_SAFE_DIM;
         let worst = 127i32 * 127i32 * dim as i32;
-        assert!(worst > 0, "MAX_SAFE_DIM sum must stay positive (no i32 wrap)");
+        assert!(
+            worst > 0,
+            "MAX_SAFE_DIM sum must stay positive (no i32 wrap)"
+        );
         // And one dim beyond would overflow (checked arithmetic returns None).
         assert!((127i32 * 127i32).checked_mul((dim + 1) as i32).is_none());
     }

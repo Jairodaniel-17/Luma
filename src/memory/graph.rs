@@ -642,8 +642,12 @@ mod tests {
             .collect();
         let mut adj: HashMap<String, Vec<(String, f32)>> = HashMap::new();
         let mut edge = |x: &str, y: &str| {
-            adj.entry(x.to_string()).or_default().push((y.to_string(), 1.0));
-            adj.entry(y.to_string()).or_default().push((x.to_string(), 1.0));
+            adj.entry(x.to_string())
+                .or_default()
+                .push((y.to_string(), 1.0));
+            adj.entry(y.to_string())
+                .or_default()
+                .push((x.to_string(), 1.0));
         };
         edge("hub", "a");
         edge("hub", "b");

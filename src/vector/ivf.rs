@@ -223,7 +223,10 @@ mod tests {
 
         // Cosine ignores magnitude: parallel vectors score ~1.0.
         let cos = centroid_score(Metric::Cosine, &centroid, &vector, false);
-        assert!((cos - 1.0).abs() < 1e-5, "cosine of parallel vectors: {cos}");
+        assert!(
+            (cos - 1.0).abs() < 1e-5,
+            "cosine of parallel vectors: {cos}"
+        );
 
         // Dot keeps magnitude: raw inner product = 2*5 = 10.
         let dot = centroid_score(Metric::Dot, &centroid, &vector, false);

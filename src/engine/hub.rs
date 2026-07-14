@@ -1220,7 +1220,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(rows.len(), 1, "row should be reconstructed from the WAL projection");
+        assert_eq!(
+            rows.len(),
+            1,
+            "row should be reconstructed from the WAL projection"
+        );
         let meta = rows[0]["metadata"].as_str().unwrap();
         assert!(meta.contains("active"), "metadata preserved: {meta}");
     }

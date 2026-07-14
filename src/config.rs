@@ -597,8 +597,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300);
-        let wal_sync_mode =
-            std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "group".to_string());
+        let wal_sync_mode = std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "group".to_string());
         let wal_flush_interval_ms = std::env::var("WAL_FLUSH_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -885,11 +884,13 @@ mod tests {
 
     #[test]
     fn secrets_never_serialized() {
-        let mut c = Config::default();
-        c.api_key = "super-secret-api-value".to_string();
-        c.embedding_api_key = "embed-secret-value".to_string();
-        c.llm_api_key = "llm-secret-value".to_string();
-        c.libsql_auth_token = "turso-secret-value".to_string();
+        let c = Config {
+            api_key: "super-secret-api-value".to_string(),
+            embedding_api_key: "embed-secret-value".to_string(),
+            llm_api_key: "llm-secret-value".to_string(),
+            libsql_auth_token: "turso-secret-value".to_string(),
+            ..Config::default()
+        };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         assert!(!toml_str.contains("super-secret-api-value"));
         assert!(!toml_str.contains("embed-secret-value"));
@@ -901,8 +902,10 @@ mod tests {
     fn roundtrip_omits_secrets_and_still_parses() {
         // A serialized config (no secret fields) must deserialize thanks to
         // `#[serde(default)]`, coming back with empty secrets.
-        let mut c = Config::default();
-        c.api_key = "secret-that-should-vanish".to_string();
+        let c = Config {
+            api_key: "secret-that-should-vanish".to_string(),
+            ..Config::default()
+        };
         let s = toml::to_string_pretty(&c).unwrap();
         let parsed: Config = toml::from_str(&s).unwrap();
         assert_eq!(parsed.api_key, "");
