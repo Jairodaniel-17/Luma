@@ -177,7 +177,18 @@ impl VectorSettings {
     }
 
     fn ivf_enabled(&self) -> bool {
-        self.index_kind.is_ivf()
+        // DiskAnn uses IVF as its low-RAM coarse index (centroids are ~MBs) and
+        // refines against the mmap-backed vectors, so it never needs the HNSW
+        // graph resident in RAM.
+        self.index_kind.is_ivf() || self.index_kind.is_diskann()
+    }
+
+    /// Whether to build/maintain the in-RAM HNSW segments. DiskAnn collections
+    /// deliberately skip them: the HNSW graph (hnsw_rs keeps a full f32 copy of
+    /// every vector plus the neighbour lists) is the dominant heap consumer, and
+    /// DiskAnn searches via IVF + q8 refine (and the optional paged disk graph).
+    fn hnsw_build_enabled(&self) -> bool {
+        self.hnsw_fallback_enabled && !self.index_kind.is_diskann()
     }
 }
 
@@ -1320,6 +1331,13 @@ impl Collection {
     }
 
     fn rebuild_segments(&mut self) {
+        if !self.settings.hnsw_build_enabled() {
+            // DiskAnn: no HNSW segments in RAM. Still refresh IVF clusters below.
+            self.segments.clear();
+            self.item_segments.clear();
+            self.refresh_item_clusters();
+            return;
+        }
         let items = collect_segment_rebuild_items(self);
         let (segments, item_segments) = build_segments_from_items(
             self.metric,
@@ -1573,7 +1591,7 @@ impl Collection {
     }
 
     fn insert_into_segments(&mut self, id: &str, vector: Vec<f32>) {
-        if !self.settings.hnsw_fallback_enabled {
+        if !self.settings.hnsw_build_enabled() {
             return;
         }
         if let Some(seg_idx) = self.item_segments.remove(id) {
@@ -1589,7 +1607,7 @@ impl Collection {
     }
 
     fn remove_from_segments(&mut self, id: &str) {
-        if !self.settings.hnsw_fallback_enabled {
+        if !self.settings.hnsw_build_enabled() {
             return;
         }
         if let Some(seg_idx) = self.item_segments.remove(id) {
@@ -2017,6 +2035,27 @@ impl Collection {
             stats.candidate_count = hits.len();
             stats.final_candidate_k = probes.len();
             stats.recall_estimate = simple_recall_estimate(&hits, k);
+            return Ok((hits, stats));
+        }
+
+        // No HNSW segments (DiskAnn) and no coarse index available yet (no disk
+        // graph, IVF not trained): fall back to an exact scan of all items.
+        // ponytail: O(N) per query, but only reachable before IVF trains
+        // (N < ivf_min_train, ~1024); once IVF or the disk graph is ready the
+        // paths above return first, so this never runs on large collections.
+        if self.segments.is_empty() && !self.items.is_empty() {
+            let all: HashSet<String> = self.items.keys().cloned().collect();
+            let hits = self.search_subset_bruteforce(
+                query.as_slice(),
+                include_meta,
+                &all,
+                eff_filter.as_ref(),
+                k,
+                ivf_probes.as_ref(),
+            );
+            stats.candidate_count = hits.len();
+            stats.final_candidate_k = all.len();
+            stats.recall_estimate = 1.0;
             return Ok((hits, stats));
         }
 
