@@ -300,7 +300,12 @@ async fn serve_tls(
 /// Whether the operator explicitly opted in to running with insecure secrets.
 fn allow_insecure() -> bool {
     std::env::var("LUMA_ALLOW_INSECURE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -322,7 +327,8 @@ fn insecure_startup_problems(api_key: &str, master_key_set: bool) -> Vec<&'stati
 /// Refuse to start with insecure secrets unless `LUMA_ALLOW_INSECURE` is set.
 /// When the opt-out is set, insecure secrets only produce warnings.
 fn check_secure_startup(config: &Config) -> anyhow::Result<()> {
-    let problems = insecure_startup_problems(&config.api_key, std::env::var("LUMA_MASTER_KEY").is_ok());
+    let problems =
+        insecure_startup_problems(&config.api_key, std::env::var("LUMA_MASTER_KEY").is_ok());
     if problems.is_empty() {
         return Ok(());
     }

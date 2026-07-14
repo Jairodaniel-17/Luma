@@ -959,7 +959,10 @@ mod tests {
         // Dotted nested paths, digits, underscores and hyphens are allowed.
         for field in ["status", "a.b.c", "field_1", "kebab-case", "n0.n1_x"] {
             let f = cond(field, FilterOp::Eq, json!("v"));
-            assert!(to_sql_where(&f).is_ok(), "field should be accepted: {field}");
+            assert!(
+                to_sql_where(&f).is_ok(),
+                "field should be accepted: {field}"
+            );
         }
     }
 }

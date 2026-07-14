@@ -208,31 +208,34 @@ mod tests {
     #[test]
     fn tenant_caller_cannot_cross_tenant_or_escalate() {
         // Own tenant, same role, no wildcard: allowed.
-        assert!(check_tenant_key_grant(
-            Some("orgA"),
-            "admin",
-            false,
-            Some("orgA"),
-            "admin",
-            false
-        )
-        .is_ok());
+        assert!(
+            check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgA"), "admin", false)
+                .is_ok()
+        );
         // Different tenant: rejected.
-        assert!(check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgB"), "user", false)
-            .is_err());
+        assert!(
+            check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgB"), "user", false)
+                .is_err()
+        );
         // Null/global tenant target from a tenant caller: rejected.
         assert!(
             check_tenant_key_grant(Some("orgA"), "admin", false, None, "user", false).is_ok(),
             "omitting tenant defaults to own tenant"
         );
         // Role above own: rejected.
-        assert!(check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgA"), "owner", false)
-            .is_err());
+        assert!(
+            check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgA"), "owner", false)
+                .is_err()
+        );
         // Wildcard escalation without holding it: rejected.
-        assert!(check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgA"), "admin", true)
-            .is_err());
+        assert!(
+            check_tenant_key_grant(Some("orgA"), "admin", false, Some("orgA"), "admin", true)
+                .is_err()
+        );
         // Wildcard allowed when caller already holds it.
-        assert!(check_tenant_key_grant(Some("orgA"), "admin", true, Some("orgA"), "admin", true)
-            .is_ok());
+        assert!(
+            check_tenant_key_grant(Some("orgA"), "admin", true, Some("orgA"), "admin", true)
+                .is_ok()
+        );
     }
 }

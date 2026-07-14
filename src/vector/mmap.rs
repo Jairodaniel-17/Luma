@@ -194,11 +194,7 @@ mod tests {
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "luma_mmap_test_{}_{}",
-            std::process::id(),
-            name
-        ));
+        p.push(format!("luma_mmap_test_{}_{}", std::process::id(), name));
         p
     }
 

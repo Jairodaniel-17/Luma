@@ -443,7 +443,7 @@ mod tests {
         assert!(role_at_least("admin", "admin"));
         assert!(!role_at_least("member", "admin"));
         assert!(!role_at_least("admin", "custom_unknown")); // unknown target rejected
-        // strictly_below: target must be a known role below the actor.
+                                                            // strictly_below: target must be a known role below the actor.
         assert!(role_strictly_below("owner", "admin"));
         assert!(!role_strictly_below("admin", "admin")); // equal is not below
         assert!(!role_strictly_below("member", "admin"));

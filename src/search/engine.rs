@@ -214,7 +214,6 @@ impl SearchEngine {
             results,
         })
     }
-
 }
 
 /// Parse an explicit `TEST_VEC:v0,v1,...` query into a vector. Used by tests and

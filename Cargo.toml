@@ -1,6 +1,6 @@
 [package]
 name = "luma"
-version = "4.0.0"
+version = "4.3.0"
 edition = "2021"
 description = "Luma: High-performance Vector DB powered by RustKissVDB"
 license = "MIT"
@@ -57,9 +57,9 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ] }
-pdf-extract = "0.10.0"
+pdf-extract = "0.12.0"
 docx-rs = "0.4.19"
-quick-xml = { version = "0.31.0", features = ["escape-html"] }
+quick-xml = { version = "0.41", features = ["escape-html"] }
 zip = { version = "8.1.0", features = ["default"] }
 toml = "1.0.3"
 dashmap = "6.1.0"

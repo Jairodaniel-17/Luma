@@ -1,7 +1,6 @@
 use crate::memory::service::MemoryService;
 use crate::memory::types::{
-    EdgeType, IngestEventRequest, MemoryKind, MemoryRecord, MemoryStatus,
-    UpsertFactRequest,
+    EdgeType, IngestEventRequest, MemoryKind, MemoryRecord, MemoryStatus, UpsertFactRequest,
 };
 use crate::vector::{Metric, VectorItem};
 use anyhow::Context;
@@ -78,7 +77,10 @@ impl MemoryService {
                     let Ok(old_vec) = self.embeddings.embed(&existing.content).await else {
                         break 'check false;
                     };
-                    is_semantic_contradiction(cosine_similarity(&new_vec, &old_vec), content_changed)
+                    is_semantic_contradiction(
+                        cosine_similarity(&new_vec, &old_vec),
+                        content_changed,
+                    )
                 };
 
                 // Overwriting a fact_key is always a belief *supersession* (the new

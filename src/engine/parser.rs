@@ -40,14 +40,18 @@ impl DocumentParser {
         document_xml.read_to_string(&mut xml_content)?;
 
         let mut reader = Reader::from_str(&xml_content);
-        reader.trim_text(true);
+        // quick-xml 0.41: trim_text moved onto the reader config.
+        reader.config_mut().trim_text(true);
         let mut buf = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Text(e)) => {
-                    let unescaped = e
-                        .unescape()
+                    // quick-xml 0.41: decode bytes → str, then resolve XML entities.
+                    let decoded = e
+                        .decode()
+                        .map_err(|e| anyhow::anyhow!("Error decoding DOCX text: {}", e))?;
+                    let unescaped = quick_xml::escape::unescape(&decoded)
                         .map_err(|e| anyhow::anyhow!("Error unescaping DOCX: {}", e))?;
                     text.push_str(&unescaped);
                     text.push(' ');

@@ -516,7 +516,9 @@ pub async fn get_access_policy(
     require_platform_admin(&ctx)?;
     let svc = accounts(&state)?;
     let policy = svc.get_access_policy().await.map_err(internal)?;
-    Ok(Json(json!({ "domains": policy.domains, "emails": policy.emails })))
+    Ok(Json(
+        json!({ "domains": policy.domains, "emails": policy.emails }),
+    ))
 }
 
 pub async fn set_access_policy(
@@ -527,5 +529,7 @@ pub async fn set_access_policy(
     require_platform_admin(&ctx)?;
     let svc = accounts(&state)?;
     let saved = svc.set_access_policy(&body).await.map_err(internal)?;
-    Ok(Json(json!({ "domains": saved.domains, "emails": saved.emails })))
+    Ok(Json(
+        json!({ "domains": saved.domains, "emails": saved.emails }),
+    ))
 }

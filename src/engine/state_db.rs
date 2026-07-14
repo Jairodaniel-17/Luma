@@ -249,8 +249,8 @@ impl StateDb {
             .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or([0; 8])))
             .unwrap_or(0);
         drop(meta); // release the table borrow before consuming wtx in commit()
-        // Default durability is Immediate → fsync, persisting every prior Eventual
-        // commit up to `offset`.
+                    // Default durability is Immediate → fsync, persisting every prior Eventual
+                    // commit up to `offset`.
         wtx.commit()?;
         Ok(offset)
     }

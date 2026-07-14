@@ -233,7 +233,9 @@ impl Iterator for MetadataIterator {
 
         // Skip Vector + Content. Use checked_sub so a torn record with
         // total_len < 4 + meta_len does not underflow (panic/huge seek).
-        let Some(remaining) = total_len.checked_sub(4).and_then(|v| v.checked_sub(meta_len))
+        let Some(remaining) = total_len
+            .checked_sub(4)
+            .and_then(|v| v.checked_sub(meta_len))
         else {
             return Some(Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -275,7 +277,8 @@ mod tests {
     #[test]
     fn content_len_rejects_oversized() {
         // Even without underflow, an absurd content_len is rejected.
-        let total = 4 + 0 + 4 + 0 + MAX_RECORD_BYTES.saturating_add(1);
+        // Layout: 4 (total hdr) + meta_len(0) + 4 (vec hdr) + vector_len(0) + content_len.
+        let total = 4 + 4 + MAX_RECORD_BYTES.saturating_add(1);
         assert!(content_len_checked(total, 0, 0).is_err());
     }
 

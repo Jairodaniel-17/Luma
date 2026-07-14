@@ -237,10 +237,12 @@ pub async fn put(
             "value too large",
         ));
     }
-    match state
-        .engine
-        .put_state(scope_key(&ctx, &key), body.value, body.ttl_ms, body.if_revision)
-    {
+    match state.engine.put_state(
+        scope_key(&ctx, &key),
+        body.value,
+        body.ttl_ms,
+        body.if_revision,
+    ) {
         Ok(item) => Ok(axum::Json(PutResponse {
             // Echo back the caller's original (unprefixed) key.
             key,
@@ -308,10 +310,12 @@ pub async fn batch_put(
             });
             continue;
         }
-        match state
-            .engine
-            .put_state(scope_key(&ctx, &op.key), op.value, op.ttl_ms, op.if_revision)
-        {
+        match state.engine.put_state(
+            scope_key(&ctx, &op.key),
+            op.value,
+            op.ttl_ms,
+            op.if_revision,
+        ) {
             Ok(item) => results.push(BatchPutResult::Ok {
                 key: op.key,
                 revision: item.revision,
@@ -367,17 +371,17 @@ pub async fn delete(
         .engine
         .delete_state(&scope_key(&ctx, &key))
         .map_err(|err| match err {
-        EngineError::Persistence(_) => ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "persistence_error",
-            "failed to persist event",
-        ),
-        _ => ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "internal error",
-        ),
-    })?;
+            EngineError::Persistence(_) => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "persistence_error",
+                "failed to persist event",
+            ),
+            _ => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal error",
+            ),
+        })?;
     Ok(axum::Json(DeleteResponse { deleted }))
 }
 
@@ -397,6 +401,29 @@ pub async fn create_index(
         "status": "ok",
         "field": body.field
     })))
+}
+
+pub async fn query_index(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Path((field, value)): Path<(String, String)>,
+    Query(q): Query<ListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let mut items = state
+        .engine
+        .query_state_secondary_index(&field, &value, limit);
+    // Secondary-index hits span the whole keyspace; a tenant may only see hits
+    // inside their own partition. ponytail: filtering after the limit can yield
+    // fewer than `limit` rows for a tenant — acceptable for a secondary index.
+    let tp = tenant_prefix(&ctx);
+    if let Some(p) = &tp {
+        items.retain(|item| item.key.starts_with(p.as_str()));
+        for item in items.iter_mut() {
+            unscope_key(&tp, &mut item.key);
+        }
+    }
+    Ok(axum::Json(items))
 }
 
 #[cfg(test)]
@@ -431,29 +458,9 @@ mod tests {
         let other = tenant_prefix(&ctx(Some("orgB")));
         let mut leaked = "orgA:secret".to_string();
         unscope_key(&other, &mut leaked);
-        assert_eq!(leaked, "orgA:secret", "orgB prefix must not strip orgA keys");
+        assert_eq!(
+            leaked, "orgA:secret",
+            "orgB prefix must not strip orgA keys"
+        );
     }
-}
-
-pub async fn query_index(
-    State(state): State<AppState>,
-    Extension(ctx): Extension<TenantContext>,
-    Path((field, value)): Path<(String, String)>,
-    Query(q): Query<ListQuery>,
-) -> Result<impl IntoResponse, ApiError> {
-    let limit = q.limit.unwrap_or(100).min(1000);
-    let mut items = state
-        .engine
-        .query_state_secondary_index(&field, &value, limit);
-    // Secondary-index hits span the whole keyspace; a tenant may only see hits
-    // inside their own partition. ponytail: filtering after the limit can yield
-    // fewer than `limit` rows for a tenant — acceptable for a secondary index.
-    let tp = tenant_prefix(&ctx);
-    if let Some(p) = &tp {
-        items.retain(|item| item.key.starts_with(p.as_str()));
-        for item in items.iter_mut() {
-            unscope_key(&tp, &mut item.key);
-        }
-    }
-    Ok(axum::Json(items))
 }
