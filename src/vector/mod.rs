@@ -335,20 +335,24 @@ struct Collection {
     metric: Metric,
     layout: Option<CollectionLayout>,
     manifest: Manifest,
-    items: HashMap<String, VectorItem>,
-    q8_store: HashMap<String, QuantizedVec>,
+    // Id-keyed maps share a single canonical `Arc<str>` allocation per id (the
+    // key in `items`); secondary maps clone that Arc instead of re-allocating the
+    // id String per map. This is the per-vector RAM saving that lets the store
+    // scale toward hundreds of millions of vectors.
+    items: HashMap<Arc<str>, VectorItem>,
+    q8_store: HashMap<Arc<str>, QuantizedVec>,
     mmap_store: Option<mmap::VectorMmap>,
     q8_mmap: Option<q8mmap::Q8Mmap>,
     applied_offset: u64,
     segments: Vec<SegmentIndex>,
-    item_segments: HashMap<String, usize>,
-    item_runs: HashMap<String, String>,
-    cluster_members: HashMap<usize, HashSet<String>>,
+    item_segments: HashMap<Arc<str>, usize>,
+    item_runs: HashMap<Arc<str>, String>,
+    cluster_members: HashMap<usize, HashSet<Arc<str>>>,
     segment_max_items: usize,
-    keyword_index: HashMap<String, HashMap<String, HashSet<String>>>,
+    keyword_index: HashMap<String, HashMap<String, HashSet<Arc<str>>>>,
     settings: VectorSettings,
     ivf: Option<IvfState>,
-    item_clusters: HashMap<String, usize>,
+    item_clusters: HashMap<Arc<str>, usize>,
     disk_graph: Option<diskann::DiskGraph>,
 }
 
@@ -694,11 +698,11 @@ impl VectorStore {
             .ok_or(VectorError::CollectionNotFound)?;
         let c = c_arc.read();
 
-        let mut ids: Vec<String> = c.items.keys().cloned().collect();
+        let mut ids: Vec<Arc<str>> = c.items.keys().cloned().collect();
         ids.sort();
 
         let start = if let Some(cursor_id) = cursor {
-            match ids.binary_search(&cursor_id.to_string()) {
+            match ids.binary_search_by(|probe| probe.as_ref().cmp(cursor_id)) {
                 Ok(pos) => pos + 1,
                 Err(pos) => pos,
             }
@@ -715,7 +719,7 @@ impl VectorStore {
             .iter()
             .filter_map(|id| {
                 c.items.get(id).map(|item| ScrollItem {
-                    id: id.clone(),
+                    id: id.to_string(),
                     vector: include_vectors.then(|| c.get_vector_slice(id, item).to_vec()),
                     meta: item.meta.clone(),
                 })
@@ -753,7 +757,7 @@ impl VectorStore {
                     .items
                     .iter()
                     .filter(|(_, item)| filter::evaluate_filter(&item.meta, f))
-                    .map(|(id, _)| id.clone())
+                    .map(|(id, _)| id.to_string())
                     .collect();
                 Some(ids)
             }
@@ -770,7 +774,7 @@ impl VectorStore {
             .iter()
             .map(|(value, ids)| {
                 let count = if let Some(ref cands) = candidates {
-                    ids.iter().filter(|id| cands.contains(*id)).count()
+                    ids.iter().filter(|id| cands.contains(id.as_ref())).count()
                 } else {
                     ids.len()
                 };
@@ -1125,7 +1129,20 @@ impl VectorStore {
         let result = persist::rewrite_collection(&layout, &c.manifest, &materialized, &materialized_q8)
             .map_err(|_| VectorError::Persistence)?;
         c.manifest = result.manifest;
-        c.item_runs = result.item_runs;
+        // Re-key persist's String-keyed item_runs onto the canonical Arc<str>
+        // from `items` so the shared allocation is preserved.
+        c.item_runs = result
+            .item_runs
+            .into_iter()
+            .map(|(k, v)| {
+                let arc = c
+                    .items
+                    .get_key_value(k.as_str())
+                    .map(|(a, _)| a.clone())
+                    .unwrap_or_else(|| Arc::from(k.as_str()));
+                (arc, v)
+            })
+            .collect();
         c.rebuild_index();
         Ok(())
     }
@@ -1227,6 +1244,24 @@ impl Collection {
     ) -> Result<Self, VectorError> {
         let dim = manifest.dim;
         let metric = manifest.metric;
+        // Intern each id once as the canonical Arc<str> key in `items`, then share
+        // that same Arc across the secondary maps (q8_store, item_runs) instead of
+        // allocating the id String again per map.
+        let items: HashMap<Arc<str>, VectorItem> = items
+            .into_iter()
+            .map(|(k, v)| (Arc::<str>::from(k), v))
+            .collect();
+        let canonical = |k: &str| items.get_key_value(k).map(|(a, _)| a.clone());
+        let quantized: HashMap<Arc<str>, QuantizedVec> = quantized
+            .into_iter()
+            // Drop q8 entries with no live item (ensure_quantized_store would drop
+            // them on rebuild anyway); share the canonical Arc for the rest.
+            .filter_map(|(k, v)| canonical(&k).map(|a| (a, v)))
+            .collect();
+        let item_runs: HashMap<Arc<str>, String> = item_runs
+            .into_iter()
+            .map(|(k, v)| (canonical(&k).unwrap_or_else(|| Arc::from(k.as_str())), v))
+            .collect();
         let mut c = Self {
             dim,
             metric,
@@ -1258,7 +1293,7 @@ impl Collection {
                 Ok(mut store) => {
                     if store.header().count == 0 && !c.items.is_empty() {
                         // Migration: Append existing items to mmap in a deterministic order
-                        let mut ids: Vec<String> = c.items.keys().cloned().collect();
+                        let mut ids: Vec<Arc<str>> = c.items.keys().cloned().collect();
                         ids.sort();
                         for id in ids {
                             if let Some(item) = c.items.get_mut(&id) {
@@ -1326,7 +1361,7 @@ impl Collection {
             return;
         }
         let q8_paged = self.q8_mmap.is_some();
-        let mmapped: Vec<String> = self
+        let mmapped: Vec<Arc<str>> = self
             .items
             .iter()
             .filter(|(_, i)| i.mmap_offset.is_some())
@@ -1365,7 +1400,7 @@ impl Collection {
             .keys()
             .filter_map(|id| {
                 self.get_q8_codes(id)
-                    .map(|(scale, codes)| (id.clone(), QuantizedVec::new(scale, codes.to_vec())))
+                    .map(|(scale, codes)| (id.to_string(), QuantizedVec::new(scale, codes.to_vec())))
             })
             .collect()
     }
@@ -1379,7 +1414,7 @@ impl Collection {
             .iter()
             .map(|(id, item)| {
                 (
-                    id.clone(),
+                    id.to_string(),
                     VectorItem {
                         vector: self.get_vector_slice(id, item).to_vec(),
                         meta: item.meta.clone(),
@@ -1395,7 +1430,7 @@ impl Collection {
         let metas: Vec<(String, serde_json::Value)> = self
             .items
             .iter()
-            .map(|(id, item)| (id.clone(), item.meta.clone()))
+            .map(|(id, item)| (id.to_string(), item.meta.clone()))
             .collect();
         for (id, meta) in metas {
             self.add_meta_to_index(&id, &meta);
@@ -1415,11 +1450,15 @@ impl Collection {
                 }
             }
         }
-        self.item_clusters.insert(id.to_string(), cluster);
-        self.cluster_members
-            .entry(cluster)
-            .or_default()
-            .insert(id.to_string());
+        // Share the canonical Arc<str> from `items` across item_clusters and
+        // cluster_members rather than allocating the id twice.
+        let arc = self
+            .items
+            .get_key_value(id)
+            .map(|(a, _)| a.clone())
+            .unwrap_or_else(|| Arc::from(id));
+        self.item_clusters.insert(arc.clone(), cluster);
+        self.cluster_members.entry(cluster).or_default().insert(arc);
     }
 
     fn remove_cluster_membership(&mut self, id: &str) {
@@ -1477,20 +1516,28 @@ impl Collection {
             // Resolve vectors from the mmap — item.vector is empty when offloaded.
             let materialized = self.materialize_items();
             let assigned = assign_all_clusters(ivf, &materialized, self.settings.simd_enabled);
+            // `assigned` is keyed by String (materialized copy); re-key against the
+            // canonical Arc<str> in `items` so item_clusters and cluster_members
+            // share that allocation instead of interning fresh copies.
             for (id, cluster) in assigned.iter() {
-                self.cluster_members
-                    .entry(*cluster)
-                    .or_default()
-                    .insert(id.clone());
+                if let Some((arc, _)) = self.items.get_key_value(id.as_str()) {
+                    let arc = arc.clone();
+                    self.cluster_members
+                        .entry(*cluster)
+                        .or_default()
+                        .insert(arc.clone());
+                    self.item_clusters.insert(arc, *cluster);
+                }
             }
-            self.item_clusters = assigned;
         }
     }
 
     fn ensure_quantized_store(&mut self) {
         self.q8_store.retain(|id, _| self.items.contains_key(id));
         let q8_paged = self.q8_mmap.is_some();
-        let missing: Vec<(String, Vec<f32>)> = self
+        // Keyed by the canonical Arc<str> (cloned from `items`) so the insert below
+        // shares that allocation instead of interning the id again.
+        let missing: Vec<(Arc<str>, Vec<f32>)> = self
             .items
             .iter()
             // Skip items whose q8 already lives in the disk-backed q8 mmap —
@@ -1574,7 +1621,7 @@ impl Collection {
         if self.items.is_empty() {
             return Vec::new();
         }
-        let mut entries: Vec<(&String, &VectorItem)> = self.items.iter().collect();
+        let mut entries: Vec<(&Arc<str>, &VectorItem)> = self.items.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut vectors: Vec<Vec<f32>> = entries
             .into_iter()
@@ -1716,9 +1763,15 @@ impl Collection {
             }
         }
         let idx = self.ensure_active_segment();
+        // Share the canonical Arc<str> from `items` for the item_segments key.
+        let interned = self
+            .items
+            .get_key_value(id)
+            .map(|(a, _)| a.clone())
+            .unwrap_or_else(|| Arc::from(id));
         if let Some(seg) = self.segments.get_mut(idx) {
             seg.insert(id.to_string(), vector);
-            self.item_segments.insert(id.to_string(), idx);
+            self.item_segments.insert(interned, idx);
         }
     }
 
@@ -1737,6 +1790,13 @@ impl Collection {
         let Some(obj) = meta.as_object() else {
             return;
         };
+        // Share the canonical Arc<str> from `items` across every keyword-index
+        // posting for this id instead of allocating the id per (field, value).
+        let arc = self
+            .items
+            .get_key_value(id)
+            .map(|(a, _)| a.clone())
+            .unwrap_or_else(|| Arc::from(id));
         for (k, v) in obj {
             let by_field = self.keyword_index.entry(k.clone()).or_default();
             // Index scalar strings and each string element of an array.
@@ -1751,7 +1811,7 @@ impl Collection {
                 by_field
                     .entry(value.to_string())
                     .or_default()
-                    .insert(id.to_string());
+                    .insert(arc.clone());
             }
         }
     }
@@ -1819,6 +1879,15 @@ impl Collection {
             None
         };
 
+        // Canonical interned id, reused as the shared Arc<str> across every
+        // id-keyed map (items, item_runs, q8_store, item_segments, clusters,
+        // keyword_index). For an existing id this reuses the Arc already in
+        // `items`; for a new id it becomes the canonical key once inserted below.
+        let id_arc: Arc<str> = match self.items.get_key_value(record.id.as_str()) {
+            Some((a, _)) => a.clone(),
+            None => Arc::from(record.id.as_str()),
+        };
+
         let batch_append = matches!(mode, Some(ApplyMode::BatchAppend));
         let mut mmap_idx: Option<u64> = None;
         if let Some(layout) = &self.layout {
@@ -1858,7 +1927,7 @@ impl Collection {
                     }
 
                     if let Some(run) = self.manifest.runs.last() {
-                        self.item_runs.insert(record.id.clone(), run.file.clone());
+                        self.item_runs.insert(id_arc.clone(), run.file.clone());
                     }
                 }
             }
@@ -1872,14 +1941,14 @@ impl Collection {
 
         match record.op {
             RecordOp::Delete => {
-                let removed = self.items.remove(&record.id);
+                let removed = self.items.remove(record.id.as_str());
                 if let Some(old) = removed.as_ref() {
                     self.remove_meta_from_index(&record.id, Some(&old.meta));
                 }
                 self.remove_from_segments(&record.id);
-                self.q8_store.remove(&record.id);
+                self.q8_store.remove(record.id.as_str());
                 self.remove_cluster_membership(&record.id);
-                self.item_runs.remove(&record.id);
+                self.item_runs.remove(record.id.as_str());
                 if removed.is_some() {
                     self.manifest.live_count = self.manifest.live_count.saturating_sub(1);
                 }
@@ -1902,7 +1971,7 @@ impl Collection {
                     meta,
                     mmap_offset: mmap_idx,
                 };
-                let previous = self.items.insert(record.id.clone(), new_item.clone());
+                let previous = self.items.insert(id_arc.clone(), new_item.clone());
                 if let Some(prev) = previous.as_ref() {
                     self.remove_meta_from_index(&record.id, Some(&prev.meta));
                 }
@@ -1916,7 +1985,7 @@ impl Collection {
                     // in-RAM q8_store — that's the whole point of paging it out.
                     let paged_q8 = mmap_idx.is_some() && self.q8_mmap.is_some();
                     if !paged_q8 {
-                        self.q8_store.insert(record.id.clone(), qvec);
+                        self.q8_store.insert(id_arc.clone(), qvec);
                     }
                 }
                 self.assign_cluster_for(&record.id, &vec);
@@ -1990,7 +2059,7 @@ impl Collection {
             .keys()
             .filter_map(|id| {
                 self.get_q8_codes(id)
-                    .map(|(scale, codes)| (id.clone(), QuantizedVec::new(scale, codes.to_vec())))
+                    .map(|(scale, codes)| (id.to_string(), QuantizedVec::new(scale, codes.to_vec())))
             })
             .collect();
         nodes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2059,19 +2128,33 @@ impl Collection {
         }
         let materialized = self.materialize_items();
         let materialized_q8 = self.materialize_q8();
+        // persist works in String-keyed maps (on-disk representation); bridge our
+        // Arc<str>-keyed item_runs across that boundary.
+        let item_runs_str: HashMap<String, String> = self
+            .item_runs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
         let result = compact_runs(
             layout,
             &self.manifest,
             &materialized,
             &materialized_q8,
-            &self.item_runs,
+            &item_runs_str,
             self.settings.compaction_max_bytes_per_pass,
         )
         .map_err(|_| VectorError::Persistence)?;
         if let Some(res) = result {
             self.manifest = res.manifest;
             for (id, run) in res.item_runs {
-                self.item_runs.insert(id, run);
+                // Re-key onto the canonical Arc<str> from `items` so item_runs
+                // keeps sharing that allocation.
+                let arc = self
+                    .items
+                    .get_key_value(id.as_str())
+                    .map(|(a, _)| a.clone())
+                    .unwrap_or_else(|| Arc::from(id.as_str()));
+                self.item_runs.insert(arc, run);
             }
             self.applied_offset = self.manifest.applied_offset;
             return Ok(true);
@@ -2115,7 +2198,7 @@ impl Collection {
                     self.settings.simd_enabled,
                 );
                 scored.push(SearchHit {
-                    id: id.clone(),
+                    id: id.to_string(),
                     score,
                     meta: include_meta.then(|| item.meta.clone()),
                 });
@@ -2136,7 +2219,7 @@ impl Collection {
             if let Some(by_value) = self.keyword_index.get("parent_id") {
                 for doc_id in allowed {
                     if let Some(chunk_ids) = by_value.get(doc_id) {
-                        resolved_allowed.extend(chunk_ids.iter().cloned());
+                        resolved_allowed.extend(chunk_ids.iter().map(|a| a.to_string()));
                     }
                 }
             } else {
@@ -2145,7 +2228,7 @@ impl Collection {
                     // This is inefficient but acts as fallback
                     for item_id in self.items.keys() {
                         if item_id.starts_with(doc_id) {
-                            resolved_allowed.insert(item_id.clone());
+                            resolved_allowed.insert(item_id.to_string());
                         }
                     }
                 }
@@ -2222,7 +2305,7 @@ impl Collection {
         // (N < ivf_min_train, ~1024); once IVF or the disk graph is ready the
         // paths above return first, so this never runs on large collections.
         if self.segments.is_empty() && !self.items.is_empty() {
-            let all: HashSet<String> = self.items.keys().cloned().collect();
+            let all: HashSet<String> = self.items.keys().map(|id| id.to_string()).collect();
             let hits = self.search_subset_bruteforce(
                 query.as_slice(),
                 include_meta,
@@ -2305,7 +2388,7 @@ impl Collection {
                 continue;
             }
             if let Some(probes) = ivf_probes {
-                let Some(cluster) = self.item_clusters.get(id) else {
+                let Some(cluster) = self.item_clusters.get(id.as_str()) else {
                     continue;
                 };
                 if !probes.contains(cluster) {
@@ -2317,7 +2400,7 @@ impl Collection {
                     continue;
                 }
             }
-            let Some(item) = self.items.get(id) else {
+            let Some(item) = self.items.get(id.as_str()) else {
                 continue;
             };
             if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
@@ -2358,11 +2441,11 @@ impl Collection {
     ) -> Vec<SearchHit> {
         let mut scored = Vec::new();
         for id in candidates {
-            let Some(item) = self.items.get(id) else {
+            let Some(item) = self.items.get(id.as_str()) else {
                 continue;
             };
             if let Some(probes) = cluster_filter {
-                let Some(cluster) = self.item_clusters.get(id) else {
+                let Some(cluster) = self.item_clusters.get(id.as_str()) else {
                     continue;
                 };
                 if !probes.contains(cluster) {
@@ -2383,7 +2466,7 @@ impl Collection {
         scored.sort_by(compare_scores_desc);
         let mut hits = Vec::new();
         for (id, score) in scored.into_iter().take(k) {
-            if let Some(item) = self.items.get(&id) {
+            if let Some(item) = self.items.get(id.as_str()) {
                 hits.push(SearchHit {
                     id,
                     score,
@@ -2411,7 +2494,7 @@ impl Collection {
             };
             for id in members {
                 if let Some(set) = filter_candidates {
-                    if !set.contains(id) {
+                    if !set.contains(id.as_ref()) {
                         continue;
                     }
                 }
@@ -2456,7 +2539,7 @@ impl Collection {
         for (id, score) in refined.into_iter().take(k) {
             if let Some(item) = self.items.get(&id) {
                 hits.push(SearchHit {
-                    id,
+                    id: id.to_string(),
                     score,
                     meta: include_meta.then(|| item.meta.clone()),
                 });
@@ -2503,7 +2586,7 @@ impl Collection {
                     continue;
                 }
             }
-            let Some(item) = self.items.get(&id) else {
+            let Some(item) = self.items.get(id.as_str()) else {
                 continue;
             };
             if eff_filter.is_some_and(|f| !filter::evaluate_filter(&item.meta, f)) {
@@ -2520,7 +2603,7 @@ impl Collection {
         refined.sort_by(compare_scores_desc);
         let mut hits = Vec::new();
         for (id, score) in refined.into_iter().take(k) {
-            if let Some(item) = self.items.get(&id) {
+            if let Some(item) = self.items.get(id.as_str()) {
                 hits.push(SearchHit {
                     id: id.clone(),
                     score,
@@ -2536,7 +2619,9 @@ fn collection_needs_hnsw_compaction(collection: &Collection, threshold: f32) -> 
     collection_fragmentation_score(collection) > threshold as f64
 }
 
-fn collect_segment_rebuild_items(collection: &Collection) -> Vec<(String, Vec<f32>)> {
+// Clones the canonical Arc<str> id (not a fresh String) so the item_segments map
+// built by `build_segments_from_items` keeps sharing that allocation.
+fn collect_segment_rebuild_items(collection: &Collection) -> Vec<(Arc<str>, Vec<f32>)> {
     let mut items = collection
         .items
         .iter()
@@ -2553,8 +2638,8 @@ fn build_segments_from_items(
     segment_max_items: usize,
     hnsw_m: usize,
     hnsw_ef_construction: usize,
-    items: &[(String, Vec<f32>)],
-) -> (Vec<SegmentIndex>, HashMap<String, usize>) {
+    items: &[(Arc<str>, Vec<f32>)],
+) -> (Vec<SegmentIndex>, HashMap<Arc<str>, usize>) {
     if items.is_empty() {
         return (
             vec![SegmentIndex::new(
@@ -2576,7 +2661,9 @@ fn build_segments_from_items(
             segments.push(current);
             current = SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
         }
-        current.insert(id.clone(), vector.clone());
+        // SegmentIndex keeps its own String id (not part of this refactor's scope);
+        // item_segments shares the canonical Arc<str> passed in.
+        current.insert(id.to_string(), vector.clone());
         item_segments.insert(id.clone(), segments.len());
     }
     segments.push(current);
@@ -2668,7 +2755,7 @@ fn should_stop_expansion(
     recall_estimate >= 0.92
 }
 
-fn compare_scores_desc(a: &(String, f32), b: &(String, f32)) -> Ordering {
+fn compare_scores_desc<T: Ord>(a: &(T, f32), b: &(T, f32)) -> Ordering {
     b.1.partial_cmp(&a.1)
         .unwrap_or(Ordering::Equal)
         .then_with(|| a.0.cmp(&b.0))
