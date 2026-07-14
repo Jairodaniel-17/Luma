@@ -53,14 +53,31 @@ struct Inner {
     shutdown: CancellationToken,
 }
 
+/// Upper bound on the in-RAM event replay buffer when persistence is enabled.
+/// The durable log handles replay for lagging subscribers, so this only needs to
+/// cover incidental in-process use. Keeps vector-payload events from piling up in
+/// RAM (was effectively `event_buffer_size`, default 10k × ~KBs each).
+const PERSISTENT_EVENT_BUFFER_CAP: usize = 256;
+
 const VECTOR_MANIFEST_PREFIX: &str = "vector:";
 const VECTOR_MANIFEST_SUFFIX: &str = ":manifest";
 const VECTOR_MANIFEST_SCAN_LIMIT: usize = 4096;
 
 impl Engine {
     pub fn new(config: Config, shutdown: CancellationToken) -> anyhow::Result<Self> {
-        let events =
-            events::EventBus::new(config.event_buffer_size, config.live_broadcast_capacity);
+        // The in-RAM replay buffer retains full event payloads (a vector upsert
+        // event carries the whole vector as a serde_json::Value, ~KBs each). When
+        // persistence is on, the durable event log is the replay source for
+        // subscribers that fall behind (see routes_events), so the in-RAM buffer
+        // is never read — cap it hard to avoid holding tens/hundreds of MB of
+        // vector payloads. In memory-only mode the buffer *is* the replay source,
+        // so keep the configured size.
+        let event_buffer_size = if config.data_dir.is_some() {
+            config.event_buffer_size.min(PERSISTENT_EVENT_BUFFER_CAP)
+        } else {
+            config.event_buffer_size
+        };
+        let events = events::EventBus::new(event_buffer_size, config.live_broadcast_capacity);
         let metrics = Arc::new(metrics::Metrics::default());
 
         let persist = match &config.data_dir {
