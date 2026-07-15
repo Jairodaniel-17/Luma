@@ -70,6 +70,11 @@ pub struct VectorSettings {
     pub diskann_search_list_size: usize,
     pub diskann_max_degree: usize,
     pub diskann_build_threads: usize,
+    /// Live-vector count at which a DiskANN collection auto-builds its on-disk
+    /// graph for the first time (no explicit build call needed).
+    pub diskann_auto_build_min_vectors: usize,
+    /// Upserts since the last on-disk graph build after which it is rebuilt.
+    pub diskann_rebuild_min_deltas: usize,
     /// PR4: HNSW M parameter (connections per node). Applies to new collections.
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Applies to new collections.
@@ -110,6 +115,8 @@ impl Default for VectorSettings {
             diskann_build_threads: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
+            diskann_auto_build_min_vectors: 10_000,
+            diskann_rebuild_min_deltas: 100_000,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
             max_vectors: 0,
@@ -155,6 +162,8 @@ impl VectorSettings {
             diskann_search_list_size: config.diskann_search_list_size.max(4),
             diskann_max_degree: config.diskann_max_degree.max(4),
             diskann_build_threads: config.diskann_build_threads.max(1),
+            diskann_auto_build_min_vectors: config.diskann_auto_build_min_vectors.max(1),
+            diskann_rebuild_min_deltas: config.diskann_rebuild_min_deltas.max(1),
             hnsw_m: config.hnsw_m.clamp(2, 128),
             hnsw_ef_construction: config.hnsw_ef_construction.clamp(16, 2048),
             max_vectors: config.max_collection_vectors,
@@ -1645,6 +1654,57 @@ impl Collection {
         Ok(())
     }
 
+    /// Auto-maintain the DiskANN on-disk graph, mirroring `maybe_train_ivf`.
+    ///
+    /// The on-disk graph is invalidated by every upsert/delete (see
+    /// `invalidate_disk_index_if_needed`), so without this a DiskANN collection
+    /// only has a graph immediately after an explicit `build_disk_index` call and
+    /// otherwise falls back to the IVF path. This rebuilds it on two triggers:
+    ///   (a) no graph exists yet and we have >= `diskann_auto_build_min_vectors`
+    ///       live vectors (first build), throttled by the delta gate below so a
+    ///       stream of inserts — each of which invalidates the graph — can't fire
+    ///       a rebuild every insert; or
+    ///   (b) a graph exists but `upsert_count` has drifted by
+    ///       >= `diskann_rebuild_min_deltas` since the last build.
+    ///
+    /// ponytail: the build runs inline and stalls the one insert that triggers
+    /// it (exactly like the IVF retrain above). That's the ceiling for this
+    /// increment; the upgrade path is a background per-segment build off the
+    /// write path so inserts never pay the full-graph rebuild cost.
+    fn maybe_rebuild_disk_index(&mut self) -> Result<(), VectorError> {
+        if !self.settings.index_kind.is_diskann() || self.layout.is_none() {
+            return Ok(());
+        }
+        let min_build = self.settings.diskann_auto_build_min_vectors.max(1);
+        let rebuild_min = self.settings.diskann_rebuild_min_deltas.max(1) as u64;
+        let has_graph = !self.manifest.disk_index.graph_files.is_empty();
+        let last_built = self.manifest.diskann_last_built_upsert;
+        let delta = self.manifest.upsert_count.saturating_sub(last_built);
+
+        let should_build = if has_graph {
+            // (b) graph exists but has drifted past the rebuild threshold.
+            delta >= rebuild_min
+        } else {
+            // (a) no graph yet: build once we have enough vectors. `last_built == 0`
+            // means we've never built, so build immediately; otherwise throttle on
+            // the same delta gate so post-invalidation inserts don't rebuild every
+            // insert.
+            self.items.len() >= min_build && (last_built == 0 || delta >= rebuild_min)
+        };
+        if !should_build {
+            return Ok(());
+        }
+
+        let params = self.effective_diskann_params();
+        // build_disk_index already updates the manifest.disk_index + reloads the
+        // graph (self.disk_graph) and persists the manifest.
+        self.build_disk_index(params)?;
+        self.manifest.diskann_last_built_upsert = self.manifest.upsert_count;
+        self.persist_manifest()
+            .map_err(|_| VectorError::Persistence)?;
+        Ok(())
+    }
+
     fn try_train_ivf(&mut self, force: bool) -> Result<bool, VectorError> {
         if !self.settings.ivf_enabled() {
             return Ok(false);
@@ -2010,6 +2070,7 @@ impl Collection {
 
         if mode.is_none() {
             self.maybe_train_ivf()?;
+            self.maybe_rebuild_disk_index()?;
         }
 
         Ok(())
@@ -2042,6 +2103,7 @@ impl Collection {
             }
         }
         self.maybe_train_ivf()?;
+        self.maybe_rebuild_disk_index()?;
         Ok(())
     }
 

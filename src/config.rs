@@ -44,6 +44,11 @@ pub struct Config {
     pub diskann_max_degree: usize,
     pub diskann_build_threads: usize,
     pub diskann_search_list_size: usize,
+    /// Live-vector count at which a DiskANN collection auto-builds its on-disk
+    /// graph for the first time (no explicit API call needed).
+    pub diskann_auto_build_min_vectors: usize,
+    /// Upserts since the last on-disk graph build after which it is rebuilt.
+    pub diskann_rebuild_min_deltas: usize,
     pub run_target_bytes: u64,
     pub run_retention: usize,
     pub compaction_trigger_tombstone_ratio: f32,
@@ -218,6 +223,8 @@ impl Default for Config {
             diskann_max_degree: 48,
             diskann_build_threads: 1,
             diskann_search_list_size: 64,
+            diskann_auto_build_min_vectors: 10_000,
+            diskann_rebuild_min_deltas: 100_000,
             run_target_bytes: 134_217_728,
             run_retention: 8,
             compaction_trigger_tombstone_ratio: 0.2,
@@ -457,6 +464,14 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(64);
+        let diskann_auto_build_min_vectors = std::env::var("DISKANN_AUTO_BUILD_MIN_VECTORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let diskann_rebuild_min_deltas = std::env::var("DISKANN_REBUILD_MIN_DELTAS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100_000);
 
         let run_target_bytes = std::env::var("RUN_TARGET_BYTES")
             .ok()
@@ -655,6 +670,8 @@ impl Config {
             diskann_max_degree,
             diskann_build_threads,
             diskann_search_list_size,
+            diskann_auto_build_min_vectors,
+            diskann_rebuild_min_deltas,
             run_target_bytes,
             run_retention,
             compaction_trigger_tombstone_ratio,
