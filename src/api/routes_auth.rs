@@ -37,7 +37,11 @@ pub async fn list_keys(
     };
     let is_platform_admin =
         ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner");
-    let filter = if is_platform_admin { None } else { ctx.tenant_id.as_deref() };
+    let filter = if is_platform_admin {
+        None
+    } else {
+        ctx.tenant_id.as_deref()
+    };
     let keys = store.list_keys(filter).await.map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -134,7 +138,11 @@ pub async fn revoke_key(
     };
     let is_platform_admin =
         ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner");
-    let filter = if is_platform_admin { None } else { ctx.tenant_id.as_deref() };
+    let filter = if is_platform_admin {
+        None
+    } else {
+        ctx.tenant_id.as_deref()
+    };
     let revoked = store.revoke_key(&id, filter).await.map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

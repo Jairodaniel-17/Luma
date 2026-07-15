@@ -542,6 +542,26 @@ impl AccountsService {
     }
 
     /// Validate a session token, returning the identity if live and unexpired.
+    /// True if `user_id` is the earliest-registered user. That first account is
+    /// the instance operator and is treated as a platform admin (untenanted) —
+    /// the bootstrap super-admin pattern (first user to sign up runs the whole
+    /// instance). Later sign-ups are ordinary tenant owners.
+    pub async fn is_bootstrap_admin(&self, user_id: &str) -> anyhow::Result<bool> {
+        self.ensure_init().await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT id FROM sys_users ORDER BY created_at_ms ASC, id ASC LIMIT 1".to_string(),
+                vec![],
+            )
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.get("id"))
+            .and_then(|v| v.as_str())
+            == Some(user_id))
+    }
+
     pub async fn validate_session(&self, token: &str) -> anyhow::Result<Option<SessionIdentity>> {
         self.ensure_init().await?;
         let rows = self
