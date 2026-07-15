@@ -1,7 +1,7 @@
 <!-- RustKissVDB: el motor de datos convergente en Rust que impulsa Luma (búsqueda vectorial + KV + SQL + eventos en un solo binario). -->
 # Luma: La Plataforma de Datos Convergente
 
-**Luma** (crate Cargo `luma`, versión **4.0.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
+**Luma** (crate Cargo `luma`, versión **4.11.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
 
 - **Búsqueda vectorial** (ANN) con índices conmutables HNSW / IVF-FLAT-Q8 / DiskANN.
 - **Estado clave-valor** (KV) con TTL, compare-and-swap e índices.
@@ -55,8 +55,10 @@ Benchmark reproducible, misma máquina, mismo dataset y misma métrica para los 
 | **Qdrant** (HNSW, ef=64) | **1.859** | 237 | 4.22 ms | 0.416 | 320 MB |
 | **Milvus** (HNSW, ef=64) | 1.284 | 476 | 2.09 ms | 0.086 | 846 MB |
 | **Luma — DiskANN** (low-RAM) | 807 | **515** | **1.94 ms** | 0.056 | **133 MB** |
-| **Luma — HNSW** (equilibrio, ef=128 default) | 301 | 99 | 10.08 ms | 0.853 | 411 MB |
-| **Luma — HNSW** (velocidad, ef=32) | 295 | 199 | 5.02 ms | 0.474 | 406 MB |
+| **Luma — HNSW** (equilibrio, ef=128 default) | 926 | 99 | 10.08 ms | 0.853 | 464 MB |
+| **Luma — HNSW** (velocidad, ef=32) | 926 | 199 | 5.02 ms | 0.474 | 406 MB |
+
+<sub>Ingesta HNSW = 926 vec/s tras paralelizar el build por lote (antes 293); es independiente del `ef` de consulta.</sub>
 
 ### Discusión
 
@@ -92,10 +94,14 @@ Curva medida tras la calibración (mismo dataset, `HNSW_SEARCH_EF` variando):
 
 Antes vs después, mismo `ef=192`: **26 qps → 82 qps** (3,15×) con recall idéntico (0.92). El usuario elige el punto: `ef=32` para máxima velocidad, `ef≥192` para máximo recall; el default 128 es el balance.
 
+### Ingesta paralela viva
+
+El upsert por lote insertaba al grafo HNSW **de uno en uno**. Se paralelizó (`apply_upsert_batch` acumula los pares del lote y hace un `insert_batch` con `parallel_insert` rayon por segmento, la misma maquinaria del build masivo): **293 → 926 vec/s (3,16×)**, con recall idéntico (0.860). La brecha de ingesta contra Qdrant bajó de **6,3× a ~2×**.
+
 ### Lo que aún va por detrás
 
-- **Ingesta con indexación viva** (295–807 vec/s) sigue por debajo del build multihilo de Qdrant/Milvus (1.284–1.859); el build paralelo ya existe para carga masiva, falta llevarlo al upsert vivo.
-- **Throughput de consulta HNSW** a igual recall: `hnsw_rs` es algo más lento que el HNSW propio de Qdrant. La ventaja de Luma sigue siendo **RAM (DiskANN)** y **precisión a igual latencia**.
+- **Ingesta**: 926 (HNSW) / 807 (DiskANN) vec/s siguen por debajo de Qdrant/Milvus (1.284–1.859). Lo que resta es el bookkeeping por registro (WAL, mmap, cuantización) que aún es serial; lotes más grandes lo acercan más.
+- **Throughput de consulta HNSW** a igual recall: `hnsw_rs` es algo más lento que el HNSW propio de Qdrant. La ventaja neta de Luma sigue siendo **RAM (DiskANN, 133 MB)** y **precisión a igual latencia**.
 
 > Scripts y datos del benchmark: `bench/` + `sweep_ef.sh`. Reejecutable en cualquier equipo.
 
@@ -322,7 +328,7 @@ backups/<timestamp>/           # Respaldos (VACUUM INTO + snapshot + WAL)
 
 ## ✅ Estado actual del proyecto
 
-Implementado y verificable en el código de hoy (crate `luma` v4.10.0):
+Implementado y verificable en el código de hoy (crate `luma` v4.11.0):
 
 - **Núcleo convergente**: motor vectorial (HNSW / IVF-FLAT-Q8 / DiskANN), KV con TTL/CAS, WAL segmentado + snapshots, SQLite embebido vía actor, bus de eventos SSE, hub RAG híbrido y motor de búsqueda de texto. Todo montado en el router y cubierto por `tests/`.
 - **Object storage, colas e imágenes**: primitivas tipo R2 + Queues + Images ya montadas en `/v1/blob`, `/v1/queue`, `/v1/image`.

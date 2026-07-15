@@ -372,6 +372,11 @@ struct Collection {
     ivf: Option<IvfState>,
     item_clusters: HashMap<Arc<str>, usize>,
     disk_graph: Option<diskann::DiskGraph>,
+    // When `Some`, `insert_into_segments` accumulates (id, vector) pairs here
+    // instead of inserting into the HNSW graph one at a time. Set only for the
+    // duration of `apply_upsert_batch`, which flushes them with a parallel
+    // `insert_batch` per segment. `None` everywhere else (single upsert, replay).
+    deferred_inserts: Option<Vec<(Arc<str>, Vec<f32>)>>,
 }
 
 enum HnswIndex {
@@ -1469,6 +1474,7 @@ impl Collection {
             ivf: None,
             item_clusters: HashMap::new(),
             disk_graph: None,
+            deferred_inserts: None,
         };
         if let Some(layout) = &c.layout {
             let initial_capacity = (manifest.total_records as usize * 2).max(1024);
@@ -1948,17 +1954,61 @@ impl Collection {
                 seg.mark_deleted(id);
             }
         }
-        let idx = self.ensure_active_segment();
-        // Share the canonical Arc<str> from `items` for the item_segments key.
+        // Share the canonical Arc<str> from `items` for the segment id maps.
         let interned = self
             .items
             .get_key_value(id)
             .map(|(a, _)| a.clone())
             .unwrap_or_else(|| Arc::from(id));
+        // Batch fast path: defer the (expensive, serial) HNSW insert. The old
+        // segment cleanup above still runs now so updates stay correct; the graph
+        // insert happens in parallel at flush time.
+        if let Some(deferred) = self.deferred_inserts.as_mut() {
+            deferred.push((interned, vector));
+            return;
+        }
+        let idx = self.ensure_active_segment();
         if let Some(seg) = self.segments.get_mut(idx) {
             // Share the SAME canonical Arc<str> with the segment's id maps.
             seg.insert(interned.clone(), vector);
             self.item_segments.insert(interned, idx);
+        }
+    }
+
+    /// Flush deferred (id, vector) pairs into segments using the parallel
+    /// `insert_batch`, respecting each segment's capacity. Bookkeeping is
+    /// identical to inserting one at a time in order — only graph construction
+    /// runs across threads.
+    fn flush_deferred_segment_inserts(&mut self, deferred: Vec<(Arc<str>, Vec<f32>)>) {
+        if deferred.is_empty() {
+            return;
+        }
+        // Last-write-wins for ids repeated within the same batch: keep only the
+        // final occurrence, matching the serial path (which tombstones the earlier
+        // copy). Cheap Arc clones; single O(n) pass, once per batch.
+        let mut last_pos: HashMap<Arc<str>, usize> = HashMap::with_capacity(deferred.len());
+        for (pos, (id, _)) in deferred.iter().enumerate() {
+            last_pos.insert(id.clone(), pos);
+        }
+        let deferred: Vec<(Arc<str>, Vec<f32>)> = deferred
+            .into_iter()
+            .enumerate()
+            .filter_map(|(pos, pair)| (last_pos.get(&pair.0) == Some(&pos)).then_some(pair))
+            .collect();
+        let mut i = 0;
+        while i < deferred.len() {
+            let idx = self.ensure_active_segment();
+            let remaining = {
+                let seg = &self.segments[idx];
+                seg.capacity.saturating_sub(seg.live).max(1)
+            };
+            let take = remaining.min(deferred.len() - i);
+            let chunk = &deferred[i..i + take];
+            for (id, _) in chunk {
+                self.item_segments.insert(id.clone(), idx);
+            }
+            self.segments[idx].insert_batch(chunk);
+            i += take;
         }
     }
 
@@ -2209,12 +2259,29 @@ impl Collection {
         if records.is_empty() {
             return Ok(());
         }
+        // Collect this batch's HNSW inserts and build the graph in parallel at the
+        // end (see `insert_into_segments`/`flush_deferred_segment_inserts`) instead
+        // of one serial insert per record.
+        let deferring = self.settings.hnsw_build_enabled();
+        if deferring {
+            self.deferred_inserts = Some(Vec::with_capacity(records.len()));
+        }
+        let mut result = Ok(());
         for record in records {
             if record.offset > 0 && record.offset <= self.applied_offset {
                 continue;
             }
-            self.apply_record(record, Some(ApplyMode::BatchAppend))?;
+            if let Err(e) = self.apply_record(record, Some(ApplyMode::BatchAppend)) {
+                result = Err(e);
+                break;
+            }
         }
+        // Flush whatever was deferred (parallel per segment), even on error, so the
+        // in-memory index stays consistent with the records already in `items`.
+        if let Some(deferred) = self.deferred_inserts.take() {
+            self.flush_deferred_segment_inserts(deferred);
+        }
+        result?;
         if let Some(layout) = &self.layout {
             // ponytail: one fsync for the batch. Run rotation can't happen inside
             // a single upsert_batch (<= max_vector_batch * vector bytes << run
