@@ -14,6 +14,19 @@ struct Assets;
 
 pub struct StaticFile<T>(pub T);
 
+/// Vite emits content-hashed asset filenames (e.g. `index-DMmLYY8W.js`), so those
+/// are safe to cache forever. The HTML shell must NEVER be cached hard, or a
+/// browser keeps requesting stale, already-deleted asset hashes after a deploy
+/// and the app renders broken. This is the fix for exactly that.
+fn cache_control(path: &str) -> &'static str {
+    if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        // index.html and anything else: always revalidate.
+        "no-cache"
+    }
+}
+
 impl<T> IntoResponse for StaticFile<T>
 where
     T: Into<String>,
@@ -24,7 +37,10 @@ where
             Some(content) => {
                 let mime = mime_guess::from_path(&path).first_or_octet_stream();
                 (
-                    [(header::CONTENT_TYPE, mime.as_ref())],
+                    [
+                        (header::CONTENT_TYPE, mime.as_ref()),
+                        (header::CACHE_CONTROL, cache_control(&path)),
+                    ],
                     Body::from(content.data),
                 )
                     .into_response()
@@ -34,11 +50,15 @@ where
     }
 }
 
-/// Serve the SPA entry point (`index.html`).
+/// Serve the SPA entry point (`index.html`) with `no-cache` so new deploys are
+/// always picked up.
 fn serve_index() -> Response {
     match Assets::get("index.html") {
         Some(content) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             Body::from(content.data),
         )
             .into_response(),

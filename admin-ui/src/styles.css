@@ -127,17 +127,17 @@ code, pre { font-family: var(--mono); }
 .page-head .kbd { font-family: var(--mono); font-size: var(--fz-cap); color: var(--muted); margin-left: 10px; font-weight: 400; }
 
 /* ---- Cards ---------------------------------------------------------------- */
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 24px; margin-bottom: 16px; }
-.card h3 { font-size: var(--fz-sub); font-weight: 600; margin-bottom: 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px; margin-bottom: 16px; }
+.card h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
 .notice { border-color: var(--border); background: var(--bg-2); color: var(--text-2); font-size: var(--fz-sm); }
 .notice code { color: var(--text); font-family: var(--mono); word-break: break-all; }
 
 /* ---- Stat tiles ----------------------------------------------------------- */
-.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-.stat { display: flex; flex-direction: column; gap: 4px; padding: 24px; margin: 0; }
-.stat .icon { color: var(--muted); margin-bottom: 12px; height: 18px; }
-.stat .icon svg { width: 18px; height: 18px; }
-.stat-value { font-size: var(--fz-h); font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.stat { display: flex; flex-direction: column; gap: 2px; padding: 16px 18px; margin: 0; }
+.stat .icon { color: var(--muted); margin-bottom: 10px; height: 16px; }
+.stat .icon svg { width: 16px; height: 16px; }
+.stat-value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.15; }
 .stat-label { color: var(--text-2); font-size: var(--fz-sm); }
 
 /* ---- Forms ---------------------------------------------------------------- */
