@@ -9,6 +9,8 @@ import {
   ScrollText,
   Activity,
   HardDrive,
+  Layers,
+  BookOpen,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -26,6 +28,7 @@ import {
 
 type Tab =
   | "dashboard"
+  | "collections"
   | "data"
   | "users"
   | "orgs"
@@ -36,6 +39,7 @@ type Tab =
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "dashboard", label: "Panel" },
+  { id: "collections", label: "Colecciones" },
   { id: "data", label: "Datos" },
   { id: "users", label: "Usuarios" },
   { id: "orgs", label: "Organizaciones" },
@@ -48,6 +52,7 @@ const TABS: { id: Tab; label: string }[] = [
 /* --- Iconos (Lucide, 18px, line) ------------------------------------------ */
 const ICONS: Record<string, LucideIcon> = {
   dashboard: LayoutGrid,
+  collections: Layers,
   data: Database,
   users: UsersIcon,
   orgs: Building2,
@@ -173,6 +178,10 @@ function Console({ onLogout }: { onLogout: () => void }) {
           ))}
         </nav>
         <div className="foot">
+          <a className="navitem" href="/docs" target="_blank" rel="noreferrer">
+            <BookOpen size={18} strokeWidth={1.75} aria-hidden />
+            <span>Documentación</span>
+          </a>
           <div className="userchip">
             <div className="avatar">{email.slice(0, 1).toUpperCase()}</div>
             <div className="who">
@@ -185,6 +194,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
       </aside>
       <main className="content">
         {tab === "dashboard" && <Dashboard />}
+        {tab === "collections" && <Collections />}
         {tab === "data" && <Data />}
         {tab === "users" && <Users />}
         {tab === "orgs" && <Orgs />}
@@ -248,6 +258,51 @@ function Dashboard() {
               <div className="stat-label">{c.label}</div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --- Colecciones ---------------------------------------------------------- */
+const ENGINE_LABEL: Record<string, string> = {
+  HNSW: "HNSW · máxima precisión",
+  IVF_FLAT_Q8: "IVF-FLAT-Q8 · equilibrio (por defecto)",
+  DISKANN: "DiskANN · bajo consumo de RAM / escala",
+};
+function Collections() {
+  const { data, error } = useAsync(() => api.listCollections());
+  const cfg = useAsync(() => api.config());
+  const engine = (cfg.data?.index_kind as string) || "";
+  const rows = data?.collections ?? [];
+  return (
+    <div>
+      <PageHead title="Colecciones" tag="/v1/vector" desc="Tus bases de datos vectoriales en esta organización." />
+      {engine && (
+        <p className="perm-note" style={{ marginTop: 0, marginBottom: 20 }}>
+          Motor de índice activo: <strong>{ENGINE_LABEL[engine] ?? engine}</strong>. Luma soporta HNSW, IVF-FLAT-Q8 y DiskANN.
+        </p>
+      )}
+      {error && <ErrorBox msg={error} />}
+      {!error && rows.length === 0 ? (
+        <p className="empty">Aún no hay colecciones. Crea una con la API (<code>POST /v1/vector/&lt;nombre&gt;</code>) o desde la pestaña Datos.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr><th>Colección</th><th>Dimensión</th><th>Métrica</th><th>Vectores</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((c) => (
+                <tr key={c.collection}>
+                  <td style={{ color: "var(--text)", fontWeight: 500 }}>{c.collection}</td>
+                  <td className="num">{c.dim ?? "—"}</td>
+                  <td>{c.metric ?? "—"}</td>
+                  <td className="num">{c.count ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -406,7 +461,54 @@ function Users() {
       {error && <ErrorBox msg={error} />}
       <Table<UserRow> rows={data?.users ?? []} cols={["email", "role", "status"]}
         actions={(u) => <button className="danger" onClick={async () => { await api.deleteUser(u.id); refresh(); }}>eliminar</button>} />
+      <RolePermissions />
     </div>
+  );
+}
+
+/* --- Matriz de permisos por rol (referencia) ------------------------------ */
+const ROLES = ["viewer", "member", "admin", "owner"] as const;
+// Nivel mínimo requerido por capacidad (viewer<member<admin<owner). null = nadie
+// (solo el operador de la instancia). Refleja los gates reales del backend.
+const CAPS: { cap: string; min: (typeof ROLES)[number] | null }[] = [
+  { cap: "Consultar e ingestar datos", min: "viewer" },
+  { cap: "Ver salud del servidor", min: "viewer" },
+  { cap: "Ver panel y estadísticas", min: "admin" },
+  { cap: "Ver registro de auditoría", min: "admin" },
+  { cap: "Gestionar API keys de la organización", min: "admin" },
+  { cap: "Crear y eliminar usuarios (member, viewer)", min: "admin" },
+  { cap: "Crear usuarios con rol admin", min: "owner" },
+];
+const LEVEL: Record<string, number> = { viewer: 10, member: 20, admin: 30, owner: 40 };
+function RolePermissions() {
+  return (
+    <>
+      <h3 className="section-label">Qué puede hacer cada rol</h3>
+      <div className="table-wrap">
+        <table className="table perm-table">
+          <thead>
+            <tr>
+              <th>Capacidad</th>
+              {ROLES.map((r) => <th key={r}>{r}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {CAPS.map((row) => (
+              <tr key={row.cap}>
+                <td className="perm-cap">{row.cap}</td>
+                {ROLES.map((r) => {
+                  const ok = row.min != null && LEVEL[r] >= LEVEL[row.min];
+                  return <td key={r}>{ok ? <span className="perm-yes">✓</span> : <span className="perm-no">–</span>}</td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="perm-note">
+        El <strong>operador</strong> (el primer usuario que registró la instancia) añade a lo de <em>owner</em> el control de instancia: la política de registro (pestaña Acceso) y ver todas las organizaciones.
+      </p>
+    </>
   );
 }
 

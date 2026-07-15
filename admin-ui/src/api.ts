@@ -77,6 +77,9 @@ export const api = {
     request<AccessPolicy>("GET", "/v1/auth/access-policy"),
   setAccessPolicy: (policy: AccessPolicy) =>
     request<AccessPolicy>("PUT", "/v1/auth/access-policy", policy),
+  listCollections: () =>
+    request<{ collections: CollectionRow[] }>("GET", "/v1/vector"),
+  config: () => request<Record<string, unknown>>("GET", "/v1/config"),
   hubIngest: (namespace: string, text: string, metadata?: unknown) =>
     request<{ status: string; doc_id: string }>(
       "POST",
@@ -97,6 +100,13 @@ export const api = {
 };
 
 export type HubResult = Record<string, unknown>;
+
+export interface CollectionRow {
+  collection: string;
+  dim: number | null;
+  metric: string | null;
+  count: number | null;
+}
 
 export interface AccessPolicy {
   domains: string[];
