@@ -103,6 +103,9 @@ pub struct Config {
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Default 200.
     pub hnsw_ef_construction: usize,
+    /// HNSW search-time ef: ceiling for the candidate-expansion loop (balanced
+    /// speed/recall operating point). Higher = more recall, slower. Default 128.
+    pub hnsw_search_ef: usize,
     /// Background HNSW segment compaction is opt-in because it trades write latency for cleanup.
     pub hnsw_segment_compaction_enabled: bool,
     /// Tombstone ratio threshold for in-memory HNSW segment rebuilds.
@@ -262,6 +265,7 @@ impl Default for Config {
             memory_decay_interval_secs: 3600,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
+            hnsw_search_ef: 128,
             hnsw_segment_compaction_enabled: false,
             hnsw_segment_compaction_threshold: 0.35,
             hnsw_segment_compaction_interval_secs: 300,
@@ -601,6 +605,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(200);
+        let hnsw_search_ef = std::env::var("HNSW_SEARCH_EF")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(128);
         let hnsw_segment_compaction_enabled =
             parse_env_bool("HNSW_SEGMENT_COMPACTION_ENABLED", false);
         let hnsw_segment_compaction_threshold = std::env::var("HNSW_SEGMENT_COMPACTION_THRESHOLD")
@@ -709,6 +717,7 @@ impl Config {
             memory_decay_interval_secs,
             hnsw_m,
             hnsw_ef_construction,
+            hnsw_search_ef,
             hnsw_segment_compaction_enabled,
             hnsw_segment_compaction_threshold,
             hnsw_segment_compaction_interval_secs,
