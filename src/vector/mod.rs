@@ -404,6 +404,29 @@ impl SegmentIndex {
         self.live = self.live.saturating_add(1);
     }
 
+    /// Bulk-insert a batch of (id, vector) pairs into this segment's HNSW graph
+    /// using `hnsw_rs`'s rayon-backed `parallel_insert`. Bookkeeping (data_id
+    /// assignment, id maps, tombstone/live counters) is identical to calling
+    /// `insert` once per item in order — only the graph construction runs across
+    /// threads. Used by the bulk/rebuild build path where the whole collection is
+    /// re-inserted into fresh segments.
+    fn insert_batch(&mut self, batch: &[(Arc<str>, Vec<f32>)]) {
+        if batch.is_empty() {
+            return;
+        }
+        let base = self.id_by_data_id.len();
+        let mut data: Vec<(&Vec<f32>, usize)> = Vec::with_capacity(batch.len());
+        for (offset, (id, vector)) in batch.iter().enumerate() {
+            let data_id = base + offset;
+            self.id_by_data_id.push(id.clone());
+            self.deleted.push(false);
+            self.data_ids.insert(id.clone(), data_id);
+            data.push((vector, data_id));
+        }
+        parallel_insert_into_hnsw(&self.hnsw, &data);
+        self.live = self.live.saturating_add(batch.len());
+    }
+
     fn mark_deleted(&mut self, id: &str) {
         if let Some(idx) = self.data_ids.remove(id) {
             if idx < self.deleted.len() && !self.deleted[idx] {
@@ -2812,21 +2835,27 @@ fn build_segments_from_items(
         );
     }
 
+    // Per-segment capacity matches `SegmentIndex::new` (which floors at 1024).
+    // Chunking by this capacity reproduces the exact segment boundaries and
+    // data_id assignment of the previous one-at-a-time loop, but lets each
+    // segment's HNSW graph be built with a single rayon-parallel batch insert
+    // instead of a serial per-vector loop.
+    let capacity = segment_max_items.max(1024);
     let mut segments = Vec::new();
-    let mut item_segments = HashMap::new();
-    let mut current = SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
+    let mut item_segments = HashMap::with_capacity(items.len());
 
-    for (id, vector) in items {
-        if current.live >= current.capacity {
-            segments.push(current);
-            current = SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
-        }
+    for chunk in items.chunks(capacity) {
+        let seg_idx = segments.len();
+        let mut segment =
+            SegmentIndex::new(metric, segment_max_items, hnsw_m, hnsw_ef_construction);
+        segment.insert_batch(chunk);
         // Share the SAME canonical Arc<str> across the segment's id maps and
         // item_segments instead of allocating a fresh String per id.
-        current.insert(id.clone(), vector.clone());
-        item_segments.insert(id.clone(), segments.len());
+        for (id, _) in chunk {
+            item_segments.insert(id.clone(), seg_idx);
+        }
+        segments.push(segment);
     }
-    segments.push(current);
 
     (segments, item_segments)
 }
@@ -2982,6 +3011,17 @@ fn insert_into_hnsw(hnsw: &mut HnswIndex, v: Vec<f32>, data_id: usize) {
     match hnsw {
         HnswIndex::Cosine(h) => h.insert((&v, data_id)),
         HnswIndex::Dot(h) => h.insert((&v, data_id)),
+    }
+}
+
+/// Parallel batch insert into an HNSW graph. `hnsw_rs::Hnsw::parallel_insert`
+/// takes `&self` (the graph uses internal locking) and drives the batch across
+/// a rayon thread pool, so a whole segment's vectors are built concurrently
+/// instead of one-at-a-time on a single thread.
+fn parallel_insert_into_hnsw(hnsw: &HnswIndex, data: &[(&Vec<f32>, usize)]) {
+    match hnsw {
+        HnswIndex::Cosine(h) => h.parallel_insert(data),
+        HnswIndex::Dot(h) => h.parallel_insert(data),
     }
 }
 
