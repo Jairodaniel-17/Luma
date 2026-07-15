@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   LayoutGrid,
   Database,
-  Users,
+  Users as UsersIcon,
   Building2,
   KeyRound,
   ShieldCheck,
@@ -49,7 +49,7 @@ const TABS: { id: Tab; label: string }[] = [
 const ICONS: Record<string, LucideIcon> = {
   dashboard: LayoutGrid,
   data: Database,
-  users: Users,
+  users: UsersIcon,
   orgs: Building2,
   keys: KeyRound,
   access: ShieldCheck,
