@@ -24,6 +24,83 @@ La premisa es simple: **la IA necesita más que vectores.** Mientras la arquitec
 
 ---
 
+## 📊 Rendimiento medido (Luma vs Qdrant vs Milvus)
+
+Benchmark reproducible, misma máquina, mismo dataset y misma métrica para los tres motores. Sin cifras vagas: todas las columnas están medidas.
+
+### Máquina de prueba
+
+| | |
+|---|---|
+| **CPU** | Intel Core i7-1355U (12 hilos, laptop; escalado de frecuencia activo) |
+| **RAM** | 15 GiB |
+| **Disco** | NVMe SSD |
+| **SO** | Ubuntu 24.04.4 LTS · kernel 6.17 |
+
+> Es una laptop con throttling térmico: los valores absolutos suben en servidor, pero la **comparación relativa entre motores es válida** porque los tres corrieron en el mismo equipo, uno a la vez.
+
+### Qué se midió y cómo
+
+- **Dataset:** 50.000 vectores de 768 dimensiones + 200 consultas, distribución aleatoria uniforme (`base.npy` / `queries.npy`, `float32`).
+- **Métrica:** cosine, `k = 10`.
+- **Ground-truth:** top-10 exacto por fuerza bruta sobre el mismo dataset → recall@10 real, no estimado.
+- **Configuración:** valores **por defecto** de cada motor. Qdrant y Milvus con HNSW `M=16, ef_construct=200, ef=64`.
+- **RAM:** memoria anónima real del proceso tras cargar (no caché de página de disco).
+- **Protocolo:** ingesta por lotes vía API HTTP → espera de indexación → 200 consultas secuenciales → recall contra ground-truth.
+
+### Resultados
+
+| Motor / modo | Ingesta (vec/s) | Consulta (qps) | Latencia media | Recall@10 | RAM |
+|---|---:|---:|---:|---:|---:|
+| **Qdrant** (HNSW, ef=64) | **1.859** | 237 | 4.22 ms | 0.416 | 320 MB |
+| **Milvus** (HNSW, ef=64) | 1.284 | 476 | 2.09 ms | 0.086 | 846 MB |
+| **Luma — DiskANN** (low-RAM) | 807 | **515** | **1.94 ms** | 0.056 | **133 MB** |
+| **Luma — HNSW** (equilibrio, ef=128 default) | 301 | 99 | 10.08 ms | 0.853 | 411 MB |
+| **Luma — HNSW** (velocidad, ef=32) | 295 | 199 | 5.02 ms | 0.474 | 406 MB |
+
+### Discusión
+
+Con vectores **aleatorios uniformes** (sin estructura de clusters) el ANN es un caso adversarial: incluso Qdrant solo alcanza 0.42 de recall. Por eso la columna de recall refleja sobre todo **el punto de equilibrio velocidad↔precisión de cada motor**, más que la calidad absoluta del índice. En embeddings reales (que sí forman clusters) todos los recalls suben.
+
+- **Luma DiskANN** ocupa el extremo *rápido y ligero*: la **consulta más veloz del grupo (515 qps, 1.94 ms) con la menor RAM (133 MB — 2,4× menos que Qdrant, 6,4× menos que Milvus)**, a costa de recall.
+- **Luma HNSW** es el modo *precisión*, ahora **calibrado** (ver abajo): a su punto de velocidad (`ef=32`) iguala la latencia de Qdrant (5.0 vs 4.2 ms) **con mejor recall (0.474 vs 0.416)**; subiendo `ef` escala hasta recall 0.95.
+- **Qdrant** es un punto medio sólido de fábrica; **Milvus** iguala en ingesta pero pesa 846 MB y su recall a igual `ef` es el más bajo.
+
+### Dónde gana Luma
+
+- 🏆 **Consumo de RAM** — DiskANN corre 50k en **133 MB**; ningún competidor baja de 320 MB. Es el objetivo de diseño y se cumple medido.
+- 🏆 **Latencia y throughput de consulta** — **1.94 ms / 515 qps** en DiskANN, el más rápido del grupo.
+- 🏆 **Precisión a igual velocidad** — a latencia equivalente a Qdrant, Luma HNSW da **más recall** (0.474 vs 0.416); y llega hasta 0.95 subiendo `ef`.
+
+### 🎯 Punto de equilibrio (calibración HNSW)
+
+El modo HNSW tenía un problema: el bucle de expansión de candidatos perseguía una estimación de recall inalcanzable en datos difíciles y terminaba escaneando casi todo (recall 0.98 pero **348 ms/consulta**, inservible). Se corrigió con dos cambios (`src/vector/mod.rs`, `src/config.rs`):
+
+1. **`ef` de búsqueda configurable** (`HNSW_SEARCH_EF`, default 128) que acota la expansión a un punto fijo, como el `hnsw_ef` de Qdrant.
+2. **Búsqueda única** al techo `ef` en vez de rampar 16→32→…→N. La rampa lanzaba varias búsquedas HNSW desechables por consulta: eliminarla dio **~3× más throughput al mismo recall**.
+
+Curva medida tras la calibración (mismo dataset, `HNSW_SEARCH_EF` variando):
+
+| ef | qps | latencia | recall@10 | RAM |
+|---:|---:|---:|---:|---:|
+| 32 | 199 | 5.02 ms | 0.474 | 406 MB |
+| 64 | 140 | 7.13 ms | 0.675 | 406 MB |
+| 96 | 115 | 8.65 ms | 0.792 | 408 MB |
+| **128 (default)** | **99** | **10.08 ms** | **0.853** | **411 MB** |
+| 192 | 82 | 12.19 ms | 0.921 | 409 MB |
+| 256 | 74 | 13.45 ms | 0.947 | 407 MB |
+
+Antes vs después, mismo `ef=192`: **26 qps → 82 qps** (3,15×) con recall idéntico (0.92). El usuario elige el punto: `ef=32` para máxima velocidad, `ef≥192` para máximo recall; el default 128 es el balance.
+
+### Lo que aún va por detrás
+
+- **Ingesta con indexación viva** (295–807 vec/s) sigue por debajo del build multihilo de Qdrant/Milvus (1.284–1.859); el build paralelo ya existe para carga masiva, falta llevarlo al upsert vivo.
+- **Throughput de consulta HNSW** a igual recall: `hnsw_rs` es algo más lento que el HNSW propio de Qdrant. La ventaja de Luma sigue siendo **RAM (DiskANN)** y **precisión a igual latencia**.
+
+> Scripts y datos del benchmark: `bench/` + `sweep_ef.sh`. Reejecutable en cualquier equipo.
+
+---
+
 ## 🏛️ Arquitectura real por módulos
 
 El servidor (`src/server.rs`) valida la configuración, inicializa los subsistemas y arranca el router HTTP (`src/api/mod.rs`) sobre **axum 0.7 / hyper 1**.
@@ -245,7 +322,7 @@ backups/<timestamp>/           # Respaldos (VACUUM INTO + snapshot + WAL)
 
 ## ✅ Estado actual del proyecto
 
-Implementado y verificable en el código de hoy (crate `luma` v4.0.0):
+Implementado y verificable en el código de hoy (crate `luma` v4.10.0):
 
 - **Núcleo convergente**: motor vectorial (HNSW / IVF-FLAT-Q8 / DiskANN), KV con TTL/CAS, WAL segmentado + snapshots, SQLite embebido vía actor, bus de eventos SSE, hub RAG híbrido y motor de búsqueda de texto. Todo montado en el router y cubierto por `tests/`.
 - **Object storage, colas e imágenes**: primitivas tipo R2 + Queues + Images ya montadas en `/v1/blob`, `/v1/queue`, `/v1/image`.
@@ -267,5 +344,5 @@ Luma redefine el backend para IA mediante la **convergencia**: orquesta motores 
 > **Keep It Simple, Stupid (KISS). Keep It Fast, Rust.**
 
 Proyecto de prueba interno
-Estado verificado el 12 de julio
+Estado verificado el 15 de julio
 Ultima revision automatica

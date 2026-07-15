@@ -83,6 +83,9 @@ pub struct VectorSettings {
     pub hnsw_m: usize,
     /// PR4: HNSW ef_construction parameter. Applies to new collections.
     pub hnsw_ef_construction: usize,
+    /// HNSW search-time ef: ceiling for the candidate-expansion loop. Bounds
+    /// query cost to a balanced speed/recall point instead of expanding to N.
+    pub hnsw_search_ef: usize,
     /// Maximum vectors per collection. 0 = unlimited.
     pub max_vectors: usize,
     /// Emit tracing::warn! for searches exceeding this latency in ms. 0 = disabled.
@@ -123,6 +126,7 @@ impl Default for VectorSettings {
             diskann_rebuild_min_deltas: 100_000,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
+            hnsw_search_ef: 128,
             max_vectors: 0,
             slow_query_threshold_ms: 0,
             pre_filter_threshold: 10_000,
@@ -170,6 +174,7 @@ impl VectorSettings {
             diskann_rebuild_min_deltas: config.diskann_rebuild_min_deltas.max(1),
             hnsw_m: config.hnsw_m.clamp(2, 128),
             hnsw_ef_construction: config.hnsw_ef_construction.clamp(16, 2048),
+            hnsw_search_ef: config.hnsw_search_ef.clamp(16, 20_000),
             max_vectors: config.max_collection_vectors,
             slow_query_threshold_ms: config.slow_query_threshold_ms,
             pre_filter_threshold: config.pre_filter_threshold.max(1),
@@ -2503,8 +2508,20 @@ impl Collection {
             return Ok((hits, stats));
         }
 
-        let max_candidates = self.items.len().max(k);
-        let mut candidate_k = k.max(16).min(max_candidates);
+        // Cap candidate expansion at the configured search-time ef. Without this
+        // ceiling the loop doubles candidate_k chasing an unreachable recall
+        // estimate on hard (e.g. uniform-random) data until it scans all N —
+        // exhaustive, high recall, but far too slow. The ef ceiling fixes the
+        // query at a balanced speed/recall operating point (like Qdrant's hnsw_ef).
+        // ponytail: raise HNSW_SEARCH_EF for more recall, lower it for more speed.
+        let ceiling = self.settings.hnsw_search_ef.max(k);
+        let max_candidates = self.items.len().max(k).min(ceiling);
+        // Single search directly at the ef ceiling (like a fixed hnsw_ef). The old
+        // ramp (16→32→…→ceiling) issued several throwaway HNSW searches per query
+        // before the final one; with a bounded ef that is pure redundant work.
+        // The loop below still exists for the filter-underfill case but normally
+        // runs exactly once.
+        let mut candidate_k = max_candidates;
         let best_hits = loop {
             stats.candidate_expansion_steps = stats.candidate_expansion_steps.saturating_add(1);
             let mut combined: Vec<(String, f32)> = if self
