@@ -869,7 +869,11 @@ async fn vector_diskann_auto_builds_on_disk_graph() {
             .unwrap();
     }
 
-    // No explicit vector_build_disk_index call — the graph must exist anyway.
+    // No explicit vector_build_disk_index call — the graph is built off the write
+    // path by the background maintenance pass (which the engine also runs on a
+    // timer). Drive it directly here so the assertion is deterministic.
+    let built = engine.vectors().maintain_disk_indexes();
+    assert_eq!(built, vec!["docs".to_string()]);
     let status = engine.vector_disk_index_status("docs").unwrap();
     assert!(
         status.available && !status.graph_files.is_empty(),
@@ -911,4 +915,106 @@ async fn vector_diskann_auto_builds_on_disk_graph() {
         manifest["diskann_last_built_upsert"].as_u64().unwrap() > 0,
         "diskann_last_built_upsert marker should be set after auto-build"
     );
+}
+
+#[tokio::test]
+async fn vector_diskann_background_build_off_write_path() {
+    // The DiskANN graph (re)build runs off the write path: a build produces the
+    // on-disk graph via the snapshot->build->swap maintenance pass, and writes
+    // that happen *around* the build keep succeeding (the build never holds the
+    // write lock for its full duration).
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_string_lossy().to_string();
+    let mut config = config_with_dir(&data_dir);
+    config.index_kind = "DISKANN".to_string();
+    config.diskann_auto_build_min_vectors = 10;
+    config.diskann_rebuild_min_deltas = 1;
+
+    let engine = Engine::new(config, CancellationToken::new()).unwrap();
+    engine
+        .create_vector_collection("docs", 2, Metric::Cosine)
+        .unwrap();
+
+    // 50 vectors on a dense 1-D gradient from [0,1] to [1,0]. `grad-49` = [49, 0]
+    // is the unique cosine top-1 for the query [1, 0], and the gradient is densely
+    // connected so the approximate graph search reliably reaches it.
+    let query = vec![1.0f32, 0.0];
+    const N: u32 = 50;
+    for i in 0..N {
+        engine
+            .vector_upsert(
+                "docs",
+                &format!("grad-{i:02}"),
+                VectorItem {
+                    vector: vec![i as f32, (N - 1 - i) as f32],
+                    meta: json!({ "i": i }),
+                    mmap_offset: None,
+                },
+            )
+            .unwrap();
+    }
+
+    // Phase 1 (no concurrency): the maintenance pass must produce a graph.
+    let built = engine.vectors().maintain_disk_indexes();
+    assert_eq!(built, vec!["docs".to_string()]);
+    assert!(
+        engine.vector_disk_index_status("docs").unwrap().available,
+        "graph should be available after the background build"
+    );
+
+    // Phase 2: inserts keep succeeding *while* builds run — the build does not
+    // hold the write lock for its whole duration. Hammer inserts from another
+    // thread while repeatedly kicking the build on this thread. The bg vectors sit
+    // on the [1,1] diagonal (cosine 0.707 vs. the query), so they never outrank
+    // `grad-49`.
+    let writer = engine.clone();
+    let handle = std::thread::spawn(move || {
+        for i in 0..60u32 {
+            writer
+                .vector_upsert(
+                    "docs",
+                    &format!("bg-{i}"),
+                    VectorItem {
+                        vector: vec![(i % 5) as f32 + 1.0, (i % 5) as f32 + 1.0],
+                        meta: json!({ "bg": i }),
+                        mmap_offset: None,
+                    },
+                )
+                .expect("concurrent insert should succeed during a build");
+        }
+    });
+    for _ in 0..25 {
+        engine.vectors().maintain_disk_indexes();
+    }
+    handle
+        .join()
+        .expect("writer thread should not panic/deadlock");
+
+    // Every concurrent insert landed.
+    let info = engine.vector_collection_info("docs").unwrap();
+    assert_eq!(info.live_count, (N as usize) + 60);
+
+    // A final build (no writers now) yields a fresh graph over all vectors, and
+    // search returns the correct top-1 through the DiskANN path.
+    let built = engine.vectors().maintain_disk_indexes();
+    assert_eq!(built, vec!["docs".to_string()]);
+    assert!(engine.vector_disk_index_status("docs").unwrap().available);
+    let hits = engine
+        .vector_search(
+            "docs",
+            SearchRequest {
+                vector: query,
+                k: 1,
+                options: SearchOptions {
+                    filters: None,
+                    filter: None,
+                    min_score: None,
+                    include_meta: false,
+                    allowed_ids: None,
+                },
+            },
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "grad-49");
 }
