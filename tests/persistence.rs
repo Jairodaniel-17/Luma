@@ -178,6 +178,112 @@ async fn vector_state_replays_without_state_db_snapshot() {
 }
 
 #[tokio::test]
+async fn vectors_survive_restart_with_compact_event_wal() {
+    // Write dim-768 vectors, confirm the event WAL stores each vector as a compact
+    // base64 blob (not a fat JSON number array), then reopen from the same data dir
+    // and assert every upsert replayed and is still searchable. This is the
+    // crash-recovery/replay guarantee for the reduced write-amp encoding.
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_string_lossy().to_string();
+
+    let config = Config {
+        port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
+        api_key: "test".to_string(),
+        data_dir: Some(data_dir.clone()),
+        snapshot_interval_secs: 3600,
+        ..Config::default()
+    };
+
+    let dim = 768usize;
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    engine
+        .create_vector_collection("docs", dim, luma::vector::Metric::Cosine)
+        .unwrap();
+
+    // Each doc gets a unique dominant dimension so it is unambiguously its own
+    // nearest neighbour (avoids ties between near-identical vectors), while still
+    // carrying arbitrary non-power-of-two f32 values that exercise the encoding.
+    let make_vec = |seed: usize| -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim)
+            .map(|i| ((i as f32) * 0.013 + 0.17).fract())
+            .collect();
+        v[seed % dim] += 5.0;
+        v
+    };
+    for n in 0..64usize {
+        engine
+            .vector_upsert(
+                "docs",
+                &format!("doc-{n}"),
+                luma::vector::VectorItem {
+                    vector: make_vec(n),
+                    meta: serde_json::json!({"n": n}),
+                    mmap_offset: None,
+                },
+            )
+            .unwrap();
+    }
+    drop(engine);
+
+    // Inspect the event WAL: it must use the compact base64 vector encoding, and
+    // each dim-768 vector record must be far smaller than the ~15 KB JSON array.
+    let wal_bytes: Vec<u8> = std::fs::read_dir(&data_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("events-"))
+        })
+        .flat_map(|p| std::fs::read(p).unwrap())
+        .collect();
+    let wal_text = String::from_utf8(wal_bytes).unwrap();
+    assert!(
+        wal_text.contains("vec_b64"),
+        "event WAL must store vectors as compact base64 blobs"
+    );
+    let max_upsert_line = wal_text
+        .lines()
+        .filter(|l| l.contains("vector_upserted"))
+        .map(|l| l.len())
+        .max()
+        .unwrap();
+    assert!(
+        max_upsert_line < 6000,
+        "compact dim-768 upsert record should be well under 15 KB, got {max_upsert_line} bytes"
+    );
+
+    let reopened = Engine::new(config, CancellationToken::new()).unwrap();
+    for n in 0..64usize {
+        let hit_ids: Vec<_> = reopened
+            .vector_search(
+                "docs",
+                luma::vector::SearchRequest {
+                    vector: make_vec(n),
+                    k: 1,
+                    options: luma::vector::SearchOptions {
+                        filters: None,
+                        filter: None,
+                        min_score: None,
+                        include_meta: false,
+                        allowed_ids: None,
+                    },
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.id)
+            .collect();
+        assert!(
+            hit_ids.iter().any(|id| id == &format!("doc-{n}")),
+            "doc-{n} must survive restart and be searchable"
+        );
+    }
+}
+
+#[tokio::test]
 async fn truncated_wal_tail_does_not_drop_valid_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().to_string_lossy().to_string();
