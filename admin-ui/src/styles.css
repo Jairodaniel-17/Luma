@@ -213,6 +213,18 @@ pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: v
 .access-state.open .dot { background: var(--success); }
 .access-state.restricted .dot { background: var(--warning); }
 
+/* ---- Motores (overview convergente) -------------------------------------- */
+.engine-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 8px; }
+.engine-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; transition: border-color .15s ease-out; }
+.engine-card:hover { border-color: var(--border-strong); }
+.engine-head { display: flex; align-items: center; gap: 10px; }
+.engine-ico { color: var(--text-2); display: inline-flex; }
+.engine-name { font-weight: 500; font-size: var(--fz-body); color: var(--text); }
+.engine-desc { color: var(--text-2); font-size: var(--fz-sm); line-height: 1.5; flex: 1; }
+.engine-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+.engine-foot code { font-family: var(--mono); font-size: var(--fz-cap); color: var(--muted); }
+.engine-metric { font-size: var(--fz-cap); font-weight: 500; color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+
 /* ---- Matriz de permisos por rol ------------------------------------------ */
 .perm-table th:not(:first-child), .perm-table td:not(:first-child) { text-align: center; width: 88px; }
 .perm-cap { color: var(--text); font-weight: 500; }

@@ -79,6 +79,7 @@ export const api = {
     request<AccessPolicy>("PUT", "/v1/auth/access-policy", policy),
   listCollections: () =>
     request<{ collections: CollectionRow[] }>("GET", "/v1/vector"),
+  listState: () => request<unknown[]>("GET", "/v1/state"),
   config: () => request<Record<string, unknown>>("GET", "/v1/config"),
   hubIngest: (namespace: string, text: string, metadata?: unknown) =>
     request<{ status: string; doc_id: string }>(
