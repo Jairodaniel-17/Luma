@@ -1,5 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  LayoutGrid,
+  Database,
+  Users,
+  Building2,
+  KeyRound,
+  ShieldCheck,
+  ScrollText,
+  Activity,
+  HardDrive,
+  type LucideIcon,
+} from "lucide-react";
+import {
   api,
   getToken,
   setToken,
@@ -33,23 +45,21 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "health", label: "Salud" },
 ];
 
-/* --- Iconos (SVG en línea, stroke=currentColor) --------------------------- */
-const I = {
-  dashboard: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
-  data: "M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
-  users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
-  orgs: "M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01",
-  keys: "M15.5 7.5a4.5 4.5 0 1 0-4.9 4.48L4 19v2h2l1-1h2v-2h2v-2l1.02-1.02A4.5 4.5 0 0 0 15.5 7.5zM16.5 6.5h.01",
-  access: "M12 3l7 4v5c0 4.5-3 7.7-7 9-4-1.3-7-4.5-7-9V7l7-4zM9.5 12l2 2 3.5-3.5",
-  audit: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M9 13h6M9 17h6M9 9h1",
-  health: "M22 12h-4l-3 9L9 3l-3 9H2",
+/* --- Iconos (Lucide, 18px, line) ------------------------------------------ */
+const ICONS: Record<string, LucideIcon> = {
+  dashboard: LayoutGrid,
+  data: Database,
+  users: Users,
+  orgs: Building2,
+  keys: KeyRound,
+  access: ShieldCheck,
+  audit: ScrollText,
+  health: Activity,
+  storage: HardDrive,
 };
-function Icon({ name }: { name: keyof typeof I }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={I[name]} />
-    </svg>
-  );
+function Ico({ name }: { name: string }) {
+  const C = ICONS[name] ?? LayoutGrid;
+  return <C size={18} strokeWidth={1.75} aria-hidden />;
 }
 
 function Brand({ sub }: { sub?: string }) {
@@ -156,8 +166,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <Brand sub="Consola" />
         <nav>
           {TABS.map((t) => (
-            <button key={t.id} className={`navitem ${t.id === tab ? "active" : ""}`} onClick={() => setTab(t.id)}>
-              <Icon name={t.id} />
+            <button key={t.id} className={`navitem ${t.id === tab ? "active" : ""}`} onClick={() => setTab(t.id)} aria-current={t.id === tab ? "page" : undefined}>
+              <Ico name={t.id} />
               <span>{t.label}</span>
             </button>
           ))}
@@ -219,12 +229,12 @@ function fmtBytes(n: number): string {
 function Dashboard() {
   const { data, error } = useAsync(() => api.stats());
   if (error) return <ErrorBox msg={error} />;
-  const cards: { label: string; value: string; icon: keyof typeof I }[] = [
+  const cards: { label: string; value: string; icon: string }[] = [
     { label: "Organizaciones", value: String(data?.orgs ?? 0), icon: "orgs" },
     { label: "Usuarios", value: String(data?.users ?? 0), icon: "users" },
     { label: "Colecciones", value: String(data?.collections ?? 0), icon: "data" },
     { label: "Eventos de auditoría", value: String(data?.audit_events ?? 0), icon: "audit" },
-    { label: "Almacenamiento", value: fmtBytes(data?.storage_bytes ?? 0), icon: "health" },
+    { label: "Almacenamiento", value: fmtBytes(data?.storage_bytes ?? 0), icon: "storage" },
   ];
   return (
     <div>
@@ -233,7 +243,7 @@ function Dashboard() {
         <div className="stat-grid">
           {cards.map((c) => (
             <div className="card stat" key={c.label}>
-              <div className="icon"><Icon name={c.icon} /></div>
+              <div className="icon"><Ico name={c.icon} /></div>
               <div className="stat-value">{c.value}</div>
               <div className="stat-label">{c.label}</div>
             </div>
@@ -474,10 +484,9 @@ function Access() {
   return (
     <div>
       <PageHead title="Control de acceso" desc="Restringe quién puede auto-registrarse. Un dominio o correo por línea; déjalo vacío para registro abierto." />
-      <div style={{ marginBottom: 18 }}>
-        <span className={`pill-toggle ${open ? "pill-open" : "pill-restricted"}`}>
-          {open ? "● Registro ABIERTO" : "● Registro RESTRINGIDO"}
-        </span>
+      <div className={`access-state ${open ? "open" : "restricted"}`}>
+        <span className="dot" />
+        {open ? "Registro abierto — cualquier correo válido puede crear una organización" : "Registro restringido a los dominios / correos de abajo"}
       </div>
       <form className="card" onSubmit={save}>
         <label className="field"><span>Dominios permitidos</span>
@@ -545,7 +554,10 @@ function colLabel(c: string): string {
 }
 function cell(col: string, v: unknown): ReactNode {
   if (col === "role" && typeof v === "string") return <span className={`badge role-${v}`}>{v}</span>;
-  if (col === "status" && typeof v === "string") return <span className={`badge st-active`}>{v}</span>;
+  if (col === "status" && typeof v === "string") {
+    const ok = v === "active";
+    return <span className={`status ${ok ? "ok" : ""}`}><span className="dot" />{v}</span>;
+  }
   if ((col === "id" || col === "user_id") && typeof v === "string") return <code>{v}</code>;
   if (v === null || v === undefined || v === "") return <span className="muted">—</span>;
   return String(v);

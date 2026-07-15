@@ -86,14 +86,30 @@ pub async fn auth_middleware(
         if let Some(accounts) = &state.accounts {
             match accounts.validate_session(&token).await {
                 Ok(Some(identity)) => {
+                    // Bootstrap super-admin: the first-registered user is the
+                    // instance operator, so their session runs untenanted
+                    // (tenant_id = None) and every platform-admin gate passes.
+                    // Everyone who signs up later stays scoped to their own org.
+                    let is_operator = accounts
+                        .is_bootstrap_admin(&identity.user_id)
+                        .await
+                        .unwrap_or(false);
                     let mut req = req;
                     req.extensions_mut()
                         .insert(AuditKeyId(identity.user_id.clone()));
                     req.extensions_mut().insert(TenantContext {
-                        tenant_id: Some(identity.org_id.clone()),
+                        tenant_id: if is_operator {
+                            None
+                        } else {
+                            Some(identity.org_id.clone())
+                        },
                         user_id: Some(identity.user_id.clone()),
                         role: identity.role.clone(),
-                        permissions: serde_json::json!({}),
+                        permissions: if is_operator {
+                            serde_json::json!({ "allow": "*" })
+                        } else {
+                            serde_json::json!({})
+                        },
                         quotas: serde_json::json!({}),
                     });
                     return Ok(next.run(req).await);
