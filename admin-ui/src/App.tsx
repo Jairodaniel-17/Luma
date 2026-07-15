@@ -11,6 +11,14 @@ import {
   HardDrive,
   Layers,
   BookOpen,
+  Boxes,
+  FileText,
+  Package,
+  Inbox,
+  Brain,
+  Radio,
+  Image as ImageIcon,
+  Search,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -28,6 +36,7 @@ import {
 
 type Tab =
   | "dashboard"
+  | "engines"
   | "collections"
   | "data"
   | "users"
@@ -39,6 +48,7 @@ type Tab =
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "dashboard", label: "Panel" },
+  { id: "engines", label: "Motores" },
   { id: "collections", label: "Colecciones" },
   { id: "data", label: "Datos" },
   { id: "users", label: "Usuarios" },
@@ -52,6 +62,7 @@ const TABS: { id: Tab; label: string }[] = [
 /* --- Iconos (Lucide, 18px, line) ------------------------------------------ */
 const ICONS: Record<string, LucideIcon> = {
   dashboard: LayoutGrid,
+  engines: Boxes,
   collections: Layers,
   data: Database,
   users: UsersIcon,
@@ -194,6 +205,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
       </aside>
       <main className="content">
         {tab === "dashboard" && <Dashboard />}
+        {tab === "engines" && <Engines />}
         {tab === "collections" && <Collections />}
         {tab === "data" && <Data />}
         {tab === "users" && <Users />}
@@ -260,6 +272,57 @@ function Dashboard() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/* --- Motores (plataforma convergente) ------------------------------------- */
+function Engines() {
+  const cols = useAsync(() => api.listCollections());
+  const kv = useAsync(() => api.listState());
+  const nCols = cols.data?.collections?.length;
+  const nKeys = Array.isArray(kv.data) ? kv.data.length : undefined;
+
+  const core: { icon: LucideIcon; name: string; desc: string; ep: string; metric?: string }[] = [
+    { icon: Layers, name: "Vectorial", desc: "Búsqueda por similitud (ANN). Índices HNSW / IVF-FLAT-Q8 / DiskANN.", ep: "/v1/vector", metric: nCols !== undefined ? `${nCols} colección${nCols === 1 ? "" : "es"}` : undefined },
+    { icon: KeyRound, name: "Clave-Valor", desc: "Almacén KV con TTL y compare-and-swap, tipo Redis.", ep: "/v1/state", metric: nKeys !== undefined ? `${nKeys} clave${nKeys === 1 ? "" : "s"}` : undefined },
+    { icon: FileText, name: "Documentos / SQL", desc: "Documentos JSON sobre SQLite embebido, con consultas.", ep: "/v1/doc" },
+    { icon: Package, name: "Objetos", desc: "Almacenamiento binario tipo S3 / R2 por buckets.", ep: "/v1/blob" },
+    { icon: Inbox, name: "Colas", desc: "Mensajería durable: encolar, recibir y confirmar.", ep: "/v1/queue" },
+  ];
+  const extra: { icon: LucideIcon; name: string; desc: string; ep: string }[] = [
+    { icon: Brain, name: "Memoria de agentes", desc: "Memoria episódica, semántica y procedural (NS-Mem).", ep: "/v1/memory" },
+    { icon: Search, name: "Hub RAG híbrido", desc: "Ingesta + búsqueda semántica y por palabra clave.", ep: "/v1/db" },
+    { icon: Radio, name: "Eventos", desc: "Bus pub/sub con streaming SSE.", ep: "/v1/events" },
+    { icon: ImageIcon, name: "Imágenes", desc: "Transformación de imágenes on-the-fly.", ep: "/v1/image" },
+  ];
+
+  return (
+    <div>
+      <PageHead title="Motores" desc="Luma es un motor de datos convergente: cinco primitivas núcleo más servicios de IA, en un solo binario." />
+      <h3 className="section-label" style={{ marginTop: 0 }}>Núcleo</h3>
+      <div className="engine-grid">
+        {core.map((e) => <EngineCard key={e.name} {...e} />)}
+      </div>
+      <h3 className="section-label">Servicios de IA y convergencia</h3>
+      <div className="engine-grid">
+        {extra.map((e) => <EngineCard key={e.name} {...e} />)}
+      </div>
+    </div>
+  );
+}
+function EngineCard({ icon: Icon, name, desc, ep, metric }: { icon: LucideIcon; name: string; desc: string; ep: string; metric?: string }) {
+  return (
+    <div className="engine-card">
+      <div className="engine-head">
+        <span className="engine-ico"><Icon size={18} strokeWidth={1.75} aria-hidden /></span>
+        <span className="engine-name">{name}</span>
+      </div>
+      <p className="engine-desc">{desc}</p>
+      <div className="engine-foot">
+        <code>{ep}</code>
+        {metric && <span className="engine-metric">{metric}</span>}
+      </div>
     </div>
   );
 }
