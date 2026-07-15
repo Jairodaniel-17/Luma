@@ -121,6 +121,8 @@ code, pre { font-family: var(--mono); }
 
 /* ---- Content -------------------------------------------------------------- */
 .content { padding: 32px 48px 64px; max-width: 1080px; }
+.content-docs { padding: 0; max-width: none; }
+.docs-frame { width: 100%; height: 100vh; border: 0; display: block; background: var(--bg); }
 .page-head { margin-bottom: 32px; }
 .page-head h2 { font-size: var(--fz-h); font-weight: 600; }
 .page-head p { margin-top: 8px; color: var(--text-2); font-size: var(--fz-body); }
