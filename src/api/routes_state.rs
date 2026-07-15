@@ -435,6 +435,7 @@ mod tests {
             tenant_id: tenant.map(|s| s.to_string()),
             user_id: None,
             role: "user".to_string(),
+            platform_admin: false,
             permissions: serde_json::json!({}),
             quotas: serde_json::json!({}),
         }
