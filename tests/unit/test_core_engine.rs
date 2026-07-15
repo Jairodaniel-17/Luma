@@ -46,9 +46,12 @@ async fn test_engine_ttl_expiration() {
 
     let key = "ttl_key".to_string();
     let value = serde_json::json!("expired");
-    // Set small TTL
+    // Set a short TTL. 500ms (not 100ms) so the "exists immediately" check below
+    // stays reliable on a loaded CI runner where scheduling between put and the
+    // assert can slip past a too-tight window — while still expiring well before
+    // the 1500ms wait. ponytail: any TTL in (put→assert latency, 1000ms] works.
     engine
-        .put_state(key.clone(), value, Some(100), None)
+        .put_state(key.clone(), value, Some(500), None)
         .unwrap();
 
     // Verify it exists immediately
