@@ -44,7 +44,8 @@ type Tab =
   | "keys"
   | "access"
   | "audit"
-  | "health";
+  | "health"
+  | "docs";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "dashboard", label: "Panel" },
@@ -189,10 +190,10 @@ function Console({ onLogout }: { onLogout: () => void }) {
           ))}
         </nav>
         <div className="foot">
-          <a className="navitem" href="/docs" target="_blank" rel="noreferrer">
+          <button className={`navitem ${tab === "docs" ? "active" : ""}`} onClick={() => setTab("docs")}>
             <BookOpen size={18} strokeWidth={1.75} aria-hidden />
             <span>Documentación</span>
-          </a>
+          </button>
           <div className="userchip">
             <div className="avatar">{email.slice(0, 1).toUpperCase()}</div>
             <div className="who">
@@ -203,17 +204,28 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <button className="logout" onClick={doLogout}>Cerrar sesión</button>
         </div>
       </aside>
-      <main className="content">
-        {tab === "dashboard" && <Dashboard />}
-        {tab === "engines" && <Engines />}
-        {tab === "collections" && <Collections />}
-        {tab === "data" && <Data />}
-        {tab === "users" && <Users />}
-        {tab === "orgs" && <Orgs />}
-        {tab === "keys" && <Keys />}
-        {tab === "access" && <Access />}
-        {tab === "audit" && <Audit />}
-        {tab === "health" && <Health />}
+      <main className={`content ${tab === "docs" ? "content-docs" : ""}`}>
+        {/* Iframe de documentación: montado una sola vez (precarga en segundo
+            plano al entrar) y solo se muestra/oculta — nunca se recarga al
+            cambiar de pestaña, así abre al instante. */}
+        <iframe
+          className="docs-frame"
+          src="/docs"
+          title="Documentación de Luma"
+          style={{ display: tab === "docs" ? "block" : "none" }}
+        />
+        <div style={{ display: tab === "docs" ? "none" : "block" }}>
+          {tab === "dashboard" && <Dashboard />}
+          {tab === "engines" && <Engines />}
+          {tab === "collections" && <Collections />}
+          {tab === "data" && <Data />}
+          {tab === "users" && <Users />}
+          {tab === "orgs" && <Orgs />}
+          {tab === "keys" && <Keys />}
+          {tab === "access" && <Access />}
+          {tab === "audit" && <Audit />}
+          {tab === "health" && <Health />}
+        </div>
       </main>
     </div>
   );

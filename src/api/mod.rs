@@ -74,8 +74,9 @@ pub struct TenantContext {
 /// `script-src 'self'` (no `'unsafe-inline'`) blocks reflected/stored inline
 /// script injection — the embedded admin SPA loads its JS from `/assets/*`.
 /// The Scalar API docs page loads its bundle from jsdelivr, so that origin is
-/// allow-listed for scripts/styles/fonts. `object-src 'none'` and
-/// `frame-ancestors 'none'` prevent plugin and clickjacking abuse.
+/// allow-listed for scripts/styles/fonts. `object-src 'none'` blocks plugins.
+/// `frame-ancestors 'self'` lets the admin SPA embed same-origin pages (e.g. the
+/// docs in an iframe) while still blocking cross-origin clickjacking.
 const CSP: &str = "default-src 'self'; \
 script-src 'self' https://cdn.jsdelivr.net; \
 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
@@ -83,7 +84,7 @@ img-src 'self' data: https:; \
 font-src 'self' data: https://cdn.jsdelivr.net; \
 connect-src 'self'; \
 object-src 'none'; \
-frame-ancestors 'none'; \
+frame-ancestors 'self'; \
 base-uri 'self'";
 
 async fn security_headers(mut response: axum::response::Response) -> axum::response::Response {
@@ -92,7 +93,7 @@ async fn security_headers(mut response: axum::response::Response) -> axum::respo
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
     headers.insert(
         "referrer-policy",
         HeaderValue::from_static("strict-origin-when-cross-origin"),

@@ -290,8 +290,8 @@ async fn security_headers_and_csp_present() {
     );
     assert_eq!(
         h.get("x-frame-options").unwrap(),
-        "DENY",
-        "frame-options DENY"
+        "SAMEORIGIN",
+        "frame-options SAMEORIGIN (same-origin embedding of docs allowed; cross-origin blocked)"
     );
     assert!(
         h.get("referrer-policy").is_some(),
@@ -300,7 +300,10 @@ async fn security_headers_and_csp_present() {
     assert!(h.get("strict-transport-security").is_some(), "HSTS present");
     let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
     assert!(csp.contains("object-src 'none'"), "CSP blocks objects");
-    assert!(csp.contains("frame-ancestors 'none'"), "CSP blocks framing");
+    assert!(
+        csp.contains("frame-ancestors 'self'"),
+        "CSP blocks cross-origin framing (allows same-origin for the embedded docs)"
+    );
     // No 'unsafe-inline' in script-src — blocks inline script injection.
     assert!(csp.contains("script-src 'self'"), "scripts locked to self");
     assert!(
