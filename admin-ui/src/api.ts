@@ -81,6 +81,8 @@ export const api = {
     request<{ collections: CollectionRow[] }>("GET", "/v1/vector"),
   listState: () => request<unknown[]>("GET", "/v1/state"),
   config: () => request<Record<string, unknown>>("GET", "/v1/config"),
+  updateConfig: (cfg: Record<string, unknown>) =>
+    request<{ status: string; message: string }>("PUT", "/v1/config", cfg),
   hubIngest: (namespace: string, text: string, metadata?: unknown) =>
     request<{ status: string; doc_id: string }>(
       "POST",
