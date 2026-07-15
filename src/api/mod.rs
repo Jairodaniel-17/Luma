@@ -60,6 +60,11 @@ pub struct TenantContext {
     /// Set when the caller authenticated with a user session token.
     pub user_id: Option<String>,
     pub role: String,
+    /// Passes platform-admin gates (instance-wide settings, cross-tenant admin)
+    /// even while `tenant_id` stays set. The first-registered user (instance
+    /// operator) gets this so instance settings work without making their data
+    /// untenanted, which would break tenant isolation for their collections.
+    pub platform_admin: bool,
     pub permissions: serde_json::Value,
     pub quotas: serde_json::Value,
 }

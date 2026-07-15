@@ -59,7 +59,9 @@ pub fn role_strictly_below(actor: &str, target: &str) -> bool {
 /// a static/admin API key that is not bound to a single org) whose role is
 /// `admin` or `owner`. Guards platform-wide / cross-tenant operations.
 pub fn require_platform_admin(ctx: &TenantContext) -> Result<(), ApiError> {
-    if ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner") {
+    if ctx.platform_admin
+        || (ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner"))
+    {
         Ok(())
     } else {
         Err(ApiError::new(
@@ -422,6 +424,7 @@ mod tests {
             tenant_id: tenant.map(|s| s.to_string()),
             user_id: None,
             role: role.to_string(),
+            platform_admin: false,
             permissions: serde_json::json!({}),
             quotas: serde_json::json!({}),
         }

@@ -58,10 +58,13 @@ pub async fn auth_middleware(
             Ok(Some(record)) => {
                 let mut req = req;
                 req.extensions_mut().insert(AuditKeyId(record.id.clone()));
+                let platform_admin =
+                    record.tenant_id.is_none() && matches!(record.role.as_str(), "admin" | "owner");
                 req.extensions_mut().insert(TenantContext {
                     tenant_id: record.tenant_id.clone(),
                     user_id: None,
                     role: record.role,
+                    platform_admin,
                     permissions: record.permissions,
                     quotas: record.quotas,
                 });
@@ -87,9 +90,11 @@ pub async fn auth_middleware(
             match accounts.validate_session(&token).await {
                 Ok(Some(identity)) => {
                     // Bootstrap super-admin: the first-registered user is the
-                    // instance operator, so their session runs untenanted
-                    // (tenant_id = None) and every platform-admin gate passes.
-                    // Everyone who signs up later stays scoped to their own org.
+                    // instance operator. It KEEPS its own tenant (so its
+                    // collections stay owned/isolated and user creation lands in
+                    // its org), and additionally gets `platform_admin` so
+                    // instance-wide gates (access policy, cross-tenant admin)
+                    // pass. Everyone who signs up later is an ordinary tenant.
                     let is_operator = accounts
                         .is_bootstrap_admin(&identity.user_id)
                         .await
@@ -98,18 +103,11 @@ pub async fn auth_middleware(
                     req.extensions_mut()
                         .insert(AuditKeyId(identity.user_id.clone()));
                     req.extensions_mut().insert(TenantContext {
-                        tenant_id: if is_operator {
-                            None
-                        } else {
-                            Some(identity.org_id.clone())
-                        },
+                        tenant_id: Some(identity.org_id.clone()),
                         user_id: Some(identity.user_id.clone()),
                         role: identity.role.clone(),
-                        permissions: if is_operator {
-                            serde_json::json!({ "allow": "*" })
-                        } else {
-                            serde_json::json!({})
-                        },
+                        platform_admin: is_operator,
+                        permissions: serde_json::json!({}),
                         quotas: serde_json::json!({}),
                     });
                     return Ok(next.run(req).await);
@@ -155,6 +153,7 @@ pub async fn auth_middleware(
             tenant_id: None,
             user_id: None,
             role: "admin".to_string(),
+            platform_admin: true,
             permissions: serde_json::json!({"allow":"*"}),
             quotas: serde_json::json!({"storage_bytes":"unlimited","qps":"unlimited"}),
         });
