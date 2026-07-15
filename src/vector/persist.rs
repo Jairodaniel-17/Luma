@@ -65,6 +65,10 @@ fn default_ivf_retrain_min_vectors() -> usize {
     DEFAULT_IVF_RETRAIN_MIN_VECTORS
 }
 
+fn default_diskann_last_built_upsert() -> u64 {
+    0
+}
+
 #[derive(Clone)]
 pub struct CollectionLayout {
     pub dir: PathBuf,
@@ -137,6 +141,8 @@ pub struct Manifest {
     pub ivf_last_trained_upsert: u64,
     #[serde(default)]
     pub disk_index: DiskIndexManifest,
+    #[serde(default = "default_diskann_last_built_upsert")]
+    pub diskann_last_built_upsert: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -250,6 +256,7 @@ impl Manifest {
             ivf_retrain_min_vectors: default_ivf_retrain_min_vectors(),
             ivf_last_trained_upsert: 0,
             disk_index: DiskIndexManifest::default(),
+            diskann_last_built_upsert: 0,
         }
     }
 

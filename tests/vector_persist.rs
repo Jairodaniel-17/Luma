@@ -827,3 +827,88 @@ async fn vector_diskann_search_roundtrip() {
     assert_eq!(hits[0].id, "north");
     assert_eq!(hits[0].meta.as_ref().unwrap()["dir"], "north");
 }
+
+#[tokio::test]
+async fn vector_diskann_auto_builds_on_disk_graph() {
+    // A DiskANN collection should build (and keep rebuilding) its on-disk graph
+    // automatically as vectors are inserted, with NO explicit build call.
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_string_lossy().to_string();
+    let mut config = config_with_dir(&data_dir);
+    config.index_kind = "DISKANN".to_string();
+    // Small thresholds so the test is fast: first build at 4 live vectors, and
+    // rebuild on every subsequent upsert (delta gate = 1) so the graph stays
+    // fresh through the last insert.
+    config.diskann_auto_build_min_vectors = 4;
+    config.diskann_rebuild_min_deltas = 1;
+
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    engine
+        .create_vector_collection("docs", 3, Metric::Cosine)
+        .unwrap();
+
+    let vectors = [
+        ("north", [1.0f32, 0.0, 0.0]),
+        ("east", [0.0, 1.0, 0.0]),
+        ("west", [0.0, -1.0, 0.0]),
+        ("up", [0.0, 0.0, 1.0]),
+        ("down", [0.0, 0.0, -1.0]),
+        ("south", [-1.0, 0.0, 0.0]),
+    ];
+    for (id, v) in vectors.iter() {
+        engine
+            .vector_upsert(
+                "docs",
+                id,
+                VectorItem {
+                    vector: v.to_vec(),
+                    meta: json!({ "dir": id }),
+                    mmap_offset: None,
+                },
+            )
+            .unwrap();
+    }
+
+    // No explicit vector_build_disk_index call — the graph must exist anyway.
+    let status = engine.vector_disk_index_status("docs").unwrap();
+    assert!(
+        status.available && !status.graph_files.is_empty(),
+        "disk index should have auto-built without an explicit build call"
+    );
+
+    // Search still returns the correct top-1 for a known vector.
+    let hits = engine
+        .vector_search(
+            "docs",
+            SearchRequest {
+                vector: vec![1.0, 0.0, 0.0],
+                k: 1,
+                options: SearchOptions {
+                    filters: None,
+                    filter: None,
+                    min_score: None,
+                    include_meta: true,
+                    allowed_ids: None,
+                },
+            },
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "north");
+
+    drop(engine);
+
+    // The persisted manifest records the auto-build.
+    let manifest = read_manifest_json(&data_dir, "docs");
+    assert!(
+        !manifest["disk_index"]["graph_files"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "manifest should record the auto-built graph files"
+    );
+    assert!(
+        manifest["diskann_last_built_upsert"].as_u64().unwrap() > 0,
+        "diskann_last_built_upsert marker should be set after auto-build"
+    );
+}
