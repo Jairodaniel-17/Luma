@@ -19,6 +19,7 @@ import {
   Radio,
   Image as ImageIcon,
   Search,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -43,6 +44,7 @@ type Tab =
   | "orgs"
   | "keys"
   | "access"
+  | "config"
   | "audit"
   | "health"
   | "docs";
@@ -56,6 +58,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "orgs", label: "Organizaciones" },
   { id: "keys", label: "API Keys" },
   { id: "access", label: "Acceso" },
+  { id: "config", label: "Configuración" },
   { id: "audit", label: "Auditoría" },
   { id: "health", label: "Salud" },
 ];
@@ -70,6 +73,7 @@ const ICONS: Record<string, LucideIcon> = {
   orgs: Building2,
   keys: KeyRound,
   access: ShieldCheck,
+  config: Settings,
   audit: ScrollText,
   health: Activity,
   storage: HardDrive,
@@ -223,6 +227,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           {tab === "orgs" && <Orgs />}
           {tab === "keys" && <Keys />}
           {tab === "access" && <Access />}
+          {tab === "config" && <Configuration />}
           {tab === "audit" && <Audit />}
           {tab === "health" && <Health />}
         </div>
@@ -673,6 +678,85 @@ function Access() {
         <button className="primary" disabled={busy} type="submit">{busy ? "…" : "Guardar política"}</button>
         {msg && <div className={msg === "Guardado." ? "card notice" : "error"} style={{ marginTop: 14, marginBottom: 0 }}>{msg}</div>}
       </form>
+    </div>
+  );
+}
+
+/* --- Configuración (luma.toml en caliente) -------------------------------- */
+function Configuration() {
+  const { data, error } = useAsync(() => api.config());
+  const [cfg, setCfg] = useState<Record<string, unknown> | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (data && !cfg) setCfg({ ...data }); }, [data, cfg]);
+
+  const set = (k: string, v: unknown) => setCfg((c) => ({ ...(c || {}), [k]: v }));
+  const str = (k: string) => String(cfg?.[k] ?? "");
+  const num = (k: string) => (cfg?.[k] as number) ?? 0;
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (!cfg) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api.updateConfig(cfg);
+      setMsg(r.message || "Guardado.");
+    } catch (err) { setMsg((err as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  if (error) return <div><PageHead title="Configuración" /><ErrorBox msg={error} /></div>;
+  if (!cfg) return <div><PageHead title="Configuración" /><p className="muted">Cargando…</p></div>;
+
+  return (
+    <div>
+      <PageHead title="Configuración" tag="/v1/config" desc="Ajustes de la instancia (luma.toml). Los cambios se guardan y requieren reiniciar el servidor para aplicarse." />
+
+      <div className="card">
+        <h3>Motor vectorial</h3>
+        <label className="field" style={{ maxWidth: 320 }}>
+          <span>Índice por defecto para nuevas colecciones</span>
+          <select value={str("index_kind")} onChange={(e) => set("index_kind", e.target.value)}>
+            <option value="HNSW">HNSW — máxima precisión</option>
+            <option value="IVF_FLAT_Q8">IVF_FLAT_Q8 — equilibrio</option>
+            <option value="DISKANN">DISKANN — bajo consumo / escala</option>
+          </select>
+        </label>
+      </div>
+
+      <div className="card">
+        <h3>Embeddings</h3>
+        <div className="row" style={{ marginBottom: 0 }}>
+          <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Proveedor</span>
+            <input value={str("embedding_provider")} placeholder="none / openai / cohere / azure / ollama" onChange={(e) => set("embedding_provider", e.target.value)} /></label>
+          <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Modelo</span>
+            <input value={str("embedding_model")} placeholder="text-embedding-3-small" onChange={(e) => set("embedding_model", e.target.value)} /></label>
+          <label className="field" style={{ width: 110 }}><span>Dimensión</span>
+            <input type="number" value={num("embedding_dim")} onChange={(e) => set("embedding_dim", Number(e.target.value) || 0)} /></label>
+        </div>
+        <label className="field" style={{ marginTop: 14, marginBottom: 0 }}><span>URL del proveedor</span>
+          <input value={str("embedding_url")} placeholder="https://api.openai.com/v1/embeddings" onChange={(e) => set("embedding_url", e.target.value)} /></label>
+      </div>
+
+      <div className="card">
+        <h3>Modelo de lenguaje (LLM)</h3>
+        <div className="row" style={{ marginBottom: 0 }}>
+          <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Proveedor</span>
+            <input value={str("llm_provider")} placeholder="none / openai / …" onChange={(e) => set("llm_provider", e.target.value)} /></label>
+          <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Modelo</span>
+            <input value={str("llm_model")} placeholder="gpt-4o-mini" onChange={(e) => set("llm_model", e.target.value)} /></label>
+        </div>
+        <label className="field" style={{ marginTop: 14, marginBottom: 0 }}><span>URL del proveedor</span>
+          <input value={str("llm_url")} placeholder="https://api.openai.com/v1/chat/completions" onChange={(e) => set("llm_url", e.target.value)} /></label>
+      </div>
+
+      <form onSubmit={save}>
+        <button className="primary" disabled={busy} type="submit">{busy ? "…" : "Guardar configuración"}</button>
+      </form>
+      {msg && <div className={msg.toLowerCase().includes("restart") || msg.includes("reinic") || msg === "Guardado." ? "card notice" : "error"} style={{ marginTop: 14 }}>{msg}</div>}
+      <p className="perm-note">
+        Las <strong>claves de API</strong> (embeddings/LLM) no se editan aquí: se cargan desde variables de entorno (<code>EMBEDDING_API_KEY</code>, <code>LLM_API_KEY</code>) por seguridad y no se guardan en <code>luma.toml</code>.
+      </p>
     </div>
   );
 }
