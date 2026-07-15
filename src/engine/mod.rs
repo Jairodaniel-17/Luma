@@ -128,6 +128,7 @@ impl Engine {
         engine.start_ttl_task_if_runtime();
         engine.start_wal_flush_task_if_runtime();
         engine.start_hnsw_compaction_task_if_runtime();
+        engine.start_diskann_maintenance_task_if_runtime();
         engine.start_process_metrics_task_if_runtime();
 
         Ok(engine)
@@ -468,6 +469,51 @@ impl Engine {
                     }
                     _ = shutdown.cancelled() => {
                         tracing::info!("HNSW compaction task stopping");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Periodically (re)build DiskANN on-disk graphs off the write path.
+    ///
+    /// The graph build is O(N log N) and used to run inline inside the triggering
+    /// insert, stalling it for the whole build. This task moves it off the write
+    /// path: every few seconds it snapshots each DiskANN collection under a brief
+    /// lock, builds the graph with no lock held, then swaps it in under a brief
+    /// lock (see `VectorStore::maintain_disk_indexes`). Whether a rebuild is due is
+    /// gated by the same `diskann_auto_build_min_vectors` / `diskann_rebuild_min_deltas`
+    /// thresholds the inline path used, so ingest never pays the build cost.
+    fn start_diskann_maintenance_task_if_runtime(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        let shutdown = self.0.shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        let engine = Engine(inner);
+                        let res = tokio::task::spawn_blocking(move || {
+                            engine.0.vectors.maintain_disk_indexes()
+                        })
+                        .await;
+                        match res {
+                            Ok(built) if !built.is_empty() => {
+                                tracing::info!(collections = ?built, "DiskANN background graph build completed");
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                tracing::warn!(error = %err, "DiskANN maintenance task failed");
+                            }
+                        }
+                    }
+                    _ = shutdown.cancelled() => {
+                        tracing::info!("DiskANN maintenance task stopping");
                         break;
                     }
                 }

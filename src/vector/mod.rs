@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 
 use rayon::prelude::*;
@@ -43,6 +44,9 @@ struct Inner {
     data_dir: Option<PathBuf>,
     collections: dashmap::DashMap<String, Arc<RwLock<Collection>>>,
     settings: VectorSettings,
+    /// Guards the background DiskANN maintenance pass so at most one build runs
+    /// at a time (see `maintain_disk_indexes`). Set on entry, cleared on exit.
+    diskann_maintaining: AtomicBool,
 }
 
 const DEFAULT_SEGMENT_MAX: usize = 8_192;
@@ -456,6 +460,7 @@ impl VectorStore {
             data_dir: None,
             collections: dashmap::DashMap::new(),
             settings,
+            diskann_maintaining: AtomicBool::new(false),
         }))
     }
 
@@ -503,6 +508,7 @@ impl VectorStore {
                 .map(|(k, v)| (k, Arc::new(RwLock::new(v))))
                 .collect(),
             settings,
+            diskann_maintaining: AtomicBool::new(false),
         })))
     }
 
@@ -1225,6 +1231,149 @@ impl VectorStore {
 
         compacted
     }
+
+    /// Background DiskANN graph (re)build, off the write path.
+    ///
+    /// For every DiskANN collection whose rebuild condition holds (first build at
+    /// `diskann_auto_build_min_vectors`, rebuild every `diskann_rebuild_min_deltas`
+    /// upserts — see `collection_diskann_needs_build`) this runs a three-phase
+    /// build that never holds the collection lock across the CPU-heavy work:
+    ///   1. **Snapshot** under a brief read lock: collect the sorted `(id, q8)`
+    ///      node set, params, metric and the current `upsert_count`.
+    ///   2. **Build** with NO lock held: construct the Vamana graph and write it
+    ///      atomically to disk (`diskann::build_graph_to_file`).
+    ///   3. **Swap** under a brief write lock: point the manifest at the new graph
+    ///      file, reload the (paged, cheap) `DiskGraph`, set the last-built marker
+    ///      to the snapshot's `upsert_count`, and persist the manifest.
+    ///
+    /// Vectors inserted between the snapshot and the swap are intentionally not in
+    /// the new graph; they are picked up by the next rebuild (the same staleness
+    /// window the periodic rebuild always had). A process-wide flag ensures only
+    /// one maintenance pass runs at a time. Returns the collections rebuilt.
+    pub fn maintain_disk_indexes(&self) -> Vec<String> {
+        // Throttle: only one maintenance pass at a time. The guard clears the flag
+        // on every exit path (including panics inside spawn_blocking).
+        if self
+            .0
+            .diskann_maintaining
+            .swap(true, AtomicOrdering::AcqRel)
+        {
+            return Vec::new();
+        }
+        struct FlagGuard<'a>(&'a AtomicBool);
+        impl Drop for FlagGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, AtomicOrdering::Release);
+            }
+        }
+        let _guard = FlagGuard(&self.0.diskann_maintaining);
+
+        let mut built = Vec::new();
+        let names: Vec<String> = self.0.collections.iter().map(|r| r.key().clone()).collect();
+        for name in names {
+            let Some(c_arc) = self.0.collections.get(&name) else {
+                continue;
+            };
+
+            // Phase 1: snapshot inputs under a brief read lock.
+            let snapshot = {
+                let c = c_arc.read();
+                if !collection_diskann_needs_build(&c) {
+                    None
+                } else {
+                    c.layout.clone().map(|layout| {
+                        let mut nodes: Vec<(String, QuantizedVec)> = c
+                            .items
+                            .keys()
+                            .filter_map(|id| {
+                                c.get_q8_codes(id).map(|(scale, codes)| {
+                                    (id.to_string(), QuantizedVec::new(scale, codes.to_vec()))
+                                })
+                            })
+                            .collect();
+                        nodes.sort_by(|a, b| a.0.cmp(&b.0));
+                        DiskannBuildSnapshot {
+                            layout,
+                            nodes,
+                            metric: c.metric,
+                            params: c.effective_diskann_params(),
+                            simd_enabled: c.settings.simd_enabled,
+                            upsert_count: c.manifest.upsert_count,
+                        }
+                    })
+                }
+            };
+            let Some(snap) = snapshot else {
+                continue;
+            };
+
+            // Phase 2: CPU-heavy build with NO collection lock held.
+            let graph = match diskann::build_graph_to_file(
+                &snap.layout,
+                &snap.nodes,
+                snap.metric,
+                &snap.params,
+                snap.simd_enabled,
+            ) {
+                Ok(graph) => graph,
+                Err(err) => {
+                    tracing::warn!(collection = %name, error = %err, "DiskANN background build failed");
+                    continue;
+                }
+            };
+
+            // Phase 3: swap the manifest over to the new graph under a brief write lock.
+            let mut c = c_arc.write();
+            diskann::apply_built_graph(&mut c.manifest, &graph);
+            if let Err(err) = c.load_disk_graph() {
+                tracing::warn!(collection = %name, error = %err, "DiskANN graph reload failed");
+                continue;
+            }
+            c.manifest.diskann_last_built_upsert = snap.upsert_count;
+            if let Err(err) = c.persist_manifest() {
+                tracing::warn!(collection = %name, error = %err, "DiskANN manifest persist failed");
+                continue;
+            }
+            built.push(name);
+        }
+        built
+    }
+}
+
+/// Inputs for a single DiskANN background build, snapshotted under a read lock so
+/// the CPU-heavy build can run with no collection lock held.
+struct DiskannBuildSnapshot {
+    layout: CollectionLayout,
+    nodes: Vec<(String, QuantizedVec)>,
+    metric: Metric,
+    params: DiskAnnBuildParams,
+    simd_enabled: bool,
+    upsert_count: u64,
+}
+
+/// Whether a DiskANN collection's on-disk graph should be (re)built now. Mirrors
+/// the thresholds the inline build used: first build once there are at least
+/// `diskann_auto_build_min_vectors` live vectors, then rebuild whenever
+/// `upsert_count` has drifted by `diskann_rebuild_min_deltas` since the last
+/// build.
+fn collection_diskann_needs_build(c: &Collection) -> bool {
+    if !c.settings.index_kind.is_diskann() || c.layout.is_none() {
+        return false;
+    }
+    let min_build = c.settings.diskann_auto_build_min_vectors.max(1);
+    let rebuild_min = c.settings.diskann_rebuild_min_deltas.max(1) as u64;
+    let has_graph = !c.manifest.disk_index.graph_files.is_empty();
+    let last_built = c.manifest.diskann_last_built_upsert;
+    let delta = c.manifest.upsert_count.saturating_sub(last_built);
+    if has_graph {
+        // Graph exists but has drifted past the rebuild threshold.
+        delta >= rebuild_min
+    } else {
+        // No graph yet: build once we have enough vectors. `last_built == 0` means
+        // we've never built, so build immediately; otherwise throttle on the delta
+        // gate so post-invalidation inserts don't rebuild on every insert.
+        c.items.len() >= min_build && (last_built == 0 || delta >= rebuild_min)
+    }
 }
 
 impl Default for VectorStore {
@@ -1654,57 +1803,6 @@ impl Collection {
         Ok(())
     }
 
-    /// Auto-maintain the DiskANN on-disk graph, mirroring `maybe_train_ivf`.
-    ///
-    /// The on-disk graph is invalidated by every upsert/delete (see
-    /// `invalidate_disk_index_if_needed`), so without this a DiskANN collection
-    /// only has a graph immediately after an explicit `build_disk_index` call and
-    /// otherwise falls back to the IVF path. This rebuilds it on two triggers:
-    ///   (a) no graph exists yet and we have >= `diskann_auto_build_min_vectors`
-    ///       live vectors (first build), throttled by the delta gate below so a
-    ///       stream of inserts — each of which invalidates the graph — can't fire
-    ///       a rebuild every insert; or
-    ///   (b) a graph exists but `upsert_count` has drifted by
-    ///       >= `diskann_rebuild_min_deltas` since the last build.
-    ///
-    /// ponytail: the build runs inline and stalls the one insert that triggers
-    /// it (exactly like the IVF retrain above). That's the ceiling for this
-    /// increment; the upgrade path is a background per-segment build off the
-    /// write path so inserts never pay the full-graph rebuild cost.
-    fn maybe_rebuild_disk_index(&mut self) -> Result<(), VectorError> {
-        if !self.settings.index_kind.is_diskann() || self.layout.is_none() {
-            return Ok(());
-        }
-        let min_build = self.settings.diskann_auto_build_min_vectors.max(1);
-        let rebuild_min = self.settings.diskann_rebuild_min_deltas.max(1) as u64;
-        let has_graph = !self.manifest.disk_index.graph_files.is_empty();
-        let last_built = self.manifest.diskann_last_built_upsert;
-        let delta = self.manifest.upsert_count.saturating_sub(last_built);
-
-        let should_build = if has_graph {
-            // (b) graph exists but has drifted past the rebuild threshold.
-            delta >= rebuild_min
-        } else {
-            // (a) no graph yet: build once we have enough vectors. `last_built == 0`
-            // means we've never built, so build immediately; otherwise throttle on
-            // the same delta gate so post-invalidation inserts don't rebuild every
-            // insert.
-            self.items.len() >= min_build && (last_built == 0 || delta >= rebuild_min)
-        };
-        if !should_build {
-            return Ok(());
-        }
-
-        let params = self.effective_diskann_params();
-        // build_disk_index already updates the manifest.disk_index + reloads the
-        // graph (self.disk_graph) and persists the manifest.
-        self.build_disk_index(params)?;
-        self.manifest.diskann_last_built_upsert = self.manifest.upsert_count;
-        self.persist_manifest()
-            .map_err(|_| VectorError::Persistence)?;
-        Ok(())
-    }
-
     fn try_train_ivf(&mut self, force: bool) -> Result<bool, VectorError> {
         if !self.settings.ivf_enabled() {
             return Ok(false);
@@ -2070,7 +2168,6 @@ impl Collection {
 
         if mode.is_none() {
             self.maybe_train_ivf()?;
-            self.maybe_rebuild_disk_index()?;
         }
 
         Ok(())
@@ -2103,7 +2200,6 @@ impl Collection {
             }
         }
         self.maybe_train_ivf()?;
-        self.maybe_rebuild_disk_index()?;
         Ok(())
     }
 
