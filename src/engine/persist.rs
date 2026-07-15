@@ -1,6 +1,8 @@
 use crate::engine::events::EventRecord;
 use crate::engine::EventBus;
 use crate::vector::VectorStore;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use crc32fast::Hasher;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -65,7 +67,16 @@ struct Inner {
     floor_gated: AtomicBool,
 }
 
-const WAL_RECORD_VERSION: u8 = 1;
+/// Legacy WAL record: the event (including any `data.vector` as a JSON number
+/// array) is stored inline and the CRC covers the whole serialized event. Still
+/// decoded for back-compat with logs written before the compact encoding.
+const WAL_RECORD_VERSION_V1: u8 = 1;
+/// Current WAL record: a top-level numeric `data.vector` array is hoisted out of
+/// the event and stored once as a compact little-endian f32 blob (base64), so a
+/// dim-768 vector costs ~4 KB on disk instead of ~15 KB of JSON numbers. The
+/// vector STAYS in the (logical) event — replay reconstructs it identically — so
+/// crash-consistency is unchanged; only the on-disk encoding is denser.
+const WAL_RECORD_VERSION: u8 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -87,6 +98,12 @@ struct WalEnvelope {
     offset: u64,
     crc32: u32,
     event: EventRecord,
+    /// v2+: the event's `data.vector` hoisted out as base64 of raw little-endian
+    /// f32 bytes. `None` for records with no numeric vector (state events, deletes)
+    /// and for legacy v1 records (vector stays inline in `event`). Absent on disk
+    /// when `None`, so v1 lines still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vec_b64: Option<String>,
 }
 
 impl Persist {
@@ -560,31 +577,107 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Hoist a top-level numeric `data.vector` array out of the event, returning the
+/// event with that key removed plus the vector as raw little-endian f32 bytes.
+/// Events with no such array (state ops, deletes, collection-created) are returned
+/// unchanged with `None`; the vector stays inline for anything not a pure number
+/// array (nothing to compact safely).
+fn split_vector(event: &EventRecord) -> (EventRecord, Option<Vec<u8>>) {
+    let Some(arr) = event.data.get("vector").and_then(|v| v.as_array()) else {
+        return (event.clone(), None);
+    };
+    let mut bytes = Vec::with_capacity(arr.len() * 4);
+    for v in arr {
+        let Some(f) = v.as_f64() else {
+            // Not a homogeneous number array — leave it inline rather than lose data.
+            return (event.clone(), None);
+        };
+        bytes.extend_from_slice(&(f as f32).to_le_bytes());
+    }
+    let mut stripped = event.clone();
+    if let Some(obj) = stripped.data.as_object_mut() {
+        obj.remove("vector");
+    }
+    (stripped, Some(bytes))
+}
+
+/// Inverse of `split_vector`: rebuild the JSON f32 array from raw little-endian
+/// bytes and inject it back under `data.vector`, restoring the exact logical
+/// event replay/consumers expect. f32 -> f64 -> f32 is lossless, so the values
+/// round-trip identically.
+fn reinject_vector(event: &mut EventRecord, bytes: &[u8]) {
+    let mut arr = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let value = serde_json::Number::from_f64(f as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+        arr.push(value);
+    }
+    if let Some(obj) = event.data.as_object_mut() {
+        obj.insert("vector".to_string(), serde_json::Value::Array(arr));
+    }
+}
+
 fn encode_wal_record(event: &EventRecord) -> std::io::Result<Vec<u8>> {
-    let payload = serde_json::to_vec(event)?;
+    let (stripped, vec_bytes) = split_vector(event);
+    // CRC covers the stored (vector-stripped) event JSON plus the raw vector
+    // bytes. Both are byte-for-byte reproducible on decode (the event is stored
+    // verbatim; the bytes come from the base64 blob), so integrity does not
+    // depend on JSON key ordering of a re-inserted vector.
     let mut hasher = Hasher::new();
-    hasher.update(&payload);
+    hasher.update(&serde_json::to_vec(&stripped)?);
+    if let Some(bytes) = &vec_bytes {
+        hasher.update(bytes);
+    }
     let envelope = WalEnvelope {
         version: WAL_RECORD_VERSION,
         offset: event.offset,
         crc32: hasher.finalize(),
-        event: event.clone(),
+        event: stripped,
+        vec_b64: vec_bytes.map(|b| BASE64.encode(b)),
     };
     serde_json::to_vec(&envelope).map_err(std::io::Error::other)
 }
 
 fn decode_wal_record(line: &str) -> Option<EventRecord> {
     if let Ok(envelope) = serde_json::from_str::<WalEnvelope>(line) {
-        if envelope.version != WAL_RECORD_VERSION || envelope.offset != envelope.event.offset {
+        if envelope.offset != envelope.event.offset {
             return None;
         }
-        let payload = serde_json::to_vec(&envelope.event).ok()?;
-        let mut hasher = Hasher::new();
-        hasher.update(&payload);
-        if hasher.finalize() != envelope.crc32 {
-            return None;
+        if envelope.version == WAL_RECORD_VERSION_V1 {
+            // Legacy: vector (if any) is inline; a v1 line never carries vec_b64.
+            if envelope.vec_b64.is_some() {
+                return None;
+            }
+            let payload = serde_json::to_vec(&envelope.event).ok()?;
+            let mut hasher = Hasher::new();
+            hasher.update(&payload);
+            if hasher.finalize() != envelope.crc32 {
+                return None;
+            }
+            return Some(envelope.event);
         }
-        return Some(envelope.event);
+        if envelope.version == WAL_RECORD_VERSION {
+            let vec_bytes = match &envelope.vec_b64 {
+                Some(s) => Some(BASE64.decode(s).ok()?),
+                None => None,
+            };
+            let mut hasher = Hasher::new();
+            hasher.update(&serde_json::to_vec(&envelope.event).ok()?);
+            if let Some(bytes) = &vec_bytes {
+                hasher.update(bytes);
+            }
+            if hasher.finalize() != envelope.crc32 {
+                return None;
+            }
+            let mut event = envelope.event;
+            if let Some(bytes) = &vec_bytes {
+                reinject_vector(&mut event, bytes);
+            }
+            return Some(event);
+        }
+        return None;
     }
     serde_json::from_str::<EventRecord>(line).ok()
 }
@@ -595,6 +688,7 @@ mod tests {
         decode_wal_record, encode_wal_record, segment_max_offset, Persist, Snapshot, WalSyncMode,
     };
     use crate::engine::events::EventRecord;
+    use crc32fast::Hasher;
     use tempfile::tempdir;
 
     fn sample_event(offset: u64) -> EventRecord {
@@ -726,5 +820,119 @@ mod tests {
         let mut line = String::from_utf8(encoded).unwrap();
         line = line.replace("\"offset\":9", "\"offset\":99");
         assert!(decode_wal_record(&line).is_none());
+    }
+
+    fn sample_vector_event(offset: u64, dim: usize) -> EventRecord {
+        let vector: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        EventRecord {
+            offset,
+            ts_ms: 42,
+            event_type: "vector_upserted".to_string(),
+            data: serde_json::json!({
+                "collection": "docs",
+                "id": format!("doc-{offset}"),
+                "vector": vector,
+                "meta": {"kind": "primary"},
+            }),
+        }
+    }
+
+    #[test]
+    fn wal_v2_vector_record_roundtrips_and_is_compact() {
+        let dim = 768;
+        let event = sample_vector_event(5, dim);
+        let encoded = encode_wal_record(&event).unwrap();
+        let line = String::from_utf8(encoded).unwrap();
+
+        // The vector is stored once as a compact base64 blob, not an inline JSON
+        // number array. This is the whole point: ~4 KB instead of ~15 KB.
+        assert!(
+            line.contains("vec_b64"),
+            "vector must be compacted to base64"
+        );
+        assert!(
+            line.len() < 6000,
+            "compact record should be well under the ~15 KB JSON-array size, got {}",
+            line.len()
+        );
+
+        // The logical event replay sees is byte-identical to what was written:
+        // same offset, type, data (vector reconstructed with identical values).
+        let decoded = decode_wal_record(&line).expect("v2 record must decode");
+        assert_eq!(decoded.offset, event.offset);
+        assert_eq!(decoded.event_type, event.event_type);
+        assert_eq!(decoded.data, event.data);
+        // And the reconstructed vector deserializes back to the exact f32 values.
+        let got: Vec<f32> =
+            serde_json::from_value(decoded.data.get("vector").cloned().unwrap()).unwrap();
+        let want: Vec<f32> =
+            serde_json::from_value(event.data.get("vector").cloned().unwrap()).unwrap();
+        assert_eq!(got, want);
+    }
+
+    /// Build a record byte-for-byte the way the pre-change (v1) writer did: the
+    /// full event inline (vector as a JSON number array), CRC over the whole
+    /// serialized event, and no `vec_b64` field.
+    fn encode_legacy_v1(event: &EventRecord) -> String {
+        let payload = serde_json::to_vec(event).unwrap();
+        let mut hasher = Hasher::new();
+        hasher.update(&payload);
+        let legacy = serde_json::json!({
+            "version": 1,
+            "offset": event.offset,
+            "crc32": hasher.finalize(),
+            "event": event,
+        });
+        serde_json::to_string(&legacy).unwrap()
+    }
+
+    #[test]
+    fn wal_v1_legacy_vector_record_still_decodes() {
+        // Exact-representable f32 values so the JSON number array round-trips
+        // byte-identically (this is the shape of a legacy record the old decoder
+        // could actually verify). The v1 code path must still accept it.
+        let event = EventRecord {
+            offset: 11,
+            ts_ms: 42,
+            event_type: "vector_upserted".to_string(),
+            data: serde_json::json!({
+                "collection": "docs",
+                "id": "doc-11",
+                "vector": [1.0f32, -0.5, 0.25, -0.75, 0.125, 0.0],
+                "meta": {"kind": "primary"},
+            }),
+        };
+        let line = encode_legacy_v1(&event);
+        // Sanity: this is the OLD, fat encoding (inline number array, no blob).
+        assert!(!line.contains("vec_b64"));
+
+        let decoded = decode_wal_record(&line).expect("legacy v1 record must still decode");
+        assert_eq!(decoded.offset, event.offset);
+        assert_eq!(decoded.data, event.data);
+    }
+
+    #[test]
+    fn wal_v1_legacy_state_record_still_decodes() {
+        // Non-vector legacy record: proves the v1 back-compat path is exercised
+        // for the ordinary event shape regardless of the vector encoding change.
+        let event = sample_event(21);
+        let line = encode_legacy_v1(&event);
+        assert!(!line.contains("vec_b64"));
+        let decoded = decode_wal_record(&line).expect("legacy v1 state record must decode");
+        assert_eq!(decoded.offset, 21);
+        assert_eq!(decoded.data, event.data);
+    }
+
+    #[test]
+    fn wal_v2_corrupt_vector_blob_is_rejected() {
+        let event = sample_vector_event(7, 32);
+        let line = String::from_utf8(encode_wal_record(&event).unwrap()).unwrap();
+        // Flip a character inside the base64 vector blob; the CRC covers the raw
+        // vector bytes, so a corrupted vector must be detected and dropped.
+        let idx = line.find("vec_b64").unwrap() + 12;
+        let mut bytes = line.into_bytes();
+        bytes[idx] = if bytes[idx] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(bytes).unwrap();
+        assert!(decode_wal_record(&tampered).is_none());
     }
 }
