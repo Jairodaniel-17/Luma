@@ -213,6 +213,14 @@ pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: v
 .access-state.open .dot { background: var(--success); }
 .access-state.restricted .dot { background: var(--warning); }
 
+/* ---- Matriz de permisos por rol ------------------------------------------ */
+.perm-table th:not(:first-child), .perm-table td:not(:first-child) { text-align: center; width: 88px; }
+.perm-cap { color: var(--text); font-weight: 500; }
+.perm-yes { color: var(--text); }
+.perm-no { color: var(--disabled); }
+.perm-note { color: var(--muted); font-size: var(--fz-sm); margin-top: 12px; line-height: 1.5; }
+.section-label { font-size: 16px; font-weight: 600; margin: 32px 0 12px; }
+
 @media (max-width: 800px) {
   .app { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--divider); }
