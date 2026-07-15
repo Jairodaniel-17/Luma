@@ -160,14 +160,21 @@ impl AuthStore {
         Ok(None)
     }
 
-    pub async fn list_keys(&self) -> anyhow::Result<Vec<ApiKeyRecord>> {
-        let rows = self
-            .sqlite
-            .query(
+    /// List API keys. `tenant = None` returns every key (platform admin);
+    /// `Some(org)` returns only that tenant's keys (tenant-scoped self-service).
+    pub async fn list_keys(&self, tenant: Option<&str>) -> anyhow::Result<Vec<ApiKeyRecord>> {
+        let (sql, params) = match tenant {
+            Some(t) => (
+                "SELECT * FROM sys_api_keys WHERE tenant_id = ? ORDER BY created_at_ms DESC"
+                    .to_string(),
+                vec![serde_json::json!(t)],
+            ),
+            None => (
                 "SELECT * FROM sys_api_keys ORDER BY created_at_ms DESC".to_string(),
                 vec![],
-            )
-            .await?;
+            ),
+        };
+        let rows = self.sqlite.query(sql, params).await?;
 
         let mut keys = Vec::new();
         for mut row in rows {
@@ -193,14 +200,21 @@ impl AuthStore {
         Ok(keys)
     }
 
-    pub async fn revoke_key(&self, id: &str) -> anyhow::Result<bool> {
-        let affected = self
-            .sqlite
-            .execute(
+    /// Revoke a key by id. `tenant = None` revokes any key (platform admin);
+    /// `Some(org)` only revokes when the key belongs to that tenant, so an owner
+    /// can never revoke another organization's key.
+    pub async fn revoke_key(&self, id: &str, tenant: Option<&str>) -> anyhow::Result<bool> {
+        let (sql, params) = match tenant {
+            Some(t) => (
+                "DELETE FROM sys_api_keys WHERE id = ? AND tenant_id = ?".to_string(),
+                vec![serde_json::json!(id), serde_json::json!(t)],
+            ),
+            None => (
                 "DELETE FROM sys_api_keys WHERE id = ?".to_string(),
                 vec![serde_json::json!(id)],
-            )
-            .await?;
+            ),
+        };
+        let affected = self.sqlite.execute(sql, params).await?;
         Ok(affected > 0)
     }
 

@@ -25,8 +25,9 @@ pub async fn list_keys(
     State(state): State<AppState>,
     Extension(ctx): Extension<TenantContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Platform-wide: lists every tenant's keys, so it must be a platform admin.
-    require_platform_admin(&ctx)?;
+    // An org admin/owner lists the keys of their own tenant; a platform admin
+    // (no tenant) lists every tenant's keys.
+    require_role(&ctx, "admin")?;
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -34,7 +35,10 @@ pub async fn list_keys(
             "auth store not enabled",
         ));
     };
-    let keys = store.list_keys().await.map_err(|err| {
+    let is_platform_admin =
+        ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner");
+    let filter = if is_platform_admin { None } else { ctx.tenant_id.as_deref() };
+    let keys = store.list_keys(filter).await.map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
@@ -118,9 +122,9 @@ pub async fn revoke_key(
     Extension(ctx): Extension<TenantContext>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Revokes any key by global id (no tenant predicate in the store), so it is
-    // a platform-wide operation.
-    require_platform_admin(&ctx)?;
+    // An org admin/owner may revoke keys of their own tenant only; a platform
+    // admin (no tenant) may revoke any key. The store enforces the tenant match.
+    require_role(&ctx, "admin")?;
     let Some(store) = &state.auth_store else {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -128,7 +132,10 @@ pub async fn revoke_key(
             "auth store not enabled",
         ));
     };
-    let revoked = store.revoke_key(&id).await.map_err(|err| {
+    let is_platform_admin =
+        ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner");
+    let filter = if is_platform_admin { None } else { ctx.tenant_id.as_deref() };
+    let revoked = store.revoke_key(&id, filter).await.map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
