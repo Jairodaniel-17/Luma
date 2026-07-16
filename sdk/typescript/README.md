@@ -122,22 +122,6 @@ const results = await client.doc.find('profiles', {
 });
 ```
 
-## SQL (SQLite)
-
-```typescript
-// SELECT — returns rows + column names
-const { rows } = await client.sql.query(
-  'SELECT id, name FROM users WHERE active = ? LIMIT ?',
-  [true, 10],
-);
-
-// DDL / DML — returns rows_affected
-const { rows_affected } = await client.sql.exec(
-  'UPDATE users SET last_seen = ? WHERE id = ?',
-  [Date.now(), 'user-1'],
-);
-```
-
 ## LumaDatabase hybrid layer
 
 The `db()` namespace handles auto-chunking, embedding generation, and hybrid SQL+vector search behind a simple two-method API.

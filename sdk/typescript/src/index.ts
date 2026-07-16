@@ -9,7 +9,6 @@ export { DocClient } from "./doc.js";
 export { EventsClient } from "./events.js";
 export { HubClient } from "./hub.js";
 export { MemoryClient } from "./memory.js";
-export { SqlClient } from "./sql.js";
 export { StateClient } from "./state.js";
 export { VectorClient } from "./vector.js";
 export { fromLegacyFilter } from "./vector.js";
@@ -81,8 +80,6 @@ export type {
   SearchHit,
   SearchQuery,
   SearchResult,
-  SqlExecResult,
-  SqlQueryResult,
   StateEntry,
   StatePutOptions,
   UpsertFactOptions,

@@ -23,7 +23,6 @@ Sub-clients
 luma.vector   — VectorClient  (collections, CRUD, search, batch, scroll, rerank, aggregate)
 luma.state    — StateClient   (KV store, TTL, CAS, indexes)
 luma.doc      — DocClient     (JSON document store)
-luma.sql      — SqlClient     (raw SQL via embedded SQLite)
 luma.admin    — AdminClient   (backup, audit log)
 luma.auth     — AuthClient    (API key management)
 luma.stream   — StreamClient  (SSE event stream)
@@ -51,7 +50,6 @@ from .exceptions import (
 from .hub import HubClient
 from .memory import MemoryClient
 from .meta import MetaClient
-from .sql import SqlClient
 from .state import StateClient
 from .stream import StreamClient
 from .sync import SyncLuma
@@ -74,7 +72,6 @@ __all__ = [
     "VectorClient",
     "StateClient",
     "DocClient",
-    "SqlClient",
     "HubClient",
     "MemoryClient",
     "MetaClient",
@@ -111,7 +108,6 @@ class Luma:
         self.vector = VectorClient(self._http)
         self.state = StateClient(self._http)
         self.doc = DocClient(self._http)
-        self.sql = SqlClient(self._http)
         self.admin = AdminClient(self._http)
         self.auth = AuthClient(self._http)
         self.stream = StreamClient(self._http)

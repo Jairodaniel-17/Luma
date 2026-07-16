@@ -43,7 +43,6 @@ from .doc import DocClient
 from .hub import HubClient
 from .memory import MemoryClient
 from .meta import MetaClient
-from .sql import SqlClient
 from .state import StateClient
 from .stream import StreamClient
 from .vector import VectorClient
@@ -144,16 +143,6 @@ class _SyncDocClient:
         return self._i.delete(collection, id)
     def find(self, collection: str, filter: Optional[dict] = None, limit: int = 20) -> Any:
         return self._i.find(collection, filter, limit)
-
-
-class _SyncSqlClient:
-    def __init__(self, inner: SqlClient) -> None:
-        self._i = inner
-
-    def query(self, sql: str, params: Optional[list] = None) -> Any:
-        return self._i.query(sql, params)
-    def exec(self, sql: str, params: Optional[list] = None) -> Any:
-        return self._i.exec(sql, params)
 
 
 class _SyncAdminClient:
@@ -279,7 +268,6 @@ class SyncLuma:
         self.vector = _SyncVectorClient(VectorClient(self._http))
         self.state = _SyncStateClient(StateClient(self._http))
         self.doc = _SyncDocClient(DocClient(self._http))
-        self.sql = _SyncSqlClient(SqlClient(self._http))
         self.admin = _SyncAdminClient(AdminClient(self._http))
         self.auth = _SyncAuthClient(AuthClient(self._http))
         self.config = _SyncConfigClient(ConfigClient(self._http))
