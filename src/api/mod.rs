@@ -322,6 +322,9 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/doc/:collection/:id", get(routes_doc::get))
         .route("/v1/doc/:collection/:id", delete(routes_doc::delete))
         .route("/v1/doc/:collection/find", post(routes_doc::find))
+        // Motor de consultas sobre una colección (MetaEngine: SQL/meta). El
+        // handler existía pero no estaba montado — caía al SPA fallback (HTML).
+        .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/v1/blob/:bucket", get(routes_blob::list))
         .route("/v1/blob/:bucket/:key", put(routes_blob::put))
         .route("/v1/blob/:bucket/:key", get(routes_blob::get))

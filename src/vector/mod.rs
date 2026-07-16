@@ -846,7 +846,14 @@ impl VectorStore {
             .get(collection)
             .ok_or(VectorError::CollectionNotFound)?;
         let c = c_arc.read();
-        Ok(c.items.get(id).cloned())
+        // The raw vector is paged out to the mmap store to save RAM, so
+        // `item.vector` is empty for persisted items. Rehydrate it from the mmap
+        // slice so `GET .../get` returns the actual stored vector, not `[]`.
+        Ok(c.items.get(id).map(|item| {
+            let mut out = item.clone();
+            out.vector = c.get_vector_slice(id, item).to_vec();
+            out
+        }))
     }
 
     pub fn apply_event(&self, ev: &crate::engine::EventRecord) -> Result<(), VectorError> {
