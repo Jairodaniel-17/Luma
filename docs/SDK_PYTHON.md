@@ -57,9 +57,8 @@ info = client.vector.info("docs")
 client.doc.put("tickets", "tk_1", {"title": "Bug #1", "severity": "high"})
 client.doc.find("tickets", filter={"severity": "high"})
 
-# SQL (SQLite embebido)
-client.sql.execute("CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT)")
-client.sql.query("SELECT * FROM notes WHERE id = ?", params=[1])
+# Consultas sobre una colección (motor Meta)
+client.meta("tickets").execute({"vector": [/* ... */], "k": 10})
 
 # SSE stream
 for event in client.stream.events(since=0, types="state_updated"):

@@ -6,7 +6,6 @@ import { EventsClient } from "./events.js";
 import { HttpClient } from "./http.js";
 import { HubClient } from "./hub.js";
 import { MemoryClient } from "./memory.js";
-import { SqlClient } from "./sql.js";
 import { StateClient } from "./state.js";
 import { VectorClient } from "./vector.js";
 import type { LumaClientOptions } from "./types.js";
@@ -35,9 +34,6 @@ export class LumaClient {
   /** Raw JSON document store. */
   readonly doc: DocClient;
 
-  /** SQLite bridge for arbitrary SQL queries and DDL. */
-  readonly sql: SqlClient;
-
   /** SSE event stream from the pub/sub bus. */
   readonly events: EventsClient;
 
@@ -52,7 +48,6 @@ export class LumaClient {
     this.vector = new VectorClient(this.http);
     this.state = new StateClient(this.http);
     this.doc = new DocClient(this.http);
-    this.sql = new SqlClient(this.http);
     this.events = new EventsClient(this.http);
     this.auth = new AuthClient(this.http);
     this.admin = new AdminClient(this.http);

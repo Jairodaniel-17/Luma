@@ -145,18 +145,6 @@ export interface DocFindResult {
   documents: Array<{ id: string; doc: Metadata }>;
 }
 
-// ─── SQL types ────────────────────────────────────────────────────────────────
-
-export interface SqlQueryResult {
-  rows: Array<Record<string, JsonValue>>;
-  columns: string[];
-}
-
-export interface SqlExecResult {
-  rows_affected: number;
-  last_insert_rowid?: number;
-}
-
 // ─── Events / SSE types ───────────────────────────────────────────────────────
 
 export interface LumaEvent {

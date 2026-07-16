@@ -53,8 +53,6 @@ tags:
   description: Real-time event subscription (SSE)
 - name: Document Store
   description: Storage for raw documents and metadata
-- name: SQL
-  description: SQLite bridge for relational data
 - name: System
   description: Health checks and metrics
 - name: Meta
@@ -492,31 +490,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DocRecord'
-    SqlQueryRequest:
-      type: object
-      required:
-      - sql
-      properties:
-        sql:
-          type: string
-          example: SELECT * FROM users WHERE id = ?
-        params:
-          type: array
-          items: {}
-          example:
-          - 123
-    SqlQueryResponse:
-      type: object
-      properties:
-        rows:
-          type: array
-          items: {}
-    SqlExecResponse:
-      type: object
-      properties:
-        rows_affected:
-          type: integer
-          format: uint64
     HighLevelSearchFilters:
       type: object
       properties:
@@ -2405,46 +2378,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DocFindResponse'
-  /v1/sql/query:
-    post:
-      tags:
-      - SQL
-      security:
-      - bearerAuth: []
-      summary: Execute SELECT query
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SqlQueryRequest'
-      responses:
-        '200':
-          description: Result set
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SqlQueryResponse'
-  /v1/sql/exec:
-    post:
-      tags:
-      - SQL
-      security:
-      - bearerAuth: []
-      summary: Execute DDL/DML
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SqlQueryRequest'
-      responses:
-        '200':
-          description: Execution result
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SqlExecResponse'
   /v1/meta/{collection}/execute:
     post:
       tags:

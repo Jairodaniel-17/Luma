@@ -33,7 +33,6 @@ describe("LumaClient", () => {
     expect(client.vector).toBeDefined();
     expect(client.state).toBeDefined();
     expect(client.doc).toBeDefined();
-    expect(client.sql).toBeDefined();
     expect(client.events).toBeDefined();
     expect(client.auth).toBeDefined();
     expect(client.admin).toBeDefined();

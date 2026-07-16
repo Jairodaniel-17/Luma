@@ -89,22 +89,6 @@ class DocEntry(TypedDict):
     document: Dict[str, Any]
 
 
-# ── SQL ───────────────────────────────────────────────────────────────────────
-
-
-class SqlQueryResult(TypedDict):
-    """Response from POST /v1/sql/query."""
-
-    columns: List[str]
-    rows: List[List[Any]]
-
-
-class SqlExecResult(TypedDict):
-    """Response from POST /v1/sql/exec."""
-
-    rows_affected: int
-
-
 # ── Hub ───────────────────────────────────────────────────────────────────────
 
 
