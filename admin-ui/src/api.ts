@@ -56,6 +56,10 @@ export const api = {
       password,
     }),
   logout: () => request<void>("POST", "/v1/auth/logout"),
+  listSessions: () =>
+    request<{ sessions: SessionRow[]; count: number }>("GET", "/v1/auth/sessions"),
+  revokeAllSessions: () =>
+    request<{ revoked: number }>("POST", "/v1/auth/sessions/revoke-all"),
   stats: () => request<Record<string, number>>("GET", "/v1/admin/stats"),
   health: () => request<Record<string, unknown>>("GET", "/v1/health"),
   listUsers: () =>
@@ -186,6 +190,12 @@ export interface UserOrgRow {
   name: string;
   role: string;
   created_at_ms: number;
+}
+export interface SessionRow {
+  org_id: string;
+  role: string;
+  created_at_ms: number;
+  expires_at_ms: number;
 }
 export interface KeyRow {
   id: string;

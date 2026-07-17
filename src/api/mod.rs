@@ -302,6 +302,11 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         )
         .route("/v1/auth/my-orgs", get(routes_accounts::my_orgs))
         .route("/v1/auth/switch-org", post(routes_accounts::switch_org))
+        .route("/v1/auth/sessions", get(routes_accounts::list_sessions))
+        .route(
+            "/v1/auth/sessions/revoke-all",
+            post(routes_accounts::revoke_all_sessions),
+        )
         .route("/v1/admin/stats", get(routes_accounts::stats))
         .route("/v1/admin/audit-events", get(routes_accounts::audit_events))
         .route(

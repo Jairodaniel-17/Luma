@@ -730,6 +730,57 @@ pub async fn my_orgs(
     Ok(Json(json!({ "orgs": orgs })))
 }
 
+/// List the current user's live sessions (metadata only, never the token).
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(uid) = ctx.user_id.clone() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "not_a_session",
+            "this endpoint requires a session token",
+        ));
+    };
+    let svc = accounts(&state)?;
+    let sessions = svc.list_user_sessions(&uid).await.map_err(internal)?;
+    let count = sessions.len();
+    Ok(Json(json!({ "sessions": sessions, "count": count })))
+}
+
+/// Revoke every other session of the current user, keeping only the caller's
+/// current one ("log out everywhere else").
+pub async fn revoke_all_sessions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(uid) = ctx.user_id.clone() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "not_a_session",
+            "this endpoint requires a session token",
+        ));
+    };
+    let svc = accounts(&state)?;
+    let current = bearer(&headers).unwrap_or_default();
+    let revoked = svc
+        .revoke_other_sessions(&uid, &current)
+        .await
+        .map_err(internal)?;
+    svc.record_event(
+        ctx.tenant_id.as_deref(),
+        Some(&uid),
+        "auth.revoke_all_sessions",
+        Some("session"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        Some(&format!("{revoked} revoked")),
+    )
+    .await;
+    Ok(Json(json!({ "revoked": revoked })))
+}
+
 #[derive(Deserialize)]
 pub struct SwitchOrgBody {
     pub org_id: String,

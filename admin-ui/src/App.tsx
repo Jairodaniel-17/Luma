@@ -207,6 +207,21 @@ function Console({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
           <button className="logout" onClick={doLogout}>Cerrar sesión</button>
+          <button
+            className="navitem"
+            style={{ fontSize: 12, opacity: 0.75 }}
+            onClick={async () => {
+              if (!confirm("¿Cerrar tu sesión en todos los demás dispositivos? La actual se mantiene.")) return;
+              try {
+                const r = await api.revokeAllSessions();
+                alert(`Listo: ${r.revoked} otra(s) sesión(es) cerrada(s).`);
+              } catch (e) {
+                alert(`No se pudo: ${(e as Error).message}`);
+              }
+            }}
+          >
+            Cerrar otras sesiones
+          </button>
         </div>
       </aside>
       <main className={`content ${tab === "docs" ? "content-docs" : ""}`}>

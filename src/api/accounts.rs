@@ -864,6 +864,41 @@ impl AccountsService {
         Ok(n > 0)
     }
 
+    /// List a user's live (unexpired) sessions. Never returns the token hash —
+    /// only metadata the owner can use to recognize a device/session.
+    pub async fn list_user_sessions(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.ensure_init().await?;
+        self.sqlite
+            .query(
+                "SELECT org_id, role, created_at_ms, expires_at_ms FROM sys_sessions
+                 WHERE user_id = ? AND expires_at_ms > ? ORDER BY created_at_ms DESC"
+                    .to_string(),
+                vec![json!(user_id), json!(now_ms())],
+            )
+            .await
+    }
+
+    /// Revoke every session for a user except the one identified by
+    /// `keep_token` (the caller's current session). Returns the count revoked.
+    pub async fn revoke_other_sessions(
+        &self,
+        user_id: &str,
+        keep_token: &str,
+    ) -> anyhow::Result<u64> {
+        self.ensure_init().await?;
+        let n = self
+            .sqlite
+            .execute(
+                "DELETE FROM sys_sessions WHERE user_id = ? AND token_hash != ?".to_string(),
+                vec![json!(user_id), json!(hash_token(keep_token))],
+            )
+            .await?;
+        Ok(n)
+    }
+
     // ---- Per-org collection ownership (data isolation) ----
 
     /// Return the org that owns a collection/namespace, if recorded.
@@ -1158,5 +1193,32 @@ mod tests {
             "removing a member must revoke their session for that org"
         );
         assert_eq!(svc.list_user_orgs(&user.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_list_and_revoke_others() {
+        use crate::sqlite::SqliteService;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = SqliteService::new(format!("{}/t.db", dir.path().display())).unwrap();
+        let svc = super::AccountsService::new(Arc::new(sqlite));
+        let (org, user) = svc.register("Org", "u@x.com", "pw").await.unwrap();
+        let ident = super::SessionIdentity {
+            user_id: user.id.clone(),
+            org_id: org.id.clone(),
+            role: "owner".to_string(),
+        };
+        let (t1, _) = svc.create_session(&ident).await.unwrap();
+        let (t2, _) = svc.create_session(&ident).await.unwrap();
+        let (t3, _) = svc.create_session(&ident).await.unwrap();
+        assert_eq!(svc.list_user_sessions(&user.id).await.unwrap().len(), 3);
+
+        // Keep t2 (the "current" session), revoke the other two.
+        let revoked = svc.revoke_other_sessions(&user.id, &t2).await.unwrap();
+        assert_eq!(revoked, 2);
+        assert_eq!(svc.list_user_sessions(&user.id).await.unwrap().len(), 1);
+        assert!(svc.validate_session(&t2).await.unwrap().is_some());
+        assert!(svc.validate_session(&t1).await.unwrap().is_none());
+        assert!(svc.validate_session(&t3).await.unwrap().is_none());
     }
 }

@@ -13,7 +13,7 @@ Convención de estado por ítem: `[ ]` pendiente · `[~]` en curso · `[x]` hech
 ## Milestone 1 — Seguridad & operación base  (release **v4.22.0**)
 Lo más barato y crítico primero: que la instancia sea segura de operar y no pierda datos.
 
-### 1.1 `[ ]` Clave maestra fuerte + arranque endurecido  · impacto ALTO · esfuerzo BAJO
+### 1.1 `[x]` Clave maestra fuerte + arranque endurecido  · impacto ALTO · esfuerzo BAJO
 **Objetivo:** dejar de correr con `LUMA_ALLOW_INSECURE=1` y clave de desarrollo.
 **Enfoque:**
 - Generar una `LUMA_MASTER_KEY` de 32 bytes y persistirla vía drop-in de systemd
@@ -26,7 +26,7 @@ Lo más barato y crítico primero: que la instancia sea segura de operar y no pi
 - Health 200, datos existentes legibles (KV/Doc/vector) tras el cambio.
 - La key no aparece en `luma.toml` ni en el repo.
 
-### 1.2 `[ ]` Gestión de sesiones (listar + cerrar todo)  · impacto MEDIO · esfuerzo BAJO
+### 1.2 `[x]` Gestión de sesiones (listar + cerrar todo)  · impacto MEDIO · esfuerzo BAJO
 **Objetivo:** dar control sobre sesiones activas del propio usuario.
 **Enfoque (backend `accounts.rs` + `routes_accounts.rs` + `mod.rs`):**
 - `list_user_sessions(user_id)` → `[{created_at_ms, expires_at_ms, ...}]` (sin token).
