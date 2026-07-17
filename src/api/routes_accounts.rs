@@ -538,7 +538,8 @@ pub async fn set_access_policy(
 
 /// Whether the caller is a platform admin (global admin/owner, no tenant).
 fn is_platform_admin(ctx: &TenantContext) -> bool {
-    ctx.platform_admin || (ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner"))
+    ctx.platform_admin
+        || (ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner"))
 }
 
 /// Gate for managing an org's members: a platform admin (any org), or a

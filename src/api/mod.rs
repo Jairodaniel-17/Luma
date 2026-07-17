@@ -285,8 +285,7 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         )
         .route(
             "/v1/admin/orgs/:id/members/:user_id",
-            put(routes_accounts::update_org_member_role)
-                .delete(routes_accounts::remove_org_member),
+            put(routes_accounts::update_org_member_role).delete(routes_accounts::remove_org_member),
         )
         .route(
             "/v1/admin/users",
@@ -297,7 +296,10 @@ pub fn router(deps: RouterDeps) -> Router<()> {
             "/v1/admin/users/:id/role",
             put(routes_accounts::update_user_role),
         )
-        .route("/v1/admin/users/:id/orgs", get(routes_accounts::list_user_orgs))
+        .route(
+            "/v1/admin/users/:id/orgs",
+            get(routes_accounts::list_user_orgs),
+        )
         .route("/v1/auth/my-orgs", get(routes_accounts::my_orgs))
         .route("/v1/auth/switch-org", post(routes_accounts::switch_org))
         .route("/v1/admin/stats", get(routes_accounts::stats))

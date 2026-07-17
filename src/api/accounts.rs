@@ -540,7 +540,10 @@ impl AccountsService {
                 vec![json!(email)],
             )
             .await?;
-        Ok(rows.into_iter().next().and_then(|r| serde_json::from_value(r).ok()))
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| serde_json::from_value(r).ok()))
     }
 
     /// Add (or update the role of) a user's membership in an org. Verifies both
@@ -1030,8 +1033,7 @@ mod tests {
         use crate::sqlite::SqliteService;
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
-        let sqlite =
-            SqliteService::new(format!("{}/t.db", dir.path().display())).unwrap();
+        let sqlite = SqliteService::new(format!("{}/t.db", dir.path().display())).unwrap();
         let svc = super::AccountsService::new(Arc::new(sqlite));
 
         // register creates OrgA + owner, and backfills the owner's membership.
@@ -1040,32 +1042,56 @@ mod tests {
 
         // Home org is a member from the start (via create_user mirror).
         assert_eq!(
-            svc.membership_role(&user.id, &org_a.id).await.unwrap().as_deref(),
+            svc.membership_role(&user.id, &org_a.id)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("owner")
         );
 
         // Add the same user to OrgB as admin → now a member of two orgs.
-        svc.add_membership(&user.id, &org_b.id, "admin").await.unwrap();
+        svc.add_membership(&user.id, &org_b.id, "admin")
+            .await
+            .unwrap();
         let orgs = svc.list_user_orgs(&user.id).await.unwrap();
         assert_eq!(orgs.len(), 2, "user should belong to two orgs");
         assert_eq!(
-            svc.membership_role(&user.id, &org_b.id).await.unwrap().as_deref(),
+            svc.membership_role(&user.id, &org_b.id)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("admin")
         );
 
         // Adding to a nonexistent org fails; unknown user fails.
-        assert!(svc.add_membership(&user.id, "nope", "member").await.is_err());
-        assert!(svc.add_membership("ghost", &org_b.id, "member").await.is_err());
+        assert!(svc
+            .add_membership(&user.id, "nope", "member")
+            .await
+            .is_err());
+        assert!(svc
+            .add_membership("ghost", &org_b.id, "member")
+            .await
+            .is_err());
 
         // Role change + membership listing on OrgB.
-        assert!(svc.set_membership_role(&user.id, &org_b.id, "viewer").await.unwrap());
+        assert!(svc
+            .set_membership_role(&user.id, &org_b.id, "viewer")
+            .await
+            .unwrap());
         let members = svc.list_org_members(&org_b.id).await.unwrap();
         assert_eq!(members.len(), 1);
-        assert_eq!(members[0].get("email").and_then(|v| v.as_str()), Some("u@a.com"));
+        assert_eq!(
+            members[0].get("email").and_then(|v| v.as_str()),
+            Some("u@a.com")
+        );
 
         // Remove from OrgB → gone there, still owner of OrgA.
         assert!(svc.remove_membership(&user.id, &org_b.id).await.unwrap());
-        assert!(svc.membership_role(&user.id, &org_b.id).await.unwrap().is_none());
+        assert!(svc
+            .membership_role(&user.id, &org_b.id)
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(svc.list_user_orgs(&user.id).await.unwrap().len(), 1);
     }
 }
