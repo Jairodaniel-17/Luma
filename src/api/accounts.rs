@@ -182,6 +182,34 @@ impl AccountsService {
                         vec![],
                     )
                     .await?;
+                // Many-to-many user↔org membership with a per-membership role.
+                // `sys_users.org_id`/`role` remain the user's home org (used by
+                // the bootstrap-admin check and the default login target); this
+                // table is the source of truth for which orgs a user can access.
+                self.sqlite
+                    .execute(
+                        "CREATE TABLE IF NOT EXISTS sys_memberships (
+                            user_id TEXT NOT NULL,
+                            org_id TEXT NOT NULL,
+                            role TEXT NOT NULL,
+                            created_at_ms INTEGER NOT NULL,
+                            PRIMARY KEY (user_id, org_id)
+                        )"
+                        .to_string(),
+                        vec![],
+                    )
+                    .await?;
+                // Backfill existing single-org users as members of their home org
+                // (idempotent) so the M:N table is consistent with the legacy
+                // column from the first boot after upgrade.
+                self.sqlite
+                    .execute(
+                        "INSERT OR IGNORE INTO sys_memberships (user_id, org_id, role, created_at_ms)
+                         SELECT id, org_id, role, created_at_ms FROM sys_users"
+                            .to_string(),
+                        vec![],
+                    )
+                    .await?;
                 self.sqlite
                     .execute(
                         "CREATE TABLE IF NOT EXISTS sys_audit_events (
@@ -294,6 +322,13 @@ impl AccountsService {
                 vec![json!(id)],
             )
             .await;
+        let _ = self
+            .sqlite
+            .execute(
+                "DELETE FROM sys_memberships WHERE org_id = ?".to_string(),
+                vec![json!(id)],
+            )
+            .await;
         Ok(n > 0)
     }
 
@@ -393,6 +428,15 @@ impl AccountsService {
                 ],
             )
             .await?;
+        // Mirror the home org into the membership table.
+        self.sqlite
+            .execute(
+                "INSERT OR IGNORE INTO sys_memberships (user_id, org_id, role, created_at_ms)
+                 VALUES (?, ?, ?, ?)"
+                    .to_string(),
+                vec![json!(id), json!(org_id), json!(role), json!(ts)],
+            )
+            .await?;
         Ok(UserRecord {
             id,
             org_id: org_id.to_string(),
@@ -464,7 +508,167 @@ impl AccountsService {
             ),
         };
         let n = self.sqlite.execute(sql, params).await?;
+        if n > 0 {
+            // Drop every membership for a fully-deleted user. When the delete was
+            // org-scoped and matched, also drop only that org's membership; a
+            // platform-wide delete removes them all.
+            let (msql, mparams) = match org_scope {
+                Some(org) => (
+                    "DELETE FROM sys_memberships WHERE user_id = ? AND org_id = ?".to_string(),
+                    vec![json!(id), json!(org)],
+                ),
+                None => (
+                    "DELETE FROM sys_memberships WHERE user_id = ?".to_string(),
+                    vec![json!(id)],
+                ),
+            };
+            let _ = self.sqlite.execute(msql, mparams).await;
+        }
         Ok(n > 0)
+    }
+
+    // ---- Multi-org membership (user ↔ org, many-to-many) ----
+
+    /// Look up a user by email (case-sensitive match, as stored).
+    pub async fn user_by_email(&self, email: &str) -> anyhow::Result<Option<UserRecord>> {
+        self.ensure_init().await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT id, org_id, email, role, status, created_at_ms FROM sys_users WHERE email = ?"
+                    .to_string(),
+                vec![json!(email)],
+            )
+            .await?;
+        Ok(rows.into_iter().next().and_then(|r| serde_json::from_value(r).ok()))
+    }
+
+    /// Add (or update the role of) a user's membership in an org. Verifies both
+    /// the user and the org exist first. Returns an error if either is missing.
+    pub async fn add_membership(
+        &self,
+        user_id: &str,
+        org_id: &str,
+        role: &str,
+    ) -> anyhow::Result<()> {
+        self.ensure_init().await?;
+        if !ENTERPRISE_ROLES.contains(&role) {
+            anyhow::bail!("invalid role '{role}'");
+        }
+        let u = self
+            .sqlite
+            .query(
+                "SELECT 1 FROM sys_users WHERE id = ?".to_string(),
+                vec![json!(user_id)],
+            )
+            .await?;
+        if u.is_empty() {
+            anyhow::bail!("user not found");
+        }
+        let o = self
+            .sqlite
+            .query(
+                "SELECT 1 FROM sys_orgs WHERE id = ?".to_string(),
+                vec![json!(org_id)],
+            )
+            .await?;
+        if o.is_empty() {
+            anyhow::bail!("org not found");
+        }
+        self.sqlite
+            .execute(
+                "INSERT INTO sys_memberships (user_id, org_id, role, created_at_ms)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(user_id, org_id) DO UPDATE SET role = excluded.role"
+                    .to_string(),
+                vec![json!(user_id), json!(org_id), json!(role), json!(now_ms())],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Change the role of an existing membership. Returns false if there is no
+    /// such membership.
+    pub async fn set_membership_role(
+        &self,
+        user_id: &str,
+        org_id: &str,
+        role: &str,
+    ) -> anyhow::Result<bool> {
+        self.ensure_init().await?;
+        if !ENTERPRISE_ROLES.contains(&role) {
+            anyhow::bail!("invalid role '{role}'");
+        }
+        let n = self
+            .sqlite
+            .execute(
+                "UPDATE sys_memberships SET role = ? WHERE user_id = ? AND org_id = ?".to_string(),
+                vec![json!(role), json!(user_id), json!(org_id)],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    /// Remove a user from an org. Returns false if there was no membership.
+    pub async fn remove_membership(&self, user_id: &str, org_id: &str) -> anyhow::Result<bool> {
+        self.ensure_init().await?;
+        let n = self
+            .sqlite
+            .execute(
+                "DELETE FROM sys_memberships WHERE user_id = ? AND org_id = ?".to_string(),
+                vec![json!(user_id), json!(org_id)],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    /// The role a user holds in an org, if they are a member. Used to validate
+    /// an org switch: a session may only rebind to an org the user belongs to.
+    pub async fn membership_role(
+        &self,
+        user_id: &str,
+        org_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        self.ensure_init().await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT role FROM sys_memberships WHERE user_id = ? AND org_id = ?".to_string(),
+                vec![json!(user_id), json!(org_id)],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.get("role").and_then(|v| v.as_str()).map(String::from)))
+    }
+
+    /// Members of an org (joined with user email), most-recent first.
+    pub async fn list_org_members(&self, org_id: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.ensure_init().await?;
+        self.sqlite
+            .query(
+                "SELECT m.user_id, u.email, m.role, m.created_at_ms
+                 FROM sys_memberships m JOIN sys_users u ON u.id = m.user_id
+                 WHERE m.org_id = ? ORDER BY m.created_at_ms DESC"
+                    .to_string(),
+                vec![json!(org_id)],
+            )
+            .await
+    }
+
+    /// Orgs a user belongs to (joined with org name), most-recent first.
+    pub async fn list_user_orgs(&self, user_id: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.ensure_init().await?;
+        self.sqlite
+            .query(
+                "SELECT m.org_id, o.name, m.role, m.created_at_ms
+                 FROM sys_memberships m JOIN sys_orgs o ON o.id = m.org_id
+                 WHERE m.user_id = ? ORDER BY m.created_at_ms DESC"
+                    .to_string(),
+                vec![json!(user_id)],
+            )
+            .await
     }
 
     // ---- Login / sessions ----
@@ -819,5 +1023,49 @@ mod tests {
             "Foo.IO".into(),
         ]);
         assert_eq!(out, vec!["acme.com".to_string(), "foo.io".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn multi_org_membership_roundtrip() {
+        use crate::sqlite::SqliteService;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite =
+            SqliteService::new(format!("{}/t.db", dir.path().display())).unwrap();
+        let svc = super::AccountsService::new(Arc::new(sqlite));
+
+        // register creates OrgA + owner, and backfills the owner's membership.
+        let (org_a, user) = svc.register("OrgA", "u@a.com", "pw").await.unwrap();
+        let org_b = svc.create_org("OrgB").await.unwrap();
+
+        // Home org is a member from the start (via create_user mirror).
+        assert_eq!(
+            svc.membership_role(&user.id, &org_a.id).await.unwrap().as_deref(),
+            Some("owner")
+        );
+
+        // Add the same user to OrgB as admin → now a member of two orgs.
+        svc.add_membership(&user.id, &org_b.id, "admin").await.unwrap();
+        let orgs = svc.list_user_orgs(&user.id).await.unwrap();
+        assert_eq!(orgs.len(), 2, "user should belong to two orgs");
+        assert_eq!(
+            svc.membership_role(&user.id, &org_b.id).await.unwrap().as_deref(),
+            Some("admin")
+        );
+
+        // Adding to a nonexistent org fails; unknown user fails.
+        assert!(svc.add_membership(&user.id, "nope", "member").await.is_err());
+        assert!(svc.add_membership("ghost", &org_b.id, "member").await.is_err());
+
+        // Role change + membership listing on OrgB.
+        assert!(svc.set_membership_role(&user.id, &org_b.id, "viewer").await.unwrap());
+        let members = svc.list_org_members(&org_b.id).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].get("email").and_then(|v| v.as_str()), Some("u@a.com"));
+
+        // Remove from OrgB → gone there, still owner of OrgA.
+        assert!(svc.remove_membership(&user.id, &org_b.id).await.unwrap());
+        assert!(svc.membership_role(&user.id, &org_b.id).await.unwrap().is_none());
+        assert_eq!(svc.list_user_orgs(&user.id).await.unwrap().len(), 1);
     }
 }
