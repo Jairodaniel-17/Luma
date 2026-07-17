@@ -1018,3 +1018,43 @@ async fn vector_diskann_background_build_off_write_path() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "grad-49");
 }
+
+#[tokio::test]
+async fn vector_collection_drop_persists_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_string_lossy().to_string();
+    let config = config_with_dir(&data_dir);
+
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    engine
+        .create_vector_collection("todrop", 3, Metric::Cosine)
+        .unwrap();
+    engine
+        .vector_upsert(
+            "todrop",
+            "v1",
+            VectorItem {
+                vector: vec![1.0, 0.0, 0.0],
+                meta: json!({}),
+                mmap_offset: None,
+            },
+        )
+        .unwrap();
+    let col_dir = Path::new(&data_dir).join("vectors").join("todrop");
+    assert!(col_dir.exists(), "collection dir should exist after create");
+
+    // Drop it: gone from memory + disk.
+    assert!(engine.drop_vector_collection("todrop").unwrap());
+    assert!(engine.vector_collection_info("todrop").is_none());
+    assert!(!col_dir.exists(), "collection dir should be deleted");
+    // Dropping a nonexistent collection returns false.
+    assert!(!engine.drop_vector_collection("todrop").unwrap());
+    drop(engine);
+
+    // After restart (WAL replay), the drop must stick — no resurrection.
+    let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
+    assert!(
+        engine2.vector_collection_info("todrop").is_none(),
+        "dropped collection must not be resurrected by replay"
+    );
+}
