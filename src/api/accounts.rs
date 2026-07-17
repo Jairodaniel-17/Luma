@@ -329,6 +329,14 @@ impl AccountsService {
                 vec![json!(id)],
             )
             .await;
+        // Revoke every session bound to the deleted org.
+        let _ = self
+            .sqlite
+            .execute(
+                "DELETE FROM sys_sessions WHERE org_id = ?".to_string(),
+                vec![json!(id)],
+            )
+            .await;
         Ok(n > 0)
     }
 
@@ -523,6 +531,19 @@ impl AccountsService {
                 ),
             };
             let _ = self.sqlite.execute(msql, mparams).await;
+            // Revoke the deleted user's sessions (org-scoped delete revokes only
+            // that org's session; a platform-wide delete revokes them all).
+            let (ssql, sparams) = match org_scope {
+                Some(org) => (
+                    "DELETE FROM sys_sessions WHERE user_id = ? AND org_id = ?".to_string(),
+                    vec![json!(id), json!(org)],
+                ),
+                None => (
+                    "DELETE FROM sys_sessions WHERE user_id = ?".to_string(),
+                    vec![json!(id)],
+                ),
+            };
+            let _ = self.sqlite.execute(ssql, sparams).await;
         }
         Ok(n > 0)
     }
@@ -609,10 +630,23 @@ impl AccountsService {
                 vec![json!(role), json!(user_id), json!(org_id)],
             )
             .await?;
+        // Apply the new role to any live session already bound to this org so it
+        // takes effect on the user's next request — no re-login needed.
+        if n > 0 {
+            let _ = self
+                .sqlite
+                .execute(
+                    "UPDATE sys_sessions SET role = ? WHERE user_id = ? AND org_id = ?".to_string(),
+                    vec![json!(role), json!(user_id), json!(org_id)],
+                )
+                .await;
+        }
         Ok(n > 0)
     }
 
     /// Remove a user from an org. Returns false if there was no membership.
+    /// Any live session bound to that org is revoked immediately, so losing
+    /// access takes effect at once rather than lingering until the token expires.
     pub async fn remove_membership(&self, user_id: &str, org_id: &str) -> anyhow::Result<bool> {
         self.ensure_init().await?;
         let n = self
@@ -622,6 +656,15 @@ impl AccountsService {
                 vec![json!(user_id), json!(org_id)],
             )
             .await?;
+        if n > 0 {
+            let _ = self
+                .sqlite
+                .execute(
+                    "DELETE FROM sys_sessions WHERE user_id = ? AND org_id = ?".to_string(),
+                    vec![json!(user_id), json!(org_id)],
+                )
+                .await;
+        }
         Ok(n > 0)
     }
 
@@ -1085,13 +1128,35 @@ mod tests {
             Some("u@a.com")
         );
 
-        // Remove from OrgB → gone there, still owner of OrgA.
+        // A live session bound to OrgB, plus a role change that must propagate
+        // into that session without a re-login.
+        let ident_b = super::SessionIdentity {
+            user_id: user.id.clone(),
+            org_id: org_b.id.clone(),
+            role: "viewer".to_string(),
+        };
+        let (tok_b, _) = svc.create_session(&ident_b).await.unwrap();
+        svc.set_membership_role(&user.id, &org_b.id, "member")
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.validate_session(&tok_b).await.unwrap().map(|i| i.role),
+            Some("member".to_string()),
+            "role change should propagate into the live session"
+        );
+
+        // Remove from OrgB → gone there, still owner of OrgA, and the OrgB
+        // session is revoked immediately (not left alive until expiry).
         assert!(svc.remove_membership(&user.id, &org_b.id).await.unwrap());
         assert!(svc
             .membership_role(&user.id, &org_b.id)
             .await
             .unwrap()
             .is_none());
+        assert!(
+            svc.validate_session(&tok_b).await.unwrap().is_none(),
+            "removing a member must revoke their session for that org"
+        );
         assert_eq!(svc.list_user_orgs(&user.id).await.unwrap().len(), 1);
     }
 }
