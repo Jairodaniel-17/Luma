@@ -13,7 +13,7 @@ Convención de estado por ítem: `[ ]` pendiente · `[~]` en curso · `[x]` hech
 ## Milestone 1 — Seguridad & operación base  (release **v4.22.0**)
 Lo más barato y crítico primero: que la instancia sea segura de operar y no pierda datos.
 
-### 1.1 `[ ]` Clave maestra fuerte + arranque endurecido  · impacto ALTO · esfuerzo BAJO
+### 1.1 `[x]` Clave maestra fuerte + arranque endurecido  · impacto ALTO · esfuerzo BAJO
 **Objetivo:** dejar de correr con `LUMA_ALLOW_INSECURE=1` y clave de desarrollo.
 **Enfoque:**
 - Generar una `LUMA_MASTER_KEY` de 32 bytes y persistirla vía drop-in de systemd
@@ -26,7 +26,7 @@ Lo más barato y crítico primero: que la instancia sea segura de operar y no pi
 - Health 200, datos existentes legibles (KV/Doc/vector) tras el cambio.
 - La key no aparece en `luma.toml` ni en el repo.
 
-### 1.2 `[ ]` Gestión de sesiones (listar + cerrar todo)  · impacto MEDIO · esfuerzo BAJO
+### 1.2 `[x]` Gestión de sesiones (listar + cerrar todo)  · impacto MEDIO · esfuerzo BAJO
 **Objetivo:** dar control sobre sesiones activas del propio usuario.
 **Enfoque (backend `accounts.rs` + `routes_accounts.rs` + `mod.rs`):**
 - `list_user_sessions(user_id)` → `[{created_at_ms, expires_at_ms, ...}]` (sin token).
@@ -55,20 +55,20 @@ Lo más barato y crítico primero: que la instancia sea segura de operar y no pi
 ## Milestone 2 — Multi-org completo  (release **v4.23.0**)
 Redondear lo construido en v4.21.x. Todo esfuerzo bajo-medio.
 
-### 2.1 `[ ]` Selector de organización en el header  · impacto MEDIO · esfuerzo BAJO
+### 2.1 `[x]` Selector de organización en el header  · impacto MEDIO · esfuerzo BAJO
 **Objetivo:** que un usuario multi-org cambie de org activa desde la UI.
 **Enfoque (UI + `api.ts`):** dropdown en el header que llama `GET /v1/auth/my-orgs`
 y `POST /v1/auth/switch-org`; al cambiar, guarda el token rotado y recarga.
 **Aceptación:** usuario en 2 orgs cambia y ve datos/rol de la org destino; el token viejo queda inválido.
 
-### 2.2 `[ ]` Invitar usuario en un paso  · impacto MEDIO · esfuerzo BAJO
+### 2.2 `[x]` Invitar usuario en un paso  · impacto MEDIO · esfuerzo BAJO
 **Objetivo:** invitar por email y que se cree+añada a la org de una.
 **Enfoque:** endpoint `POST /v1/admin/orgs/:id/invite {email, role, password?}`:
 si el usuario no existe, lo crea (con password temporal o pendiente) y lo añade;
 si existe, lo añade. UI: un solo formulario en el panel de miembros.
 **Aceptación:** invitar un email nuevo crea usuario + membresía; invitar uno existente solo añade membresía.
 
-### 2.3 `[ ]` Auto-registro a org existente por dominio  · impacto MEDIO · esfuerzo MEDIO
+### 2.3 `[x]` Auto-registro a org existente por dominio  · impacto MEDIO · esfuerzo MEDIO
 **Objetivo:** que registrarse con `@acme.com` caiga en la org de Acme en vez de crear una nueva.
 **Enfoque:** mapa `dominio → org_id` (tabla `sys_domain_orgs`); en `register`, si el
 dominio está mapeado, crear el usuario como member de esa org en vez de una org nueva.
