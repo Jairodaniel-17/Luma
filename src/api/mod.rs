@@ -280,6 +280,14 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         )
         .route("/v1/admin/orgs/:id", delete(routes_accounts::delete_org))
         .route(
+            "/v1/admin/orgs/:id/members",
+            get(routes_accounts::list_org_members).post(routes_accounts::add_org_member),
+        )
+        .route(
+            "/v1/admin/orgs/:id/members/:user_id",
+            put(routes_accounts::update_org_member_role).delete(routes_accounts::remove_org_member),
+        )
+        .route(
             "/v1/admin/users",
             get(routes_accounts::list_users).post(routes_accounts::create_user),
         )
@@ -288,6 +296,12 @@ pub fn router(deps: RouterDeps) -> Router<()> {
             "/v1/admin/users/:id/role",
             put(routes_accounts::update_user_role),
         )
+        .route(
+            "/v1/admin/users/:id/orgs",
+            get(routes_accounts::list_user_orgs),
+        )
+        .route("/v1/auth/my-orgs", get(routes_accounts::my_orgs))
+        .route("/v1/auth/switch-org", post(routes_accounts::switch_org))
         .route("/v1/admin/stats", get(routes_accounts::stats))
         .route("/v1/admin/audit-events", get(routes_accounts::audit_events))
         .route(
@@ -422,6 +436,10 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         )
         .route("/v1/config", get(routes_config::get_config))
         .route("/v1/config", put(routes_config::update_config))
+        .route(
+            "/v1/config/embedding/probe",
+            post(routes_config::probe_embedding),
+        )
         .route("/v1/admin/backup", post(routes_admin::backup))
         .route("/v1/admin/audit", get(routes_admin::get_audit_log))
         .route("/search", post(routes_search::search))

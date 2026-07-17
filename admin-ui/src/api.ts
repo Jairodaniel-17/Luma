@@ -60,10 +60,46 @@ export const api = {
   health: () => request<Record<string, unknown>>("GET", "/v1/health"),
   listUsers: () =>
     request<{ users: UserRow[] }>("GET", "/v1/admin/users"),
-  createUser: (email: string, password: string, role: string) =>
-    request<UserRow>("POST", "/v1/admin/users", { email, password, role }),
+  createUser: (email: string, password: string, role: string, org_id?: string) =>
+    request<UserRow>(
+      "POST",
+      "/v1/admin/users",
+      org_id ? { email, password, role, org_id } : { email, password, role },
+    ),
   deleteUser: (id: string) => request<void>("DELETE", `/v1/admin/users/${id}`),
   listOrgs: () => request<{ orgs: OrgRow[] }>("GET", "/v1/admin/orgs"),
+  createOrg: (name: string) =>
+    request<OrgRow>("POST", "/v1/admin/orgs", { name }),
+  deleteOrg: (id: string) => request<void>("DELETE", `/v1/admin/orgs/${id}`),
+  listOrgMembers: (org: string) =>
+    request<{ members: MemberRow[] }>(
+      "GET",
+      `/v1/admin/orgs/${encodeURIComponent(org)}/members`,
+    ),
+  addOrgMember: (org: string, email: string, role: string) =>
+    request<{ user_id: string; email: string; role: string }>(
+      "POST",
+      `/v1/admin/orgs/${encodeURIComponent(org)}/members`,
+      { email, role },
+    ),
+  updateOrgMemberRole: (org: string, userId: string, role: string) =>
+    request<void>(
+      "PUT",
+      `/v1/admin/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(userId)}`,
+      { role },
+    ),
+  removeOrgMember: (org: string, userId: string) =>
+    request<void>(
+      "DELETE",
+      `/v1/admin/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(userId)}`,
+    ),
+  myOrgs: () => request<{ orgs: UserOrgRow[] }>("GET", "/v1/auth/my-orgs"),
+  switchOrg: (org_id: string) =>
+    request<{ token: string; org_id: string; role: string }>(
+      "POST",
+      "/v1/auth/switch-org",
+      { org_id },
+    ),
   listKeys: () => request<KeyRow[]>("GET", "/v1/auth/keys"),
   createKey: (name: string, role: string) =>
     request<{ id: string; key: string }>("POST", "/v1/auth/keys", {
@@ -83,6 +119,17 @@ export const api = {
   config: () => request<Record<string, unknown>>("GET", "/v1/config"),
   updateConfig: (cfg: Record<string, unknown>) =>
     request<{ status: string; message: string }>("PUT", "/v1/config", cfg),
+  probeEmbedding: (body: {
+    provider: string;
+    url: string;
+    api_key: string;
+    model: string;
+  }) =>
+    request<{ ok: boolean; dim?: number; error?: string }>(
+      "POST",
+      "/v1/config/embedding/probe",
+      body,
+    ),
   hubIngest: (namespace: string, text: string, metadata?: unknown) =>
     request<{ status: string; doc_id: string }>(
       "POST",
@@ -126,6 +173,18 @@ export interface UserRow {
 export interface OrgRow {
   id: string;
   name: string;
+  created_at_ms: number;
+}
+export interface MemberRow {
+  user_id: string;
+  email: string;
+  role: string;
+  created_at_ms: number;
+}
+export interface UserOrgRow {
+  org_id: string;
+  name: string;
+  role: string;
   created_at_ms: number;
 }
 export interface KeyRow {

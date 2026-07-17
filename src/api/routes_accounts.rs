@@ -533,3 +533,258 @@ pub async fn set_access_policy(
         json!({ "domains": saved.domains, "emails": saved.emails }),
     ))
 }
+
+// ---- Admin: multi-org membership ----
+
+/// Whether the caller is a platform admin (global admin/owner, no tenant).
+fn is_platform_admin(ctx: &TenantContext) -> bool {
+    ctx.platform_admin
+        || (ctx.tenant_id.is_none() && matches!(ctx.role.as_str(), "admin" | "owner"))
+}
+
+/// Gate for managing an org's members: a platform admin (any org), or a
+/// tenant admin/owner of that same org. A tenant admin poking a different org
+/// gets 404 (don't reveal that other orgs exist).
+fn require_org_manager(ctx: &TenantContext, org: &str) -> Result<(), ApiError> {
+    require_role(ctx, "admin")?;
+    if let Some(tid) = &ctx.tenant_id {
+        if tid != org {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "org not found",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// No granting a role at or above the caller's own (platform admins may seed any).
+fn guard_role_grant(ctx: &TenantContext, role: &str) -> Result<(), ApiError> {
+    if !is_platform_admin(ctx) && !role_strictly_below(&ctx.role, role) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "cannot assign a role at or above your own",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn list_org_members(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Path(org): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_org_manager(&ctx, &org)?;
+    let svc = accounts(&state)?;
+    let members = svc.list_org_members(&org).await.map_err(internal)?;
+    Ok(Json(json!({ "members": members })))
+}
+
+#[derive(Deserialize)]
+pub struct AddMemberBody {
+    pub email: String,
+    pub role: String,
+}
+
+pub async fn add_org_member(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+    Json(body): Json<AddMemberBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_org_manager(&ctx, &org)?;
+    guard_role_grant(&ctx, &body.role)?;
+    let svc = accounts(&state)?;
+    let user = svc
+        .user_by_email(&body.email)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no user with that email; create the user first",
+            )
+        })?;
+    svc.add_membership(&user.id, &org, &body.role)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
+    svc.record_event(
+        Some(&org),
+        ctx.user_id.as_deref(),
+        "member.add",
+        Some("membership"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        Some(&format!("{} -> {}", user.email, body.role)),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "user_id": user.id, "email": user.email, "org_id": org, "role": body.role })),
+    ))
+}
+
+pub async fn update_org_member_role(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+    Path((org, user_id)): Path<(String, String)>,
+    Json(body): Json<UpdateUserRoleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_org_manager(&ctx, &org)?;
+    guard_role_grant(&ctx, &body.role)?;
+    let svc = accounts(&state)?;
+    let ok = svc
+        .set_membership_role(&user_id, &org, &body.role)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
+    if !ok {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "membership not found",
+        ));
+    }
+    svc.record_event(
+        Some(&org),
+        ctx.user_id.as_deref(),
+        "member.update_role",
+        Some("membership"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        Some(&format!("{user_id} -> {}", body.role)),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remove_org_member(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+    Path((org, user_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_org_manager(&ctx, &org)?;
+    let svc = accounts(&state)?;
+    let ok = svc
+        .remove_membership(&user_id, &org)
+        .await
+        .map_err(internal)?;
+    if !ok {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "membership not found",
+        ));
+    }
+    svc.record_event(
+        Some(&org),
+        ctx.user_id.as_deref(),
+        "member.remove",
+        Some("membership"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        Some(&user_id),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Orgs a specific user belongs to. Platform admins may query anyone; a
+/// tenant-bound caller may only query themselves.
+pub async fn list_user_orgs(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Path(user_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !is_platform_admin(&ctx) && ctx.user_id.as_deref() != Some(user_id.as_str()) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "cannot view another user's organizations",
+        ));
+    }
+    let svc = accounts(&state)?;
+    let orgs = svc.list_user_orgs(&user_id).await.map_err(internal)?;
+    Ok(Json(json!({ "orgs": orgs })))
+}
+
+/// Orgs the current session's user belongs to (for the org switcher).
+pub async fn my_orgs(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(uid) = ctx.user_id.clone() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "not_a_session",
+            "this endpoint requires a session token",
+        ));
+    };
+    let svc = accounts(&state)?;
+    let orgs = svc.list_user_orgs(&uid).await.map_err(internal)?;
+    Ok(Json(json!({ "orgs": orgs })))
+}
+
+#[derive(Deserialize)]
+pub struct SwitchOrgBody {
+    pub org_id: String,
+}
+
+/// Rebind the current session to another org the user is a member of. Rotates
+/// the token (revoke old, issue new) with the role held in the target org.
+pub async fn switch_org(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+    Json(body): Json<SwitchOrgBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(uid) = ctx.user_id.clone() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "not_a_session",
+            "switching orgs requires a session token",
+        ));
+    };
+    let svc = accounts(&state)?;
+    let role = svc
+        .membership_role(&uid, &body.org_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "you are not a member of that organization",
+            )
+        })?;
+    if let Some(old) = bearer(&headers) {
+        let _ = svc.revoke_session(&old).await;
+    }
+    let identity = SessionIdentity {
+        user_id: uid.clone(),
+        org_id: body.org_id.clone(),
+        role: role.clone(),
+    };
+    let (token, expires) = svc.create_session(&identity).await.map_err(internal)?;
+    svc.record_event(
+        Some(&body.org_id),
+        Some(&uid),
+        "auth.switch_org",
+        Some("session"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        None,
+    )
+    .await;
+    Ok(Json(json!({
+        "token": token,
+        "expires_at_ms": expires,
+        "org_id": body.org_id,
+        "role": role,
+    })))
+}
