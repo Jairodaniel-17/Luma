@@ -210,6 +210,21 @@ impl AccountsService {
                         vec![],
                     )
                     .await?;
+                // Optional email-domain → org routing. When a self-registering
+                // email's domain is mapped here, the user joins that org as a
+                // member instead of spinning up a brand-new org.
+                self.sqlite
+                    .execute(
+                        "CREATE TABLE IF NOT EXISTS sys_domain_orgs (
+                            domain TEXT PRIMARY KEY,
+                            org_id TEXT NOT NULL,
+                            role TEXT NOT NULL DEFAULT 'member',
+                            created_at_ms INTEGER NOT NULL
+                        )"
+                        .to_string(),
+                        vec![],
+                    )
+                    .await?;
                 self.sqlite
                     .execute(
                         "CREATE TABLE IF NOT EXISTS sys_audit_events (
@@ -717,6 +732,114 @@ impl AccountsService {
             .await
     }
 
+    // ---- Email-domain → org routing (self-registration) ----
+
+    /// The org (and join role) a given email domain maps to, if any. `domain`
+    /// is matched case-insensitively without a leading `@`.
+    pub async fn org_for_domain(&self, domain: &str) -> anyhow::Result<Option<(String, String)>> {
+        self.ensure_init().await?;
+        let d = domain.trim().trim_start_matches('@').to_ascii_lowercase();
+        if d.is_empty() {
+            return Ok(None);
+        }
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT org_id, role FROM sys_domain_orgs WHERE domain = ?".to_string(),
+                vec![json!(d)],
+            )
+            .await?;
+        Ok(rows.into_iter().next().map(|r| {
+            (
+                r.get("org_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                r.get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("member")
+                    .to_string(),
+            )
+        }))
+    }
+
+    /// Map (or remap) an email domain to an org with a join role. Verifies the
+    /// org exists and the role is valid.
+    pub async fn set_domain_org(
+        &self,
+        domain: &str,
+        org_id: &str,
+        role: &str,
+    ) -> anyhow::Result<()> {
+        self.ensure_init().await?;
+        if !ENTERPRISE_ROLES.contains(&role) {
+            anyhow::bail!("invalid role '{role}'");
+        }
+        let d = domain.trim().trim_start_matches('@').to_ascii_lowercase();
+        if d.is_empty() || !d.contains('.') {
+            anyhow::bail!("invalid domain");
+        }
+        let o = self
+            .sqlite
+            .query(
+                "SELECT 1 FROM sys_orgs WHERE id = ?".to_string(),
+                vec![json!(org_id)],
+            )
+            .await?;
+        if o.is_empty() {
+            anyhow::bail!("org not found");
+        }
+        self.sqlite
+            .execute(
+                "INSERT INTO sys_domain_orgs (domain, org_id, role, created_at_ms)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(domain) DO UPDATE SET org_id = excluded.org_id, role = excluded.role"
+                    .to_string(),
+                vec![json!(d), json!(org_id), json!(role), json!(now_ms())],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_domain_org(&self, domain: &str) -> anyhow::Result<bool> {
+        self.ensure_init().await?;
+        let d = domain.trim().trim_start_matches('@').to_ascii_lowercase();
+        let n = self
+            .sqlite
+            .execute(
+                "DELETE FROM sys_domain_orgs WHERE domain = ?".to_string(),
+                vec![json!(d)],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    pub async fn list_domain_orgs(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.ensure_init().await?;
+        self.sqlite
+            .query(
+                "SELECT d.domain, d.org_id, d.role, o.name AS org_name
+                 FROM sys_domain_orgs d LEFT JOIN sys_orgs o ON o.id = d.org_id
+                 ORDER BY d.domain"
+                    .to_string(),
+                vec![],
+            )
+            .await
+    }
+
+    /// Register a user directly into an existing org as `role` (used by
+    /// domain-routed self-registration). Returns the created user.
+    pub async fn register_into_org(
+        &self,
+        org_id: &str,
+        email: &str,
+        password: &str,
+        role: &str,
+    ) -> anyhow::Result<UserRecord> {
+        self.ensure_init().await?;
+        self.create_user(org_id, email, password, role).await
+    }
+
     // ---- Login / sessions ----
 
     /// Verify email+password. Returns the identity on success.
@@ -1220,5 +1343,51 @@ mod tests {
         assert!(svc.validate_session(&t2).await.unwrap().is_some());
         assert!(svc.validate_session(&t1).await.unwrap().is_none());
         assert!(svc.validate_session(&t3).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn domain_routing_maps_registration() {
+        use crate::sqlite::SqliteService;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = SqliteService::new(format!("{}/t.db", dir.path().display())).unwrap();
+        let svc = super::AccountsService::new(Arc::new(sqlite));
+        let (org, _owner) = svc.register("Acme", "boss@acme.com", "pw").await.unwrap();
+
+        // No mapping yet.
+        assert!(svc.org_for_domain("acme.com").await.unwrap().is_none());
+
+        // Map @ACME.com (normalized) → org as member.
+        svc.set_domain_org("@ACME.com", &org.id, "member")
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.org_for_domain("acme.com").await.unwrap(),
+            Some((org.id.clone(), "member".to_string()))
+        );
+
+        // A domain-routed registration lands in that org as a member.
+        let u = svc
+            .register_into_org(&org.id, "new@acme.com", "pw2", "member")
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.membership_role(&u.id, &org.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("member")
+        );
+
+        // Mapping to a nonexistent org / invalid domain is rejected.
+        assert!(svc.set_domain_org("x.com", "nope", "member").await.is_err());
+        assert!(svc
+            .set_domain_org("nodot", &org.id, "member")
+            .await
+            .is_err());
+
+        // Remove the mapping.
+        assert!(svc.remove_domain_org("acme.com").await.unwrap());
+        assert!(svc.org_for_domain("acme.com").await.unwrap().is_none());
     }
 }
