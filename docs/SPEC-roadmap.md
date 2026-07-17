@@ -8,6 +8,23 @@ E2E en producción.
 
 Convención de estado por ítem: `[ ]` pendiente · `[~]` en curso · `[x]` hecho.
 
+## Estado actual (2026-07-17)
+
+**Desplegado y verificado E2E en producción (OCI):**
+- v4.21.1 — revocación de sesiones al cambiar membresías.
+- v4.22.0 — M1.2 gestión de sesiones. + M1.1 (master key, aplicada en el restart).
+- v4.23.0 — M2.1 selector de org, M2.2 invitar en un paso, M2.3 auto-registro por dominio.
+- v4.24.0 — M3.1 borrar colección por API.
+- M1.3 backups (local) + M1.4 advisories (documentados) — fuera de release.
+
+**Hecho: 8/12** → M1.1, M1.2, M1.3, M1.4, M2.1, M2.2, M2.3, M3.1.
+
+**Pendiente (features): M3.2, M3.3, M3.4, M4.1.** Ninguno bloquea el uso; son mejoras.
+Recomendación de orden: M4.1 (barato) → M3.2 → M3.4 → M3.3.
+
+**Backlog (alto esfuerzo, cuando haya tráfico real):** B.1 quotas por tenant · B.2 SSO ·
+B.3 HA/failover · B.4 escala horizontal de escrituras · B.5 fase 3/4 vector (en curso).
+
 ---
 
 ## Milestone 1 — Seguridad & operación base  (release **v4.22.0**)
@@ -35,15 +52,15 @@ Lo más barato y crítico primero: que la instancia sea segura de operar y no pi
 - UI: en el perfil/header, "Cerrar sesión en todos los dispositivos".
 **Aceptación:** test que crea N sesiones, lista N, revoca todas menos la actual, valida que solo queda 1.
 
-### 1.3 `[ ]` Backups automáticos programados (offsite)  · impacto ALTO · esfuerzo MEDIO
+### 1.3 `[x]` Backups automáticos programados (offsite → local por ahora)  · impacto ALTO · esfuerzo MEDIO
 **Objetivo:** que la pérdida del disco no sea pérdida de datos.
-**Enfoque:**
-- Reusar `backup.rs` (backup/restore ya existen). Script + `systemd timer` diario:
-  snapshot de `data/` (state.redb, sqlite/rustkiss.db, vectors/, blobs/, queues/)
-  a un tar cifrado, subido a almacenamiento offsite (OCI Object Storage o similar).
-- Retención (p. ej. 7 diarios + 4 semanales).
-- Runbook de restore.
-**Aceptación:** timer activo; un backup generado y **restaurado** en un dir temporal → datos íntegros; documento de restore.
+**Hecho (local):** `luma-backup.timer` diario (04:00±30min) → `/usr/local/bin/luma-backup.sh`
+hace tar+gzip+AES-256 de `~/data` a `/home/ubuntu/backups/luma-<ts>.tar.gz.enc`, retención 7 días,
+clave en `/root/.luma_backup_key`. Restore verificado (redb+sqlite+vectors íntegros).
+**Restore:** `openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/root/.luma_backup_key -in <f>.enc | tar xzf - -C <dst>`.
+**Pendiente (offsite):** jairo eligió dejarlo local por ahora. El backup local protege
+corrupción/borrado accidental, NO pérdida de disco — para offsite real falta destino+creds
+(OCI Object Storage u otro S3).
 
 ### 1.4 `[x]` Advisories de dependencias  · impacto MEDIO · esfuerzo BAJO  (tarea #23)
 **Objetivo:** `cargo audit` / `cargo deny` sin advisories accionables.
