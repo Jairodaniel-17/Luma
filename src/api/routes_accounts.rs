@@ -73,6 +73,42 @@ pub async fn register(
             "registration is restricted to approved email domains",
         ));
     }
+    // Domain routing: if the email's domain is mapped to an existing org, the
+    // user joins that org (as the mapped role) instead of creating a new org.
+    let domain = body.email.rsplit('@').next().unwrap_or_default();
+    if let Some((org_id, role)) = svc.org_for_domain(domain).await.map_err(internal)? {
+        let user = svc
+            .register_into_org(&org_id, &body.email, &body.password, &role)
+            .await
+            .map_err(|e| {
+                tracing::warn!("domain register failed: {e}");
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "conflict",
+                    "registration could not be completed",
+                )
+            })?;
+        svc.record_event(
+            Some(&org_id),
+            Some(&user.id),
+            "user.register_domain",
+            Some("user"),
+            client_ip(&headers).as_deref(),
+            user_agent(&headers).as_deref(),
+            Some(&user.email),
+        )
+        .await;
+        return Ok((
+            StatusCode::CREATED,
+            Json(json!({
+                "org_id": org_id,
+                "user_id": user.id,
+                "email": user.email,
+                "role": role,
+            })),
+        ));
+    }
+
     // Generic 409 on any conflict (e.g. duplicate email) — do not echo the raw
     // DB error, which would leak that an account for this email already exists.
     let (org, user) = svc
@@ -534,6 +570,58 @@ pub async fn set_access_policy(
     ))
 }
 
+// ---- Platform admin: email-domain → org routing ----
+
+pub async fn list_domain_orgs(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_platform_admin(&ctx)?;
+    let svc = accounts(&state)?;
+    let mappings = svc.list_domain_orgs().await.map_err(internal)?;
+    Ok(Json(json!({ "mappings": mappings })))
+}
+
+#[derive(Deserialize)]
+pub struct DomainOrgBody {
+    pub domain: String,
+    pub org_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+pub async fn set_domain_org(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Json(body): Json<DomainOrgBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_platform_admin(&ctx)?;
+    let svc = accounts(&state)?;
+    let role = body.role.as_deref().unwrap_or("member");
+    svc.set_domain_org(&body.domain, &body.org_id, role)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_domain_org(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Path(domain): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_platform_admin(&ctx)?;
+    let svc = accounts(&state)?;
+    let ok = svc.remove_domain_org(&domain).await.map_err(internal)?;
+    if !ok {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "domain mapping not found",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---- Admin: multi-org membership ----
 
 /// Whether the caller is a platform admin (global admin/owner, no tenant).
@@ -625,6 +713,92 @@ pub async fn add_org_member(
     Ok((
         StatusCode::CREATED,
         Json(json!({ "user_id": user.id, "email": user.email, "org_id": org, "role": body.role })),
+    ))
+}
+
+/// Generate a random temporary password (URL-safe, ~16 chars) for an invited
+/// user who has no password yet. Returned once so the admin can share it.
+fn gen_temp_password() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use rand::RngCore;
+    let mut b = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut b);
+    URL_SAFE_NO_PAD.encode(b)
+}
+
+#[derive(Deserialize)]
+pub struct InviteBody {
+    pub email: String,
+    pub role: String,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// Invite a user to an org in one step: if the email already has an account,
+/// just add the membership; otherwise create the account (with the given
+/// password or a generated temporary one, returned once) and add it. This
+/// collapses the old two-step "create user, then add member" flow.
+pub async fn invite_member(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+    Json(body): Json<InviteBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_org_manager(&ctx, &org)?;
+    guard_role_grant(&ctx, &body.role)?;
+    let svc = accounts(&state)?;
+
+    if let Some(u) = svc.user_by_email(&body.email).await.map_err(internal)? {
+        svc.add_membership(&u.id, &org, &body.role)
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
+        svc.record_event(
+            Some(&org),
+            ctx.user_id.as_deref(),
+            "member.invite_existing",
+            Some("membership"),
+            client_ip(&headers).as_deref(),
+            user_agent(&headers).as_deref(),
+            Some(&format!("{} -> {}", u.email, body.role)),
+        )
+        .await;
+        return Ok((
+            StatusCode::OK,
+            Json(json!({
+                "user_id": u.id, "email": u.email, "org_id": org,
+                "role": body.role, "created": false,
+            })),
+        ));
+    }
+
+    let (password, generated) = match body.password.as_deref() {
+        Some(p) if p.len() >= 8 => (p.to_string(), false),
+        _ => (gen_temp_password(), true),
+    };
+    let user = svc
+        .create_user(&org, &body.email, &password, &body.role)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::CONFLICT, "conflict", e.to_string()))?;
+    svc.record_event(
+        Some(&org),
+        ctx.user_id.as_deref(),
+        "member.invite_new",
+        Some("user"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        Some(&user.email),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "user_id": user.id, "email": user.email, "org_id": org,
+            "role": body.role, "created": true,
+            // Only present when we generated the password (share it once).
+            "temp_password": generated.then_some(password),
+        })),
     ))
 }
 
@@ -728,6 +902,57 @@ pub async fn my_orgs(
     let svc = accounts(&state)?;
     let orgs = svc.list_user_orgs(&uid).await.map_err(internal)?;
     Ok(Json(json!({ "orgs": orgs })))
+}
+
+/// List the current user's live sessions (metadata only, never the token).
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(uid) = ctx.user_id.clone() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "not_a_session",
+            "this endpoint requires a session token",
+        ));
+    };
+    let svc = accounts(&state)?;
+    let sessions = svc.list_user_sessions(&uid).await.map_err(internal)?;
+    let count = sessions.len();
+    Ok(Json(json!({ "sessions": sessions, "count": count })))
+}
+
+/// Revoke every other session of the current user, keeping only the caller's
+/// current one ("log out everywhere else").
+pub async fn revoke_all_sessions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(uid) = ctx.user_id.clone() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "not_a_session",
+            "this endpoint requires a session token",
+        ));
+    };
+    let svc = accounts(&state)?;
+    let current = bearer(&headers).unwrap_or_default();
+    let revoked = svc
+        .revoke_other_sessions(&uid, &current)
+        .await
+        .map_err(internal)?;
+    svc.record_event(
+        ctx.tenant_id.as_deref(),
+        Some(&uid),
+        "auth.revoke_all_sessions",
+        Some("session"),
+        client_ip(&headers).as_deref(),
+        user_agent(&headers).as_deref(),
+        Some(&format!("{revoked} revoked")),
+    )
+    .await;
+    Ok(Json(json!({ "revoked": revoked })))
 }
 
 #[derive(Deserialize)]

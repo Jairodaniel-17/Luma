@@ -114,10 +114,11 @@ function Login({ onLogin }: { onLogin: () => void }) {
     setBusy(true);
     try {
       if (mode === "register") await api.register(orgName, email, password);
-      const { token, role } = await api.login(email, password);
+      const { token, role, org_id } = await api.login(email, password);
       setToken(token);
       localStorage.setItem("luma_email", email);
       localStorage.setItem("luma_role", role ?? "");
+      localStorage.setItem("luma_org", org_id ?? "");
       onLogin();
     } catch (err) {
       setError((err as Error).message);
@@ -179,6 +180,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
     clearToken();
     localStorage.removeItem("luma_email");
     localStorage.removeItem("luma_role");
+    localStorage.removeItem("luma_org");
     onLogout();
   }
 
@@ -199,6 +201,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
             <BookOpen size={18} strokeWidth={1.75} aria-hidden />
             <span>Documentación</span>
           </button>
+          <OrgSwitcher />
           <div className="userchip">
             <div className="avatar">{email.slice(0, 1).toUpperCase()}</div>
             <div className="who">
@@ -207,6 +210,21 @@ function Console({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
           <button className="logout" onClick={doLogout}>Cerrar sesión</button>
+          <button
+            className="navitem"
+            style={{ fontSize: 12, opacity: 0.75 }}
+            onClick={async () => {
+              if (!confirm("¿Cerrar tu sesión en todos los demás dispositivos? La actual se mantiene.")) return;
+              try {
+                const r = await api.revokeAllSessions();
+                alert(`Listo: ${r.revoked} otra(s) sesión(es) cerrada(s).`);
+              } catch (e) {
+                alert(`No se pudo: ${(e as Error).message}`);
+              }
+            }}
+          >
+            Cerrar otras sesiones
+          </button>
         </div>
       </aside>
       <main className={`content ${tab === "docs" ? "content-docs" : ""}`}>
@@ -593,6 +611,39 @@ function RolePermissions() {
   );
 }
 
+/* --- Selector de organización (multi-org) --------------------------------- */
+function OrgSwitcher() {
+  const { data } = useAsync(() => api.myOrgs());
+  const orgs = data?.orgs ?? [];
+  const current = localStorage.getItem("luma_org") || (orgs[0]?.org_id ?? "");
+  // Solo tiene sentido si el usuario pertenece a más de una organización.
+  if (orgs.length <= 1) return null;
+  return (
+    <label className="field" style={{ marginBottom: 10 }}>
+      <span>Organización activa</span>
+      <select
+        value={current}
+        onChange={async (e) => {
+          const id = e.target.value;
+          try {
+            const r = await api.switchOrg(id);
+            setToken(r.token);
+            localStorage.setItem("luma_org", r.org_id);
+            localStorage.setItem("luma_role", r.role);
+            window.location.reload();
+          } catch (err) {
+            alert(`No se pudo cambiar de organización: ${(err as Error).message}`);
+          }
+        }}
+      >
+        {orgs.map((o) => (
+          <option key={o.org_id} value={o.org_id}>{o.name} · {o.role}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 /* --- Organizaciones (consola multi-org) ----------------------------------- */
 const MEMBER_ROLES = ["owner", "admin", "member", "viewer"] as const;
 
@@ -673,14 +724,22 @@ function OrgMembers({ org }: { org: OrgRow }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
   const [msg, setMsg] = useState<string | null>(null);
+  const [invited, setInvited] = useState<string | null>(null);
   const members = data?.members ?? [];
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    setMsg(null);
+    setMsg(null); setInvited(null);
     try {
-      await api.addOrgMember(org.id, email.trim(), role);
+      const r = await api.inviteMember(org.id, email.trim(), role);
       setEmail("");
+      if (r.created && r.temp_password) {
+        setInvited(`Usuario creado. Contraseña temporal (compártela una vez): ${r.temp_password}`);
+      } else if (r.created) {
+        setInvited("Usuario creado y añadido a la organización.");
+      } else {
+        setInvited(`${r.email} añadido a la organización como ${r.role}.`);
+      }
       refresh();
     } catch (err) {
       setMsg((err as Error).message);
@@ -691,15 +750,16 @@ function OrgMembers({ org }: { org: OrgRow }) {
     <div className="card" style={{ marginTop: 20 }}>
       <h3 className="section-label" style={{ marginTop: 0 }}>Miembros de {org.name}</h3>
       <form className="row" onSubmit={add}>
-        <label className="field" style={{ flex: 1, marginBottom: 0 }}><span>Correo de un usuario existente</span>
+        <label className="field" style={{ flex: 1, marginBottom: 0 }}><span>Invitar por correo</span>
           <input placeholder="persona@empresa.com" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
         <label className="field" style={{ marginBottom: 0 }}><span>Rol en esta org</span>
           <select value={role} onChange={(e) => setRole(e.target.value)}>
             {MEMBER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
           </select></label>
-        <button type="submit">Añadir a la org</button>
+        <button type="submit">Invitar</button>
       </form>
-      <p className="perm-note" style={{ marginTop: 10 }}>El usuario debe existir ya (créalo en la pestaña Usuarios). Añadirlo aquí le da acceso a esta organización con el rol elegido, sin quitarle las demás.</p>
+      <p className="perm-note" style={{ marginTop: 10 }}>Si el correo ya tiene cuenta, se añade a esta organización con el rol elegido (sin quitarle las demás). Si no existe, se crea la cuenta y se te muestra una contraseña temporal para compartir.</p>
+      {invited && <div className="card notice" style={{ marginTop: 12, marginBottom: 0 }}>{invited}</div>}
       {msg && <ErrorBox msg={msg} />}
       {error && <ErrorBox msg={error} />}
       {members.length === 0 ? (
@@ -812,7 +872,71 @@ function Access() {
         <button className="primary" disabled={busy} type="submit">{busy ? "…" : "Guardar política"}</button>
         {msg && <div className={msg === "Guardado." ? "card notice" : "error"} style={{ marginTop: 14, marginBottom: 0 }}>{msg}</div>}
       </form>
+      <DomainRouting />
     </div>
+  );
+}
+
+/* --- Enrutado de dominios a organizaciones (auto-registro) ---------------- */
+function DomainRouting() {
+  const { data, error, refresh } = useAsync(() => api.listDomainOrgs());
+  const orgsQ = useAsync(() => api.listOrgs());
+  const orgs = orgsQ.data?.orgs ?? [];
+  const [domain, setDomain] = useState("");
+  const [orgId, setOrgId] = useState("");
+  const [role, setRole] = useState("member");
+  const [msg, setMsg] = useState<string | null>(null);
+  const rows = data?.mappings ?? [];
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault(); setMsg(null);
+    try {
+      await api.setDomainOrg(domain.trim(), orgId || orgs[0]?.id || "", role);
+      setDomain(""); refresh();
+    } catch (err) { setMsg((err as Error).message); }
+  }
+
+  return (
+    <>
+      <h3 className="section-label">Auto-registro por dominio</h3>
+      <p className="perm-note" style={{ marginTop: 0 }}>Cuando alguien se registra con un correo de un dominio mapeado, entra directo a esa organización (con el rol indicado) en vez de crear una nueva.</p>
+      <div className="card">
+        <form className="row" onSubmit={add}>
+          <label className="field" style={{ flex: 1, marginBottom: 0 }}><span>Dominio</span>
+            <input placeholder="acme.com" value={domain} onChange={(e) => setDomain(e.target.value)} required /></label>
+          <label className="field" style={{ flex: 1, marginBottom: 0 }}><span>Organización</span>
+            <select value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+              {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select></label>
+          <label className="field" style={{ marginBottom: 0 }}><span>Rol</span>
+            <select value={role} onChange={(e) => setRole(e.target.value)}>
+              {MEMBER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select></label>
+          <button type="submit">Mapear</button>
+        </form>
+        {msg && <ErrorBox msg={msg} />}
+      </div>
+      {error && <ErrorBox msg={error} />}
+      {rows.length > 0 && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>Dominio</th><th>Organización</th><th>Rol</th><th style={{ textAlign: "right" }}>Acciones</th></tr></thead>
+            <tbody>
+              {rows.map((m) => (
+                <tr key={m.domain}>
+                  <td><code>{m.domain}</code></td>
+                  <td>{m.org_name ?? m.org_id}</td>
+                  <td>{m.role}</td>
+                  <td style={{ textAlign: "right" }}>
+                    <button className="danger" onClick={async () => { await api.deleteDomainOrg(m.domain); refresh(); }}>quitar</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 

@@ -56,6 +56,10 @@ export const api = {
       password,
     }),
   logout: () => request<void>("POST", "/v1/auth/logout"),
+  listSessions: () =>
+    request<{ sessions: SessionRow[]; count: number }>("GET", "/v1/auth/sessions"),
+  revokeAllSessions: () =>
+    request<{ revoked: number }>("POST", "/v1/auth/sessions/revoke-all"),
   stats: () => request<Record<string, number>>("GET", "/v1/admin/stats"),
   health: () => request<Record<string, unknown>>("GET", "/v1/health"),
   listUsers: () =>
@@ -82,6 +86,18 @@ export const api = {
       `/v1/admin/orgs/${encodeURIComponent(org)}/members`,
       { email, role },
     ),
+  inviteMember: (org: string, email: string, role: string, password?: string) =>
+    request<{
+      user_id: string;
+      email: string;
+      role: string;
+      created: boolean;
+      temp_password: string | null;
+    }>(
+      "POST",
+      `/v1/admin/orgs/${encodeURIComponent(org)}/invite`,
+      password ? { email, role, password } : { email, role },
+    ),
   updateOrgMemberRole: (org: string, userId: string, role: string) =>
     request<void>(
       "PUT",
@@ -100,6 +116,12 @@ export const api = {
       "/v1/auth/switch-org",
       { org_id },
     ),
+  listDomainOrgs: () =>
+    request<{ mappings: DomainOrgRow[] }>("GET", "/v1/auth/domain-orgs"),
+  setDomainOrg: (domain: string, org_id: string, role: string) =>
+    request<void>("PUT", "/v1/auth/domain-orgs", { domain, org_id, role }),
+  deleteDomainOrg: (domain: string) =>
+    request<void>("DELETE", `/v1/auth/domain-orgs/${encodeURIComponent(domain)}`),
   listKeys: () => request<KeyRow[]>("GET", "/v1/auth/keys"),
   createKey: (name: string, role: string) =>
     request<{ id: string; key: string }>("POST", "/v1/auth/keys", {
@@ -186,6 +208,18 @@ export interface UserOrgRow {
   name: string;
   role: string;
   created_at_ms: number;
+}
+export interface SessionRow {
+  org_id: string;
+  role: string;
+  created_at_ms: number;
+  expires_at_ms: number;
+}
+export interface DomainOrgRow {
+  domain: string;
+  org_id: string;
+  role: string;
+  org_name: string | null;
 }
 export interface KeyRow {
   id: string;

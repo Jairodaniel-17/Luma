@@ -275,6 +275,14 @@ pub fn router(deps: RouterDeps) -> Router<()> {
             get(routes_accounts::get_access_policy).put(routes_accounts::set_access_policy),
         )
         .route(
+            "/v1/auth/domain-orgs",
+            get(routes_accounts::list_domain_orgs).put(routes_accounts::set_domain_org),
+        )
+        .route(
+            "/v1/auth/domain-orgs/:domain",
+            delete(routes_accounts::delete_domain_org),
+        )
+        .route(
             "/v1/admin/orgs",
             get(routes_accounts::list_orgs).post(routes_accounts::create_org),
         )
@@ -282,6 +290,10 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route(
             "/v1/admin/orgs/:id/members",
             get(routes_accounts::list_org_members).post(routes_accounts::add_org_member),
+        )
+        .route(
+            "/v1/admin/orgs/:id/invite",
+            post(routes_accounts::invite_member),
         )
         .route(
             "/v1/admin/orgs/:id/members/:user_id",
@@ -302,6 +314,11 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         )
         .route("/v1/auth/my-orgs", get(routes_accounts::my_orgs))
         .route("/v1/auth/switch-org", post(routes_accounts::switch_org))
+        .route("/v1/auth/sessions", get(routes_accounts::list_sessions))
+        .route(
+            "/v1/auth/sessions/revoke-all",
+            post(routes_accounts::revoke_all_sessions),
+        )
         .route("/v1/admin/stats", get(routes_accounts::stats))
         .route("/v1/admin/audit-events", get(routes_accounts::audit_events))
         .route(
