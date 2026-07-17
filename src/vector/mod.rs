@@ -974,8 +974,29 @@ impl VectorStore {
                 }
                 Ok(())
             }
+            "vector_collection_dropped" => {
+                if let Some(name) = ev.data.get("collection").and_then(|v| v.as_str()) {
+                    self.0.collections.remove(name);
+                    if let Some(layout) = self.layout_for(name) {
+                        let _ = std::fs::remove_dir_all(&layout.dir);
+                    }
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
+    }
+
+    /// Drop a collection entirely: remove it from memory and delete its on-disk
+    /// layout directory. Returns whether it existed. The caller is responsible
+    /// for emitting the `vector_collection_dropped` WAL event (see
+    /// `Engine::drop_vector_collection`) so a restart does not resurrect it.
+    pub fn drop_collection(&self, name: &str) -> Result<bool, VectorError> {
+        let existed = self.0.collections.remove(name).is_some();
+        if let Some(layout) = self.layout_for(name) {
+            let _ = std::fs::remove_dir_all(&layout.dir);
+        }
+        Ok(existed)
     }
 
     pub fn add(&self, collection: &str, id: &str, item: VectorItem) -> Result<(), VectorError> {

@@ -490,6 +490,7 @@ fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore,
             }
         }
         "vector_collection_created"
+        | "vector_collection_dropped"
         | "vector_added"
         | "vector_upserted"
         | "vector_updated"

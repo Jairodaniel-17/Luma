@@ -370,7 +370,9 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/vector", get(routes_vector::list_collections))
         .route(
             "/v1/vector/:collection",
-            get(routes_vector::get_collection_detail).post(routes_vector::create_collection),
+            get(routes_vector::get_collection_detail)
+                .post(routes_vector::create_collection)
+                .delete(routes_vector::delete_collection),
         )
         .route("/v1/vector/:collection/add", post(routes_vector::add))
         .route("/v1/vector/:collection/upsert", post(routes_vector::upsert))

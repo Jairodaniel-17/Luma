@@ -1062,6 +1062,20 @@ impl AccountsService {
         Ok(())
     }
 
+    /// Forget ownership of a collection (after it's dropped) so the name is free
+    /// to be created again. Clears both the row and the hot-path cache.
+    pub async fn unregister_collection(&self, name: &str) -> anyhow::Result<()> {
+        self.ensure_init().await?;
+        self.owner_cache.remove(name);
+        self.sqlite
+            .execute(
+                "DELETE FROM sys_collections WHERE name = ?".to_string(),
+                vec![json!(name)],
+            )
+            .await?;
+        Ok(())
+    }
+
     // ---- Semantic audit trail ----
 
     #[allow(clippy::too_many_arguments)]
