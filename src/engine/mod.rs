@@ -229,6 +229,7 @@ impl Engine {
                                 .map_err(|err| std::io::Error::other(err.to_string()))?;
                         }
                         "vector_collection_created"
+                        | "vector_collection_dropped"
                         | "vector_added"
                         | "vector_upserted"
                         | "vector_updated"
@@ -836,6 +837,30 @@ impl Engine {
             );
         }
         Ok(())
+    }
+
+    /// Drop a whole vector collection: emit a durable `vector_collection_dropped`
+    /// event (so replay won't resurrect it), remove it from memory + disk, and
+    /// delete its manifest state key so it disappears from listings. Returns
+    /// whether the collection existed.
+    pub fn drop_vector_collection(&self, collection: &str) -> Result<bool, EngineError> {
+        if self.0.vectors.get_collection(collection).is_none() {
+            return Ok(false);
+        }
+        let data = serde_json::json!({ "collection": collection });
+        let append = self.0.events.append_guard();
+        let event = self.0.events.next_record("vector_collection_dropped", data);
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        self.0.vectors.apply_event(&event)?;
+        self.0.events.publish_record(event);
+        drop(append);
+        // Remove the manifest so list_vector_collections no longer reports it.
+        let _ = self.delete_state(&vector_manifest_key(collection));
+        self.metrics().inc_events();
+        self.metrics().inc_vector_op();
+        Ok(true)
     }
 
     pub fn vector_add(

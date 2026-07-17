@@ -45,10 +45,11 @@ Lo más barato y crítico primero: que la instancia sea segura de operar y no pi
 - Runbook de restore.
 **Aceptación:** timer activo; un backup generado y **restaurado** en un dir temporal → datos íntegros; documento de restore.
 
-### 1.4 `[ ]` Advisories de dependencias  · impacto MEDIO · esfuerzo BAJO  (tarea #23)
+### 1.4 `[x]` Advisories de dependencias  · impacto MEDIO · esfuerzo BAJO  (tarea #23)
 **Objetivo:** `cargo audit` / `cargo deny` sin advisories accionables.
 **Enfoque:** actualizar crates con advisory; documentar los no-explotables con justificación.
 **Aceptación:** jobs "Security Audit" y "Dependency Audit" verdes sin `--allow`.
+**Estado:** los 3 advisories vivos (bincode/rustls-pemfile unmaintained transitivos, lru IterMut unsound no-usado) ya están triados y documentados en deny.toml; CI verde. Nada accionable.
 
 ---
 
@@ -79,7 +80,7 @@ Config en la pestaña Acceso.
 
 ## Milestone 3 — Datos & embeddings  (release **v4.24.0**)
 
-### 3.1 `[ ]` Borrar colección completa por API  · impacto MEDIO · esfuerzo BAJO
+### 3.1 `[x]` Borrar colección completa por API  · impacto MEDIO · esfuerzo BAJO
 **Objetivo:** limpiar colecciones (hoy quedan dirs huérfanos: `_cap_*`, `_mix_*`).
 **Enfoque:** `DELETE /v1/vector/:collection` → borra índice en memoria, `data/vectors/<name>`,
 y la fila en `sys_collections`. Con guard de tenant-ownership.

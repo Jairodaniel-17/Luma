@@ -161,6 +161,32 @@ pub async fn create_collection(
     }))
 }
 
+/// Drop a whole collection (index in memory, on-disk data, and ownership row).
+/// Tenant isolation (path-based) already guarantees the caller owns it; a
+/// platform admin may drop any. Idempotent-ish: 404 if it doesn't exist.
+pub async fn delete_collection(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let dropped = state
+        .engine
+        .drop_vector_collection(&collection)
+        .map_err(map_engine_error)?;
+    if !dropped {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "collection not found",
+        ));
+    }
+    if let Some(accounts) = &state.accounts {
+        let _ = accounts.unregister_collection(&collection).await;
+    }
+    Ok(axum::Json(
+        serde_json::json!({ "dropped": true, "collection": collection }),
+    ))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AddBody {
     pub id: String,
