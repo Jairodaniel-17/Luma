@@ -29,6 +29,7 @@ import {
   clearToken,
   type UserRow,
   type OrgRow,
+  type MemberRow,
   type KeyRow,
   type AuditRow,
   type AccessPolicy,
@@ -592,14 +593,147 @@ function RolePermissions() {
   );
 }
 
-/* --- Organizaciones ------------------------------------------------------- */
+/* --- Organizaciones (consola multi-org) ----------------------------------- */
+const MEMBER_ROLES = ["owner", "admin", "member", "viewer"] as const;
+
 function Orgs() {
-  const { data, error } = useAsync(() => api.listOrgs());
-  if (error) return <ErrorBox msg={error} />;
+  const { data, error, refresh } = useAsync(() => api.listOrgs());
+  const [name, setName] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [selected, setSelected] = useState<OrgRow | null>(null);
+
+  const orgs = data?.orgs ?? [];
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    try {
+      await api.createOrg(name.trim());
+      setName("");
+      refresh();
+    } catch (err) {
+      setMsg((err as Error).message);
+    }
+  }
+  async function remove(o: OrgRow) {
+    if (!confirm(`¿Eliminar la organización "${o.name}" y todos sus usuarios? Esta acción no se puede deshacer.`)) return;
+    try {
+      await api.deleteOrg(o.id);
+      if (selected?.id === o.id) setSelected(null);
+      refresh();
+    } catch (err) {
+      setMsg((err as Error).message);
+    }
+  }
+
   return (
     <div>
-      <PageHead title="Organizaciones" desc="Tenants aislados en esta instancia." />
-      <Table<OrgRow> rows={data?.orgs ?? []} cols={["id", "name"]} />
+      <PageHead title="Organizaciones" desc="Crea organizaciones y gestiona quién pertenece a cada una y con qué rol. Un mismo usuario puede pertenecer a varias." />
+      <div className="card">
+        <form className="row" onSubmit={create}>
+          <label className="field" style={{ flex: 1, marginBottom: 0 }}><span>Nueva organización</span>
+            <input placeholder="p. ej. Acme Corp" value={name} onChange={(e) => setName(e.target.value)} required /></label>
+          <button type="submit">Crear organización</button>
+        </form>
+        {msg && <ErrorBox msg={msg} />}
+      </div>
+      {error && <ErrorBox msg={error} />}
+      {!error && orgs.length === 0 ? (
+        <p className="empty">Aún no hay organizaciones.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr><th>Nombre</th><th>ID</th><th style={{ textAlign: "right" }}>Acciones</th></tr>
+            </thead>
+            <tbody>
+              {orgs.map((o) => (
+                <tr key={o.id}>
+                  <td>{o.name}</td>
+                  <td><code className="muted">{o.id}</code></td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button onClick={() => setSelected(selected?.id === o.id ? null : o)}>
+                      {selected?.id === o.id ? "ocultar" : "miembros"}
+                    </button>{" "}
+                    <button className="danger" onClick={() => remove(o)}>eliminar</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {selected && <OrgMembers org={selected} />}
+    </div>
+  );
+}
+
+function OrgMembers({ org }: { org: OrgRow }) {
+  const { data, error, refresh } = useAsync(() => api.listOrgMembers(org.id), [org.id]);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("member");
+  const [msg, setMsg] = useState<string | null>(null);
+  const members = data?.members ?? [];
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    try {
+      await api.addOrgMember(org.id, email.trim(), role);
+      setEmail("");
+      refresh();
+    } catch (err) {
+      setMsg((err as Error).message);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 20 }}>
+      <h3 className="section-label" style={{ marginTop: 0 }}>Miembros de {org.name}</h3>
+      <form className="row" onSubmit={add}>
+        <label className="field" style={{ flex: 1, marginBottom: 0 }}><span>Correo de un usuario existente</span>
+          <input placeholder="persona@empresa.com" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
+        <label className="field" style={{ marginBottom: 0 }}><span>Rol en esta org</span>
+          <select value={role} onChange={(e) => setRole(e.target.value)}>
+            {MEMBER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select></label>
+        <button type="submit">Añadir a la org</button>
+      </form>
+      <p className="perm-note" style={{ marginTop: 10 }}>El usuario debe existir ya (créalo en la pestaña Usuarios). Añadirlo aquí le da acceso a esta organización con el rol elegido, sin quitarle las demás.</p>
+      {msg && <ErrorBox msg={msg} />}
+      {error && <ErrorBox msg={error} />}
+      {members.length === 0 ? (
+        <p className="empty" style={{ marginBottom: 0 }}>Esta organización aún no tiene miembros.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr><th>Correo</th><th>Rol</th><th style={{ textAlign: "right" }}>Acciones</th></tr>
+            </thead>
+            <tbody>
+              {members.map((m: MemberRow) => (
+                <tr key={m.user_id}>
+                  <td>{m.email}</td>
+                  <td>
+                    <select value={m.role} onChange={async (e) => {
+                      try { await api.updateOrgMemberRole(org.id, m.user_id, e.target.value); refresh(); }
+                      catch (err) { setMsg((err as Error).message); }
+                    }}>
+                      {MEMBER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <button className="danger" onClick={async () => {
+                      try { await api.removeOrgMember(org.id, m.user_id); refresh(); }
+                      catch (err) { setMsg((err as Error).message); }
+                    }}>quitar</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -683,16 +817,74 @@ function Access() {
 }
 
 /* --- Configuración (luma.toml en caliente) -------------------------------- */
+type EmbedPreset = { label: string; provider: string; url: string; model: string; needsKey: boolean };
+const EMBED_PRESETS: Record<string, EmbedPreset> = {
+  openai: { label: "OpenAI", provider: "openai", url: "https://api.openai.com/v1/embeddings", model: "text-embedding-3-small", needsKey: true },
+  google: { label: "Google Gemini", provider: "google", url: "https://generativelanguage.googleapis.com/v1beta/openai/embeddings", model: "text-embedding-004", needsKey: true },
+  ollama: { label: "Ollama (local)", provider: "ollama", url: "http://127.0.0.1:11434/api/embeddings", model: "nomic-embed-text", needsKey: false },
+  selfhost: { label: "Servidor propio (compatible OpenAI)", provider: "openai", url: "http://127.0.0.1:7998/v1/embeddings", model: "", needsKey: false },
+  cohere: { label: "Cohere", provider: "cohere", url: "https://api.cohere.ai", model: "embed-multilingual-v3.0", needsKey: true },
+  huggingface: { label: "HuggingFace", provider: "huggingface", url: "https://api-inference.huggingface.co", model: "", needsKey: true },
+  custom: { label: "Personalizado", provider: "custom", url: "", model: "", needsKey: false },
+};
+type LlmPreset = { label: string; provider: string; url: string; model: string };
+const LLM_PRESETS: Record<string, LlmPreset> = {
+  openai: { label: "OpenAI", provider: "openai", url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini" },
+  google: { label: "Google Gemini", provider: "openai", url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", model: "gemini-1.5-flash" },
+  ollama: { label: "Ollama (local)", provider: "ollama", url: "http://127.0.0.1:11434/v1/chat/completions", model: "llama3" },
+  custom: { label: "Personalizado", provider: "custom", url: "", model: "" },
+};
+// Which preset matches the saved config (by URL, else by provider), else custom.
+function matchPreset<T extends { url: string; provider: string }>(presets: Record<string, T>, url: string, provider: string): string {
+  const byUrl = Object.entries(presets).find(([, p]) => p.url && p.url === url);
+  if (byUrl) return byUrl[0];
+  const byProv = Object.entries(presets).find(([k, p]) => k !== "custom" && p.provider === provider);
+  return byProv ? byProv[0] : "custom";
+}
+
 function Configuration() {
   const { data, error } = useAsync(() => api.config());
+  const colls = useAsync(() => api.listCollections());
   const [cfg, setCfg] = useState<Record<string, unknown> | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Embedding provider test state (the key here is used ONLY to test; the
+  // running key still comes from the environment).
+  const [embedKey, setEmbedKey] = useState("");
+  const [probing, setProbing] = useState(false);
+  const [probe, setProbe] = useState<{ ok: boolean; dim?: number; error?: string } | null>(null);
+
   useEffect(() => { if (data && !cfg) setCfg({ ...data }); }, [data, cfg]);
 
   const set = (k: string, v: unknown) => setCfg((c) => ({ ...(c || {}), [k]: v }));
   const str = (k: string) => String(cfg?.[k] ?? "");
   const num = (k: string) => (cfg?.[k] as number) ?? 0;
+
+  const embedPreset = cfg ? matchPreset(EMBED_PRESETS, str("embedding_url"), str("embedding_provider")) : "custom";
+  const llmPreset = cfg ? matchPreset(LLM_PRESETS, str("llm_url"), str("llm_provider")) : "custom";
+
+  function applyEmbedPreset(key: string) {
+    const p = EMBED_PRESETS[key];
+    if (!p) return;
+    setProbe(null);
+    setCfg((c) => ({ ...(c || {}), embedding_provider: p.provider, embedding_url: p.url, embedding_model: p.model || (c?.embedding_model ?? "") }));
+  }
+  function applyLlmPreset(key: string) {
+    const p = LLM_PRESETS[key];
+    if (!p) return;
+    setCfg((c) => ({ ...(c || {}), llm_provider: p.provider, llm_url: p.url, llm_model: p.model || (c?.llm_model ?? "") }));
+  }
+
+  async function detectDim() {
+    setProbing(true); setProbe(null);
+    try {
+      const r = await api.probeEmbedding({ provider: str("embedding_provider"), url: str("embedding_url"), api_key: embedKey, model: str("embedding_model") });
+      setProbe(r);
+      if (r.ok && r.dim) set("embedding_dim", r.dim);
+    } catch (err) {
+      setProbe({ ok: false, error: (err as Error).message });
+    } finally { setProbing(false); }
+  }
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -707,6 +899,11 @@ function Configuration() {
 
   if (error) return <div><PageHead title="Configuración" /><ErrorBox msg={error} /></div>;
   if (!cfg) return <div><PageHead title="Configuración" /><p className="muted">Cargando…</p></div>;
+
+  // Existing collections whose dim differs from the (newly detected) embedding
+  // dim — they keep working with their own model, but new ones use the new dim.
+  const targetDim = num("embedding_dim");
+  const mismatched = (colls.data?.collections ?? []).filter((c) => c.dim != null && targetDim > 0 && c.dim !== targetDim);
 
   return (
     <div>
@@ -727,27 +924,55 @@ function Configuration() {
       <div className="card">
         <h3>Embeddings</h3>
         <div className="row" style={{ marginBottom: 0 }}>
-          <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Proveedor</span>
-            <input value={str("embedding_provider")} placeholder="none / openai / cohere / azure / ollama" onChange={(e) => set("embedding_provider", e.target.value)} /></label>
+          <label className="field" style={{ flex: 1, minWidth: 180 }}><span>Proveedor</span>
+            <select value={embedPreset} onChange={(e) => applyEmbedPreset(e.target.value)}>
+              {Object.entries(EMBED_PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
+            </select></label>
           <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Modelo</span>
             <input value={str("embedding_model")} placeholder="text-embedding-3-small" onChange={(e) => set("embedding_model", e.target.value)} /></label>
-          <label className="field" style={{ width: 110 }}><span>Dimensión</span>
-            <input type="number" value={num("embedding_dim")} onChange={(e) => set("embedding_dim", Number(e.target.value) || 0)} /></label>
         </div>
-        <label className="field" style={{ marginTop: 14, marginBottom: 0 }}><span>URL del proveedor</span>
-          <input value={str("embedding_url")} placeholder="https://api.openai.com/v1/embeddings" onChange={(e) => set("embedding_url", e.target.value)} /></label>
+        <label className="field" style={{ marginTop: 14 }}><span>URL del proveedor</span>
+          <input value={str("embedding_url")} placeholder="https://…/v1/embeddings" onChange={(e) => { set("embedding_url", e.target.value); }} /></label>
+        <div className="row" style={{ marginBottom: 0, alignItems: "flex-end" }}>
+          <label className="field" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}><span>Clave de API (solo para la prueba)</span>
+            <input type="password" placeholder={EMBED_PRESETS[embedPreset]?.needsKey ? "requerida por este proveedor" : "opcional"} value={embedKey} onChange={(e) => setEmbedKey(e.target.value)} /></label>
+          <button type="button" onClick={detectDim} disabled={probing || !str("embedding_url")}>
+            {probing ? "Probando…" : "Probar y detectar dimensión"}
+          </button>
+        </div>
+        {probe && (
+          probe.ok
+            ? <div className="card notice" style={{ marginTop: 14, marginBottom: 0 }}>✓ Conexión correcta · <strong>dimensión detectada: {probe.dim}</strong>. Se usará en las colecciones nuevas.</div>
+            : <ErrorBox msg={`No se pudo conectar: ${probe.error}`} />
+        )}
+        <div className="row" style={{ marginTop: 14, marginBottom: 0, alignItems: "center" }}>
+          <span className="perm-cap">Dimensión activa:</span>
+          <strong style={{ fontVariantNumeric: "tabular-nums" }}>{targetDim || "—"}</strong>
+          <span className="perm-note" style={{ margin: 0 }}>Se detecta con la prueba; no hace falta escribirla a mano.</span>
+        </div>
+        {mismatched.length > 0 && (
+          <div className="access-state restricted" style={{ marginTop: 14 }}>
+            <span className="dot" />
+            <div>
+              <strong>Atención:</strong> hay {mismatched.length} colección{mismatched.length === 1 ? "" : "es"} creada{mismatched.length === 1 ? "" : "s"} con otra dimensión ({mismatched.map((c) => `${c.collection}=${c.dim}`).join(", ")}).
+              Al cambiar de modelo <strong>seguirán funcionando</strong> con su embedding original, pero no son compatibles con el nuevo (dim {targetDim}). Para unificarlas hay que re-indexar/migrar sus datos; mientras tanto no las mezcles con el modelo nuevo.
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="card">
         <h3>Modelo de lenguaje (LLM)</h3>
         <div className="row" style={{ marginBottom: 0 }}>
-          <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Proveedor</span>
-            <input value={str("llm_provider")} placeholder="none / openai / …" onChange={(e) => set("llm_provider", e.target.value)} /></label>
+          <label className="field" style={{ flex: 1, minWidth: 180 }}><span>Proveedor</span>
+            <select value={llmPreset} onChange={(e) => applyLlmPreset(e.target.value)}>
+              {Object.entries(LLM_PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
+            </select></label>
           <label className="field" style={{ flex: 1, minWidth: 160 }}><span>Modelo</span>
             <input value={str("llm_model")} placeholder="gpt-4o-mini" onChange={(e) => set("llm_model", e.target.value)} /></label>
         </div>
         <label className="field" style={{ marginTop: 14, marginBottom: 0 }}><span>URL del proveedor</span>
-          <input value={str("llm_url")} placeholder="https://api.openai.com/v1/chat/completions" onChange={(e) => set("llm_url", e.target.value)} /></label>
+          <input value={str("llm_url")} placeholder="https://…/v1/chat/completions" onChange={(e) => set("llm_url", e.target.value)} /></label>
       </div>
 
       <form onSubmit={save}>
@@ -755,7 +980,7 @@ function Configuration() {
       </form>
       {msg && <div className={msg.toLowerCase().includes("restart") || msg.includes("reinic") || msg === "Guardado." ? "card notice" : "error"} style={{ marginTop: 14 }}>{msg}</div>}
       <p className="perm-note">
-        Las <strong>claves de API</strong> (embeddings/LLM) no se editan aquí: se cargan desde variables de entorno (<code>EMBEDDING_API_KEY</code>, <code>LLM_API_KEY</code>) por seguridad y no se guardan en <code>luma.toml</code>.
+        La <strong>clave de API</strong> del proveedor en producción se carga desde variables de entorno (<code>EMBEDDING_API_KEY</code>, <code>LLM_API_KEY</code>) y no se guarda en <code>luma.toml</code>. La clave de arriba se usa solo para la prueba de conexión.
       </p>
     </div>
   );
