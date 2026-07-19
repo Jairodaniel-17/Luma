@@ -1,59 +1,47 @@
-# Consolidación de memoria NS-Mem (ingesta → extracción → promoción de hechos)
+# Consolidación de memoria NS-Mem: de evento episódico a hecho semántico
 
-_tipo: activity_ · _origen: e0cb9aa02235_
+_tipo: activity_ · _origen: e19e0f9f2d5b_
 
 ```mermaid
 flowchart TD
-  subgraph AG["Agente / Cliente"]
-    ini(["Inicio"]) --> post["POST /v1/memory/{ns}/ingest_event"]
+  subgraph C["Cliente / Agente"]
+    ini(["Inicio"]) --> post["POST /v1/memory/{ns}/ingest_event<br/>texto + entity_id"]
   end
-  subgraph SYS["Sistema Luma (MemoryService)"]
-    epi["Guardar evento episódico<br/>status=Active"]
-    consol{"¿Consolidación habilitada<br/>y kind=Episodic?"}
-    dedup{"¿Hecho duplicado?<br/>cosine >= 0.95"}
+  subgraph S["Sistema Luma (MemoryService / Engine)"]
+    persist["Persistir registro episódico<br/>memory_records + embedding"]
+    working["Guardar memoria de trabajo<br/>KV con TTL por session_id"]
+    guard{"¿Consolidación activa<br/>y kind=Episodic<br/>con entity_id?"}
+    dedup{"¿Existe hecho duplicado?<br/>cosine >= 0.95"}
     prom{"¿confidence >=<br/>promotion_threshold?"}
-    upf["upsert_fact"]
-    contra{"¿Hecho existe y<br/>cosine < 0.55?"}
-    edge["Crear arista TriggeredBy<br/>(episódico -> semántico)"]
+    active["upsert_fact semántico<br/>status = Active"]
+    draft["upsert_fact semántico<br/>status = Draft"]
+    edge["Crear arista TriggeredBy<br/>episodio --> hecho"]
+    emit["Emitir evento<br/>episodic_promoted_to_semantic"]
+    finok(["Fin"])
+    finskip(["Fin (sin consolidar)"])
   end
-  subgraph LLM["Proveedor LLM (openai/ollama/mock)"]
-    ext["extract_facts:<br/>FactCandidates"]
+  subgraph L["Proveedor LLM (InferenceClient)"]
+    extract["extract_facts<br/>heurística u OpenAI/Ollama"]
   end
-  subgraph STO["Almacenamiento (Vector + SQLite/Graph)"]
-    knn["Vector search semántica"]
-    hist["append_belief_history"]
-    ce{"Tipo de arista"}
-    sup["Arista Supersedes"]
-    con["Arista Contradicts"]
-    save["Persistir fact<br/>memory_records"]
-    fin(["Fin"])
-  end
-  post --> epi
-  epi --> consol
-  consol -->|No| fin
-  consol -->|Sí| ext
-  ext --> dedup
-  dedup --> knn
-  knn --> dedup
-  dedup -->|Sí| fin
+  post --> persist
+  persist --> working
+  working --> guard
+  guard -->|No| finskip
+  guard -->|Sí| extract
+  extract --> dedup
+  dedup -->|Sí, otro id| finskip
   dedup -->|No| prom
-  prom -->|Sí| upf
-  prom -->|No| upf
-  upf --> contra
-  contra --> hist
-  hist --> ce
-  ce -->|contradicción| con
-  ce -->|actualización| sup
-  con --> save
-  sup --> save
-  contra -->|nuevo| save
-  save --> edge
-  edge --> fin
+  prom -->|Sí| active
+  prom -->|No| draft
+  active --> edge
+  draft --> edge
+  edge --> emit
+  emit --> finok
 ```
 
-Actores y actividades derivados de src/memory/consolidator.rs (extracción vía LLM, dedup cosine>=0.95, promoción Active/Draft por memory_fact_promotion_threshold, arista TriggeredBy), src/memory/ingest.rs (ingest_event episódico Active; upsert_fact con belief versioning append_belief_history y aristas Contradicts si cosine<0.55 o Supersedes), src/memory/service.rs y src/memory/llm.rs (proveedores none/mock/openai/ollama), y src/api/routes_memory.rs (endpoints /v1/memory/{ns}/ingest_event, upsert_fact, query). Almacenamiento vector + SQLite/graph según CLAUDE.md.
+Proceso derivado de src/memory/ingest.rs (ingest_event: persist_memory_record, index_memory_record, persist_working_memory), src/memory/consolidator.rs (process: guardas kind=Episodic/entity_id/memory_consolidation_enabled, find_duplicate_fact con umbral 0.95, promoción Active/Draft según memory_fact_promotion_threshold, arista TriggeredBy, emit_consolidation_event) y src/memory/llm.rs (InferenceClient.extract_facts, providers None/Mock/OpenAI/Ollama). Tres actores reales: el Cliente/Agente que llama al endpoint REST /v1/memory/{namespace}/ingest_event, el Sistema Luma que orquesta la persistencia y consolidación, y el Proveedor LLM que extrae los FactCandidate.
 
 
 <!-- tooling:diagram
-{"has_content": true, "title": "Consolidación de memoria NS-Mem (ingesta → extracción → promoción de hechos)", "mermaid": "flowchart TD\n  subgraph AG[\"Agente / Cliente\"]\n    ini([\"Inicio\"]) --> post[\"POST /v1/memory/{ns}/ingest_event\"]\n  end\n  subgraph SYS[\"Sistema Luma (MemoryService)\"]\n    epi[\"Guardar evento episódico<br/>status=Active\"]\n    consol{\"¿Consolidación habilitada<br/>y kind=Episodic?\"}\n    dedup{\"¿Hecho duplicado?<br/>cosine >= 0.95\"}\n    prom{\"¿confidence >=<br/>promotion_threshold?\"}\n    upf[\"upsert_fact\"]\n    contra{\"¿Hecho existe y<br/>cosine < 0.55?\"}\n    edge[\"Crear arista TriggeredBy<br/>(episódico -> semántico)\"]\n  end\n  subgraph LLM[\"Proveedor LLM (openai/ollama/mock)\"]\n    ext[\"extract_facts:<br/>FactCandidates\"]\n  end\n  subgraph STO[\"Almacenamiento (Vector + SQLite/Graph)\"]\n    knn[\"Vector search semántica\"]\n    hist[\"append_belief_history\"]\n    ce{\"Tipo de arista\"}\n    sup[\"Arista Supersedes\"]\n    con[\"Arista Contradicts\"]\n    save[\"Persistir fact<br/>memory_records\"]\n    fin([\"Fin\"])\n  end\n  post --> epi\n  epi --> consol\n  consol -->|No| fin\n  consol -->|Sí| ext\n  ext --> dedup\n  dedup --> knn\n  knn --> dedup\n  dedup -->|Sí| fin\n  dedup -->|No| prom\n  prom -->|Sí| upf\n  prom -->|No| upf\n  upf --> contra\n  contra --> hist\n  hist --> ce\n  ce -->|contradicción| con\n  ce -->|actualización| sup\n  con --> save\n  sup --> save\n  contra -->|nuevo| save\n  save --> edge\n  edge --> fin", "notes": "Actores y actividades derivados de src/memory/consolidator.rs (extracción vía LLM, dedup cosine>=0.95, promoción Active/Draft por memory_fact_promotion_threshold, arista TriggeredBy), src/memory/ingest.rs (ingest_event episódico Active; upsert_fact con belief versioning append_belief_history y aristas Contradicts si cosine<0.55 o Supersedes), src/memory/service.rs y src/memory/llm.rs (proveedores none/mock/openai/ollama), y src/api/routes_memory.rs (endpoints /v1/memory/{ns}/ingest_event, upsert_fact, query). Almacenamiento vector + SQLite/graph según CLAUDE.md.", "kind": "activity", "source_sha": "e0cb9aa02235c9bd3ece7d850d54f54655178cf1"}
+{"has_content": true, "title": "Consolidación de memoria NS-Mem: de evento episódico a hecho semántico", "mermaid": "flowchart TD\n  subgraph C[\"Cliente / Agente\"]\n    ini([\"Inicio\"]) --> post[\"POST /v1/memory/{ns}/ingest_event<br/>texto + entity_id\"]\n  end\n  subgraph S[\"Sistema Luma (MemoryService / Engine)\"]\n    persist[\"Persistir registro episódico<br/>memory_records + embedding\"]\n    working[\"Guardar memoria de trabajo<br/>KV con TTL por session_id\"]\n    guard{\"¿Consolidación activa<br/>y kind=Episodic<br/>con entity_id?\"}\n    dedup{\"¿Existe hecho duplicado?<br/>cosine >= 0.95\"}\n    prom{\"¿confidence >=<br/>promotion_threshold?\"}\n    active[\"upsert_fact semántico<br/>status = Active\"]\n    draft[\"upsert_fact semántico<br/>status = Draft\"]\n    edge[\"Crear arista TriggeredBy<br/>episodio --> hecho\"]\n    emit[\"Emitir evento<br/>episodic_promoted_to_semantic\"]\n    finok([\"Fin\"])\n    finskip([\"Fin (sin consolidar)\"])\n  end\n  subgraph L[\"Proveedor LLM (InferenceClient)\"]\n    extract[\"extract_facts<br/>heurística u OpenAI/Ollama\"]\n  end\n  post --> persist\n  persist --> working\n  working --> guard\n  guard -->|No| finskip\n  guard -->|Sí| extract\n  extract --> dedup\n  dedup -->|Sí, otro id| finskip\n  dedup -->|No| prom\n  prom -->|Sí| active\n  prom -->|No| draft\n  active --> edge\n  draft --> edge\n  edge --> emit\n  emit --> finok", "notes": "Proceso derivado de src/memory/ingest.rs (ingest_event: persist_memory_record, index_memory_record, persist_working_memory), src/memory/consolidator.rs (process: guardas kind=Episodic/entity_id/memory_consolidation_enabled, find_duplicate_fact con umbral 0.95, promoción Active/Draft según memory_fact_promotion_threshold, arista TriggeredBy, emit_consolidation_event) y src/memory/llm.rs (InferenceClient.extract_facts, providers None/Mock/OpenAI/Ollama). Tres actores reales: el Cliente/Agente que llama al endpoint REST /v1/memory/{namespace}/ingest_event, el Sistema Luma que orquesta la persistencia y consolidación, y el Proveedor LLM que extrae los FactCandidate.", "kind": "activity", "source_sha": "e19e0f9f2d5beb133329fd21218bfdbdc37872bc"}
 -->
