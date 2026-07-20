@@ -223,4 +223,5 @@ Rules:
 <!-- tooling:log -->
 - 2026-07-19 — Agregada linea final «test» al README y publicada al remoto (archivos clave: README.md)
 - 2026-07-19 — Añadida nueva linea final «test» al README y publicada (push) al remoto (archivos clave: README.md)
+- 2026-07-19 — Eliminada la última linea «test» del README y publicada (push) al remoto (archivos clave: README.md)
 <!-- /tooling:log -->
