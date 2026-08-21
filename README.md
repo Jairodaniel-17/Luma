@@ -549,7 +549,8 @@ Notas de honestidad:
 | [`docs/FEATURES.md`](docs/FEATURES.md) | Inventario de funcionalidades |
 | [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Seguridad y modelo de amenazas |
 | [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) | Checklist de producción |
-| [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | Plan de producto y roadmap |
+| [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md) | **Plan de ejecución unificado** (bloques, orden, estado) |
+| [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | SPEC de origen (detalle y criterios de aceptación) |
 | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Historial de versiones |
 | [`docs/DEMO.md`](docs/DEMO.md) | Guion de demo |
 

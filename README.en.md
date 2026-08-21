@@ -551,7 +551,8 @@ Documentation is currently written in Spanish.
 | [`docs/FEATURES.md`](docs/FEATURES.md) | Feature inventory |
 | [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Security and threat model |
 | [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) | Production checklist |
-| [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | Product plan and roadmap |
+| [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md) | **Unified execution plan** (blocks, order, status) |
+| [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | Source SPECs (detail and acceptance criteria) |
 | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Version history |
 | [`docs/DEMO.md`](docs/DEMO.md) | Demo script |
 
