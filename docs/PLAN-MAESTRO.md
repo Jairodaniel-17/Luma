@@ -145,13 +145,13 @@ Cierra los 4 ítems que llevan pendientes desde `SPEC-roadmap.md`. Todos son
 baratos y ninguno depende de los bloques siguientes: es el arranque de menor
 riesgo y deja el roadmap viejo a cero.
 
-- `[ ]` **M3.2 — modelo/dim por colección + validar mismatch.** Añadir
+- `[x]` **M3.2 — modelo/dim por colección + validar mismatch.** Añadir
   `embedding_model: Option<String>` y `embedding_dim: Option<usize>` a
   `vector::persist::Manifest` con `#[serde(default)]` (el struct ya tiene
   `version` y ese patrón, así que no hay migración). En el ingest por texto,
   si el dim del cliente activo ≠ el de la colección → 400 explicativo en vez
   de escribir un vector corrupto.
-- `[ ]` **M3.4 — hot-reload de embeddings/LLM.** `EmbeddingClient` detrás de
+- `[x]` **M3.4 — hot-reload de embeddings/LLM.** `EmbeddingClient` detrás de
   `ArcSwap`; `PUT /v1/config` reconstruye el cliente sin reiniciar.
   Verificable con `POST /v1/config/embedding/probe` mostrando el dim nuevo.
 - `[ ]` **M4.1 — SDKs + OpenAPI al día.** Los endpoints que existen en el
@@ -163,11 +163,17 @@ riesgo y deja el roadmap viejo a cero.
   bloque: `POST /v1/vector/:col/reindex {target_model}` como job en background
   con progreso. **Si el bloque se alarga, este es el ítem que se mueve al
   Bloque 1**, no los otros tres.
-- `[ ]` **Fix — `content-type` de `/v1/metrics`.** El handler
+- `[x]` **Fix — `content-type` de `/v1/metrics`.** El handler
   (`routes_state.rs:52`) devuelve el texto sin cabecera; Prometheus espera
   `text/plain; version=0.0.4`. Dos líneas, y es prerequisito de W5.1.
 
 **Puerta de verificación 0:** fmt + clippy + `cargo test`.
+
+> Corrida parcial tras M3.2 / M3.4 / metrics (el refactor a `EmbeddingHandle`
+> tocó 25 ficheros de test, así que se adelantó una pasada): fmt y
+> `clippy --all-targets --all-features` limpios, **257 tests verdes**. Destapó
+> un bug preexistente de Windows en `write_manifest` — ver W1.2 del Bloque 1,
+> que ya tiene su primera fila de tabla en `PROD_READINESS.md`.
 
 ### Bloque 1 — Durabilidad demostrada · `v4.26.0`
 
