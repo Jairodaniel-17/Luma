@@ -1,7 +1,14 @@
 <!-- RustKissVDB: el motor de datos convergente en Rust que impulsa Luma (búsqueda vectorial + KV + SQL + eventos en un solo binario). -->
 # Luma: La Plataforma de Datos Convergente
 
-**Luma** (crate Cargo `luma`, versión **4.11.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
+[![CI](https://github.com/Jairodaniel-17/rust-kiss-vdb/actions/workflows/ci.yml/badge.svg)](https://github.com/Jairodaniel-17/rust-kiss-vdb/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/Jairodaniel-17/rust-kiss-vdb?label=release&sort=semver)](https://github.com/Jairodaniel-17/rust-kiss-vdb/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Python SDK](https://img.shields.io/badge/python-luma--vdb-3775A9.svg)](sdk/)
+[![TS SDK](https://img.shields.io/badge/npm-luma--vdb-CB3837.svg)](sdk/typescript/)
+
+**Luma** (crate Cargo `luma`, versión **4.24.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
 
 - **Búsqueda vectorial** (ANN) con índices conmutables HNSW / IVF-FLAT-Q8 / DiskANN.
 - **Estado clave-valor** (KV) con TTL, compare-and-swap e índices.
@@ -11,18 +18,223 @@
 - **Bus de eventos** pub/sub con streaming SSE.
 - **NS-Mem**: una capa de memoria para agentes autónomos (episódica, semántica, procedural y de trabajo).
 - **Capa empresarial**: cuentas/organizaciones, roles, login con Argon2id, auditoría, respaldos, cifrado en reposo y un **panel de administración React incrustado en el propio binario**.
+- **SDKs oficiales**: Python (async + sync), TypeScript/JS e integración **LangChain**.
 
 Todo corre en un mismo proceso, eliminando la latencia de red entre subsistemas y simplificando el despliegue a un solo ejecutable.
 
-> Ver el estado real de cada pieza en la sección **Estado actual del proyecto** al final de este documento.
+*Read this in [English](README.en.md).*
 
 ---
+
+## Índice
+
+- [Instalación](#instalacion)
+- [Quickstart en 60 segundos](#quickstart)
+- [SDKs oficiales](#sdks)
+- [¿Por qué Luma?](#por-que-luma)
+- [Superficie de plataforma](#superficie)
+- [Rendimiento medido](#rendimiento)
+- [Arquitectura por módulos](#arquitectura)
+- [Capa empresarial](#enterprise)
+- [Niveles de API](#api)
+- [Embeddings (BYOM)](#embeddings)
+- [Configuración](#configuracion)
+- [Tecnologías clave](#tecnologias)
+- [Layout en disco](#layout)
+- [Estado actual del proyecto](#estado)
+- [Documentación](#documentacion)
+- [Licencia](#licencia)
+
+---
+
+<a id="instalacion"></a>
+
+## 📦 Instalación
+
+### Binario precompilado (vía más rápida)
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Jairodaniel-17/rust-kiss-vdb/main/install.sh | bash
+
+# Versión concreta o destino alternativo
+curl -fsSL .../install.sh | bash -s -- --version v4.24.0 --dest ~/.local/bin
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/Jairodaniel-17/rust-kiss-vdb/main/install.ps1 | iex
+```
+
+Los scripts descargan el binario del release de GitHub para tu plataforma (Linux, Windows, macOS) y lo colocan en el `PATH`.
+
+### Docker
+
+```bash
+# docker-compose (incluye volumen persistente en ./data_storage)
+LUMA_API_KEY=mi-clave docker compose up -d
+
+# o imagen directa
+docker build -t luma:latest .
+docker run -p 1234:1234 -v $PWD/data_storage:/data \
+  -e DATA_DIR=/data -e LUMA_API_KEY=mi-clave -e LUMA_MASTER_KEY=clave-fuerte \
+  luma:latest
+```
+
+Hay dos Dockerfiles: `Dockerfile` (glibc) y `Dockerfile.musl` (estático, imagen mínima). El `docker-compose.yml` ya expone las variables de rate limiting, TLS, embeddings y respaldos.
+
+> ⚠️ **La durabilidad exige montar un volumen persistente en `DATA_DIR`.** Sin él, el WAL y los vectores viven en la capa efímera del contenedor.
+
+### Desde el código fuente
+
+Requisitos: **Rust 1.88+** (edition 2021). SQLite va *bundled*, no requiere instalación externa.
+
+```bash
+cargo build --release
+
+# (Opcional) recompilar el panel de administración e incrustarlo en ui/dist
+cd admin-ui && npm ci && npm run build && cd ..
+```
+
+---
+
+<a id="quickstart"></a>
+
+## ⚡ Quickstart en 60 segundos
+
+```bash
+# 1. Arrancar (sirve API + panel en http://127.0.0.1:1234/)
+LUMA_MASTER_KEY="clave-secreta-fuerte" LUMA_API_KEY="mi-api-key" \
+  ./target/release/luma serve
+```
+
+```bash
+# 2. Crear una colección vectorial (dimensión + métrica)
+curl -X POST localhost:1234/v1/vector/docs \
+  -H 'authorization: Bearer mi-api-key' -H 'content-type: application/json' \
+  -d '{"dim":4,"metric":"cosine"}'
+
+# 3. Insertar un vector con metadatos
+curl -X POST localhost:1234/v1/vector/docs/upsert \
+  -H 'authorization: Bearer mi-api-key' -H 'content-type: application/json' \
+  -d '{"id":"doc-1","vector":[0.1,0.2,0.3,0.4],"meta":{"tipo":"contrato","year":2024}}'
+
+# 4. Buscar los k más cercanos
+curl -X POST localhost:1234/v1/vector/docs/search \
+  -H 'authorization: Bearer mi-api-key' -H 'content-type: application/json' \
+  -d '{"vector":[0.1,0.2,0.3,0.4],"k":5}'
+
+# 5. Buscar con filtro tipado por metadatos
+curl -X POST localhost:1234/v1/vector/docs/search \
+  -H 'authorization: Bearer mi-api-key' -H 'content-type: application/json' \
+  -d '{"vector":[0.1,0.2,0.3,0.4],"k":5,
+       "options":{"filter":{"eq":{"field":"tipo","value":"contrato"}}}}'
+```
+
+### Panel de administración
+
+```bash
+# Crear tu organización y entrar
+curl -X POST localhost:1234/v1/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"org_name":"Acme","email":"owner@acme.com","password":"un-password-fuerte"}'
+```
+
+Abre `http://127.0.0.1:1234/` para el panel React, o `http://127.0.0.1:1234/docs` para la documentación interactiva (Scalar).
+
+> **Producción:** define siempre `LUMA_MASTER_KEY` (cifrado) y `LUMA_API_KEY` (bootstrap). Sin `LUMA_MASTER_KEY` se usa una clave de desarrollo conocida y el servidor lo advierte en los logs. El puerto por defecto es **1234** con bind a `127.0.0.1`; las variables de entorno sobrescriben `luma.toml`.
+
+### Subcomandos del binario
+
+| Subcomando | Descripción |
+| :--- | :--- |
+| `luma serve` | Arranca el servidor HTTP (comando por defecto si no se pasa ninguno). |
+| `luma vacuum --collection <nombre>` | Compacta una colección vectorial. |
+| `luma diskann build …` / `tune …` / `status <colección>` | Construye, ajusta o consulta el estado de un grafo DiskANN. |
+| `luma backup` | Genera un respaldo consistente (SQLite + snapshot + WAL). |
+| `luma restore <ruta>` | Restaura desde un directorio de respaldo. |
+
+---
+
+<a id="sdks"></a>
+
+## 🐍 SDKs oficiales
+
+Tres clientes mantenidos en este repo, todos contra la misma API HTTP.
+
+### Python — `sdk/` (paquete `luma-vdb`)
+
+Async y sync, con `py.typed`. Sub-clientes: `vector`, `state`, `doc`, `admin`, `auth`, `stream`, `config`, `hub(ns)`, `memory(ns)`, `meta(c)`, `diskann(c)`.
+
+```python
+from luma import Luma          # async
+from luma import SyncLuma      # sync
+
+luma = Luma("http://localhost:1234", api_key="mi-api-key")
+await luma.vector.acreate("embeddings", dim=1536)
+await luma.vector.aupsert("embeddings", "doc-1", [0.1] * 1536, meta={"tipo": "contrato"})
+hits = await luma.vector.asearch("embeddings", [0.1] * 1536, k=5)
+
+# Memoria de agentes (NS-Mem)
+mem = luma.memory("mi-agente")
+await mem.aingest_event(text="El usuario prefiere respuestas cortas")
+recall = await mem.aquery(text="¿cómo le gusta que le responda?")
+```
+
+```python
+with SyncLuma("http://localhost:1234", api_key="mi-api-key") as db:
+    db.vector.create("embeddings", dim=1536)
+    hits = db.vector.search("embeddings", [0.1] * 1536, k=5)
+```
+
+### TypeScript / JavaScript — `sdk/typescript/` (paquete `luma-vdb`)
+
+Node 18+ (usa `fetch` nativo). Funciona también en navegador y edge runtimes (Cloudflare Workers, Deno, Bun).
+
+```bash
+npm install luma-vdb
+```
+
+```typescript
+import { LumaClient } from 'luma-vdb';
+
+const client = new LumaClient({ baseUrl: 'http://localhost:1234', apiKey: 'mi-api-key' });
+
+await client.vector.createCollection('docs', 384, 'cosine');
+await client.vector.upsert('docs', 'item-1', vector, { category: 'tech' });
+await client.vector.upsertBatch('docs', [
+  { id: 'a', vector: [0.1, 0.2], meta: { tag: 'ai' } },
+]);
+```
+
+### LangChain — `sdk/langchain_luma/`
+
+`LumaVectorStore` implementa la interfaz `VectorStore` de `langchain_core`, incluyendo **MMR** (maximal marginal relevance). Crea la colección sola si no existe.
+
+```python
+from langchain_luma import LumaVectorStore
+
+store = LumaVectorStore(
+    url="http://localhost:1234", api_key="mi-api-key",
+    collection="rag", embedding=mi_embedding, dim=1536,
+)
+store.add_texts(["...", "..."])
+docs = store.max_marginal_relevance_search("mi pregunta", k=4)
+```
+
+Guía completa del SDK Python: [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md).
+
+---
+
+<a id="por-que-luma"></a>
 
 ## 🚀 ¿Por qué Luma?
 
 La premisa es simple: **la IA necesita más que vectores.** Mientras la arquitectura tradicional fragmenta el stack (PostgreSQL para datos, Redis para caché/colas, un servicio aparte para vectores), Luma converge esas primitivas en un binario Rust, con seguridad de memoria, concurrencia sobre Tokio y latencia interna cero entre motores.
 
 ---
+
+<a id="superficie"></a>
 
 ## 🧰 Superficie de plataforma: qué reemplaza cada primitiva
 
@@ -43,92 +255,37 @@ Luma no es solo un motor vectorial — es una capa de servicios de plataforma. C
 
 Todas las primitivas comparten WAL segmentado con checksums, snapshots, respaldos, cifrado en reposo y el aislamiento multi-tenant por organización.
 
-> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — tiene SPEC propio por fases en [`docs/SPEC-resp.md`](docs/SPEC-resp.md). Qué protegemos y de quién: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — tiene SPEC propio por fases en [`docs/SPEC-resp.md`](docs/SPEC-resp.md), y **todavía no está implementado**. Qué protegemos y de quién: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ---
 
-## 📊 Rendimiento medido (Luma vs Qdrant vs Milvus)
+<a id="rendimiento"></a>
 
-Benchmark reproducible, misma máquina, mismo dataset y misma métrica para los tres motores. Sin cifras vagas: todas las columnas están medidas.
+## 📊 Rendimiento medido
 
-### Máquina de prueba
+Comparativa contra **Qdrant** y **Milvus**: misma máquina, mismo dataset (50k × 768, cosine, k=10), ground-truth exacto por fuerza bruta, los tres motores con su configuración de fábrica.
 
-| | |
-|---|---|
-| **CPU** | Intel Core i7-1355U (12 hilos, laptop; escalado de frecuencia activo) |
-| **RAM** | 15 GiB |
-| **Disco** | NVMe SSD |
-| **SO** | Ubuntu 24.04.4 LTS · kernel 6.17 |
+| Motor / modo | Consulta (qps) | Latencia | Recall@10 | RAM |
+|---|---:|---:|---:|---:|
+| Qdrant (HNSW, ef=64) | 237 | 4.22 ms | 0.416 | 320 MB |
+| Milvus (HNSW, ef=64) | 476 | 2.09 ms | 0.086 | 846 MB |
+| **Luma — DiskANN** | **515** | **1.94 ms** | 0.056 | **133 MB** |
+| **Luma — HNSW** (ef=32) | 199 | 5.02 ms | **0.474** | 406 MB |
+| **Luma — HNSW** (ef=128, default) | 99 | 10.08 ms | 0.853 | 464 MB |
 
-> Es una laptop con throttling térmico: los valores absolutos suben en servidor, pero la **comparación relativa entre motores es válida** porque los tres corrieron en el mismo equipo, uno a la vez.
+Tres titulares:
 
-### Qué se midió y cómo
+- 🏆 **RAM** — DiskANN corre 50k vectores en **133 MB**; ningún competidor baja de 320 MB. Es el objetivo de diseño y se cumple medido.
+- 🏆 **Latencia de consulta** — **1.94 ms / 515 qps** en DiskANN, el más rápido del grupo.
+- 🏆 **Precisión a igual velocidad** — a la latencia de Qdrant (`ef=32`), Luma HNSW da **más recall** (0.474 vs 0.416), y escala hasta 0.947 subiendo `ef`.
 
-- **Dataset:** 50.000 vectores de 768 dimensiones + 200 consultas, distribución aleatoria uniforme (`base.npy` / `queries.npy`, `float32`).
-- **Métrica:** cosine, `k = 10`.
-- **Ground-truth:** top-10 exacto por fuerza bruta sobre el mismo dataset → recall@10 real, no estimado.
-- **Configuración:** valores **por defecto** de cada motor. Qdrant y Milvus con HNSW `M=16, ef_construct=200, ef=64`.
-- **RAM:** memoria anónima real del proceso tras cargar (no caché de página de disco).
-- **Protocolo:** ingesta por lotes vía API HTTP → espera de indexación → 200 consultas secuenciales → recall contra ground-truth.
+> **Cómo leer la columna de recall:** el dataset son vectores aleatorios uniformes, sin estructura de clusters — un caso adversarial para cualquier ANN (incluso Qdrant se queda en 0.42). Esa columna mide el **punto de equilibrio velocidad↔precisión que cada motor elige de fábrica**, no la calidad absoluta del índice. Con embeddings reales todos los recalls suben. Comparar recalls entre motores solo tiene sentido a latencia equivalente.
 
-### Resultados
-
-| Motor / modo | Ingesta (vec/s) | Consulta (qps) | Latencia media | Recall@10 | RAM |
-|---|---:|---:|---:|---:|---:|
-| **Qdrant** (HNSW, ef=64) | **1.859** | 237 | 4.22 ms | 0.416 | 320 MB |
-| **Milvus** (HNSW, ef=64) | 1.284 | 476 | 2.09 ms | 0.086 | 846 MB |
-| **Luma — DiskANN** (low-RAM) | 807 | **515** | **1.94 ms** | 0.056 | **133 MB** |
-| **Luma — HNSW** (equilibrio, ef=128 default) | 926 | 99 | 10.08 ms | 0.853 | 464 MB |
-| **Luma — HNSW** (velocidad, ef=32) | 926 | 199 | 5.02 ms | 0.474 | 406 MB |
-
-<sub>Ingesta HNSW = 926 vec/s tras paralelizar el build por lote (antes 293); es independiente del `ef` de consulta.</sub>
-
-### Discusión
-
-Con vectores **aleatorios uniformes** (sin estructura de clusters) el ANN es un caso adversarial: incluso Qdrant solo alcanza 0.42 de recall. Por eso la columna de recall refleja sobre todo **el punto de equilibrio velocidad↔precisión de cada motor**, más que la calidad absoluta del índice. En embeddings reales (que sí forman clusters) todos los recalls suben.
-
-- **Luma DiskANN** ocupa el extremo *rápido y ligero*: la **consulta más veloz del grupo (515 qps, 1.94 ms) con la menor RAM (133 MB — 2,4× menos que Qdrant, 6,4× menos que Milvus)**, a costa de recall.
-- **Luma HNSW** es el modo *precisión*, ahora **calibrado** (ver abajo): a su punto de velocidad (`ef=32`) iguala la latencia de Qdrant (5.0 vs 4.2 ms) **con mejor recall (0.474 vs 0.416)**; subiendo `ef` escala hasta recall 0.95.
-- **Qdrant** es un punto medio sólido de fábrica; **Milvus** iguala en ingesta pero pesa 846 MB y su recall a igual `ef` es el más bajo.
-
-### Dónde gana Luma
-
-- 🏆 **Consumo de RAM** — DiskANN corre 50k en **133 MB**; ningún competidor baja de 320 MB. Es el objetivo de diseño y se cumple medido.
-- 🏆 **Latencia y throughput de consulta** — **1.94 ms / 515 qps** en DiskANN, el más rápido del grupo.
-- 🏆 **Precisión a igual velocidad** — a latencia equivalente a Qdrant, Luma HNSW da **más recall** (0.474 vs 0.416); y llega hasta 0.95 subiendo `ef`.
-
-### 🎯 Punto de equilibrio (calibración HNSW)
-
-El modo HNSW tenía un problema: el bucle de expansión de candidatos perseguía una estimación de recall inalcanzable en datos difíciles y terminaba escaneando casi todo (recall 0.98 pero **348 ms/consulta**, inservible). Se corrigió con dos cambios (`src/vector/mod.rs`, `src/config.rs`):
-
-1. **`ef` de búsqueda configurable** (`HNSW_SEARCH_EF`, default 128) que acota la expansión a un punto fijo, como el `hnsw_ef` de Qdrant.
-2. **Búsqueda única** al techo `ef` en vez de rampar 16→32→…→N. La rampa lanzaba varias búsquedas HNSW desechables por consulta: eliminarla dio **~3× más throughput al mismo recall**.
-
-Curva medida tras la calibración (mismo dataset, `HNSW_SEARCH_EF` variando):
-
-| ef | qps | latencia | recall@10 | RAM |
-|---:|---:|---:|---:|---:|
-| 32 | 199 | 5.02 ms | 0.474 | 406 MB |
-| 64 | 140 | 7.13 ms | 0.675 | 406 MB |
-| 96 | 115 | 8.65 ms | 0.792 | 408 MB |
-| **128 (default)** | **99** | **10.08 ms** | **0.853** | **411 MB** |
-| 192 | 82 | 12.19 ms | 0.921 | 409 MB |
-| 256 | 74 | 13.45 ms | 0.947 | 407 MB |
-
-Antes vs después, mismo `ef=192`: **26 qps → 82 qps** (3,15×) con recall idéntico (0.92). El usuario elige el punto: `ef=32` para máxima velocidad, `ef≥192` para máximo recall; el default 128 es el balance.
-
-### Ingesta paralela viva
-
-El upsert por lote insertaba al grafo HNSW **de uno en uno**. Se paralelizó (`apply_upsert_batch` acumula los pares del lote y hace un `insert_batch` con `parallel_insert` rayon por segmento, la misma maquinaria del build masivo): **293 → 926 vec/s (3,16×)**, con recall idéntico (0.860). La brecha de ingesta contra Qdrant bajó de **6,3× a ~2×**.
-
-### Lo que aún va por detrás
-
-- **Ingesta**: 926 (HNSW) / 807 (DiskANN) vec/s siguen por debajo de Qdrant/Milvus (1.284–1.859). Lo que resta es el bookkeeping por registro (WAL, mmap, cuantización) que aún es serial; lotes más grandes lo acercan más.
-- **Throughput de consulta HNSW** a igual recall: `hnsw_rs` es algo más lento que el HNSW propio de Qdrant. La ventaja neta de Luma sigue siendo **RAM (DiskANN, 133 MB)** y **precisión a igual latencia**.
-
-> Scripts y datos del benchmark: `bench/` + `sweep_ef.sh`. Reejecutable en cualquier equipo.
+Metodología completa, curva de `ef`, la calibración de HNSW (3× throughput al mismo recall), la paralelización de ingesta (293 → 926 vec/s) y lo que aún va por detrás: **[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)**.
 
 ---
+
+<a id="arquitectura"></a>
 
 ## 🏛️ Arquitectura real por módulos
 
@@ -165,7 +322,9 @@ Capa de memoria para agentes autónomos; ver el **Nivel 3** en la sección de AP
 
 ---
 
-## 🏢 Capa Empresarial: Multi-Tenancy, Panel de Administración y Seguridad
+<a id="enterprise"></a>
+
+## 🏢 Capa Empresarial: Multi-Tenancy, Panel y Seguridad
 
 Capa "enterprise" **aditiva** montada sobre las primitivas del core. Todo vive en el mismo binario: no necesitas Node, ni el código fuente del panel, ni servicios externos en runtime. El `AccountsService` y las tablas `sys_*` se crean *lazily* la primera vez que se usan, siempre que SQLite esté habilitado.
 
@@ -173,7 +332,7 @@ Capa "enterprise" **aditiva** montada sobre las primitivas del core. Todo vive e
 - **Organizaciones y usuarios** en SQLite (`sys_orgs`, `sys_users`), más `sys_sessions` para tokens de sesión y `sys_collections` para propiedad de recursos.
 - **Login por email + contraseña**: las contraseñas se hashean con **Argon2id** (`src/crypto.rs`). El login emite un **token de sesión opaco** (`lums_…`) del que solo se guarda su hash SHA-256; TTL de 7 días.
 - **Roles**: `owner` > `admin` > `member` > `viewer`, integrados con el RBAC existente (`rbac.rs`, niveles viewer=10, member=20, admin=30, owner=40). Un middleware exige rol mínimo por ruta.
-- Endpoints: `POST /v1/auth/register` · `login` · `logout` · `refresh`; gestión admin en `/v1/admin/orgs`, `/v1/admin/users` (alta/baja/roles), `/v1/admin/stats` y `/v1/admin/audit-events`.
+- **Multi-organización**: un usuario puede pertenecer a varias orgs (`/v1/admin/users/:id/orgs`), con invitaciones (`/v1/admin/orgs/:id/invite`) y gestión de miembros por organización.
 
 ### Aislamiento de datos por organización (`tenant_isolation_middleware`)
 Cada colección/documento/blob queda asociado a la organización que la creó (*first-touch* en `sys_collections`). Otra organización que intente acceder a ese nombre recibe `404` — la existencia queda oculta entre tenants. El hub (`/v1/db`) y NS-Mem (`/v1/memory`) **comparten namespace a propósito** y ya aíslan internamente por el `tenant_id` del token, por lo que no se les impone propiedad exclusiva.
@@ -192,51 +351,11 @@ Cada colección/documento/blob queda asociado a la organización que la creó (*
 - **Cifrado en reposo** de campos sensibles con **ChaCha20-Poly1305** (AEAD), clave maestra derivada de `LUMA_MASTER_KEY`. Ciphertext auto-descriptivo `enc:v1:<b64(nonce||ct)>`.
 - **Cabeceras de seguridad** en todas las respuestas: `Content-Security-Policy` estricta (sin `unsafe-inline` para scripts; jsdelivr permitido para la doc Scalar), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` y **HSTS**.
 
----
-
-## 🛠️ Compilar y correr
-
-Requisitos: **Rust 1.88+** (edition 2021). SQLite va *bundled* (no requiere instalación externa).
-
-```bash
-# Compilar
-cargo build --release
-
-# (Opcional) recompilar el panel de administración e incrustarlo en ui/dist
-cd admin-ui && npm ci && npm run build && cd ..
-
-# Arrancar el servidor (sirve API + panel en http://127.0.0.1:1234/)
-LUMA_MASTER_KEY="una-clave-secreta-fuerte" ./target/release/luma serve
-```
-
-El binario `luma` acepta los siguientes subcomandos (`src/cli.rs`, `src/main.rs`):
-
-| Subcomando | Descripción |
-| :--- | :--- |
-| `luma serve` | Arranca el servidor HTTP (comando por defecto si no se pasa ninguno). |
-| `luma vacuum --collection <nombre>` | Compacta una colección vectorial. |
-| `luma diskann build …` / `tune …` / `status` | Construye, ajusta o consulta el estado de un grafo DiskANN (`src/diskann.rs`). |
-| `luma backup` | Genera un respaldo consistente (SQLite + snapshot + WAL). |
-| `luma restore <ruta>` | Restaura desde un directorio de respaldo. |
-
-### Panel y primer acceso
-
-```bash
-# Crear tu organización y entrar
-curl -X POST localhost:1234/v1/auth/register \
-  -H 'content-type: application/json' \
-  -d '{"org_name":"Acme","email":"owner@acme.com","password":"un-password-fuerte"}'
-```
-
-Luego abre `http://127.0.0.1:1234/` en el navegador para el panel React, o `http://127.0.0.1:1234/docs` para la documentación interactiva (Scalar).
-
-> **Producción:** define siempre `LUMA_MASTER_KEY` (cifrado) y `LUMA_API_KEY` (bootstrap). Sin `LUMA_MASTER_KEY` se usa una clave de desarrollo conocida y el servidor lo advierte en los logs. El puerto por defecto es **1234** con bind a `127.0.0.1` (`luma.toml`); las variables de entorno sobrescriben el TOML.
-
-### Configuración
-
-`luma.toml` en la raíz (auto-generado si falta). Secciones clave: servidor (`port`, `bind_addr`, `api_key`), almacenamiento (`data_dir`, `snapshot_interval_secs`, `wal_segment_max_bytes`), vector (`index_kind` = `HNSW`|`IVF_FLAT_Q8`|`DiskANN`, `max_vector_dim`), IVF/DiskANN, embeddings, búsqueda (`pre_filter_threshold`), NS-Mem (`memory_*`), grafo/decay y respaldos (`backup_*`). Se puede leer/actualizar en caliente vía `GET`/`PUT /v1/config`. Fuente: `src/config.rs`.
+Política de reporte de vulnerabilidades: [`SECURITY.md`](SECURITY.md). Modelo de amenazas: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ---
+
+<a id="api"></a>
 
 ## 🧭 Niveles de API
 
@@ -246,8 +365,9 @@ El router (`src/api/mod.rs`) monta las siguientes rutas. Todas requieren `Author
 
 Cada motor funciona de forma aislada, para máxima velocidad y mínimo overhead.
 
-- **Vectorial** — `/v1/vector/...`: listar/crear colecciones; `add`, `upsert`, `upsert_batch`, `update`, `delete`, `delete_batch`, `get`; `search`, `search_batch` (hasta 100 queries en paralelo con `rayon`), `scroll` (paginación por cursor), `rerank` (reordenamiento por coseno), `aggregate` (conteos por campo); `diskann/build`, `diskann/tune`, `diskann/status`.
+- **Vectorial** — `/v1/vector/...`: listar/crear/borrar colecciones y ver detalle; `add`, `upsert`, `upsert_batch`, `update`, `delete`, `delete_batch`, `get`; `search`, `search_batch` (hasta 100 queries en paralelo con `rayon`), `scroll` (paginación por cursor), `rerank` (reordenamiento por coseno), `aggregate` (conteos por campo); `diskann/build`, `diskann/tune`, `diskann/status`.
 - **Documentos JSON** — `/v1/doc/{collection}/{id}` (`PUT`/`GET`/`DELETE`) y `/v1/doc/{collection}/find`.
+- **Metadatos de colección** — `POST /v1/meta/{collection}/execute`: consultas sobre los metadatos de una colección (`routes_meta.rs`).
 - **Clave-Valor** — `/v1/state/...`: `GET`/`PUT`/`DELETE` por clave, `batch_put`, índices (`indexes`, `index/{field}/{value}`), listado y TTL/CAS.
 - **Object storage (R2-like)** — `/v1/blob/{bucket}/{key}` (`PUT`/`GET`/`DELETE`) y listado por bucket. Escritura atómica, endurecido contra path-traversal.
 - **Colas** — `/v1/queue/{queue}` (encolar y stats), `/receive` (entrega *at-least-once* con *visibility timeout*), `DELETE /{id}` (ack).
@@ -294,16 +414,24 @@ Capa de memoria completa para agentes autónomos (`src/memory/`), construida sob
 - `POST edges` · `GET edges/{memory_id}` · `POST edges/{edge_id}/delete`
 - `GET beliefs/{fact_key}/history` · `POST graph/centrality`
 
-Además: deduplicación de facts (cosine ≥ 0.95), decay exponencial opt-in (`memory_decay_enabled`) y detección de contradicciones (arista `Contradicts` si la similitud viejo↔nuevo < 0.55). Proveedores LLM: `none`, `mock`, `openai`, `ollama`. Ver `docs/NS_MEM.md`.
+Además: deduplicación de facts (cosine ≥ 0.95), decay exponencial opt-in (`memory_decay_enabled`) y detección de contradicciones (arista `Contradicts` si la similitud viejo↔nuevo < 0.55). Proveedores LLM: `none`, `mock`, `openai`, `ollama`. Ver [`docs/NS_MEM.md`](docs/NS_MEM.md).
 
-### Administración y salud
+### Administración, auth y salud
 
-- `GET /v1/health`, `GET /v1/metrics` (percentiles p50/p95/p99).
-- `POST /v1/admin/backup` (dispara snapshot), `GET /v1/admin/audit` (log de acceso filtrable) — requieren rol `admin`.
-- API keys y RBAC: `/v1/auth/keys`, `/v1/auth/roles`.
-- `GET`/`PUT /v1/config`.
+- **Salud y métricas**: `GET /v1/health`, `GET /v1/metrics` (percentiles p50/p95/p99).
+- **Cuentas**: `POST /v1/auth/register` · `login` · `logout` · `refresh`; `GET /v1/auth/sessions` (sesiones activas).
+- **Orgs**: `/v1/admin/orgs` (listar/crear), `/v1/admin/orgs/:id` (detalle/actualizar), `/members`, `/invite`, `/members/:user_id`.
+- **Usuarios**: `/v1/admin/users` (listar/crear), `/v1/admin/users/:id`, `/:id/role`, `/:id/orgs`.
+- **API keys**: `/v1/auth/keys` (listar/crear), `/keys/:id` (revocar), `/keys/:id/role`.
+- **RBAC**: `/v1/auth/roles` (listar/crear), `/roles/:id`, `/roles/:id/permissions`, `POST /roles/check`.
+- **Operación**: `POST /v1/admin/backup` (dispara snapshot), `GET /v1/admin/audit` (log de acceso filtrable), `GET /v1/admin/stats`, `GET /v1/admin/audit-events` — requieren rol `admin`.
+- **Configuración en caliente**: `GET`/`PUT /v1/config`, `POST /v1/config/embedding/probe` (verifica que el proveedor de embeddings responde).
+
+Referencia completa: [`docs/API.md`](docs/API.md) y la spec OpenAPI en [`docs/openapi.yaml`](docs/openapi.yaml) (servida en `/docs`).
 
 ---
+
+<a id="embeddings"></a>
 
 ## 🔌 Embeddings (BYOM — Bring Your Own Model)
 
@@ -318,9 +446,36 @@ Para no engordar el binario con librerías pesadas de C++, Luma usa un cliente H
 | `huggingface` | `EMBEDDING_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Inference API |
 | `mock` | `EMBEDDING_DIM` | Tests/CI sin red |
 
-Retry con backoff exponencial + jitter: `EMBEDDING_RETRY_ATTEMPTS` (default 3), `EMBEDDING_RETRY_INITIAL_MS` (default 200).
+Retry con backoff exponencial + jitter: `EMBEDDING_RETRY_ATTEMPTS` (default 3), `EMBEDDING_RETRY_INITIAL_MS` (default 200). Puedes validar la conexión con `POST /v1/config/embedding/probe`.
 
 ---
+
+<a id="configuracion"></a>
+
+## ⚙️ Configuración
+
+`luma.toml` en la raíz (auto-generado si falta). Las variables de entorno **sobrescriben** el TOML. Fuente: `src/config.rs`.
+
+| Sección | Claves |
+| :--- | :--- |
+| Servidor | `port` (1234), `bind_addr` (127.0.0.1), `api_key` |
+| Almacenamiento | `data_dir`, `snapshot_interval_secs`, `wal_segment_max_bytes` |
+| Vector | `index_kind` (**`IVF_FLAT_Q8` por defecto** · `HNSW` · `DiskANN`), `max_vector_dim`, `simd_enabled`, `HNSW_SEARCH_EF` (128) |
+| IVF | `ivf_clusters`, `ivf_nprobe`, `q8_refine_topk` |
+| DiskANN | `diskann_max_degree`, `diskann_build_threads` |
+| Embeddings | `embedding_provider`, `embedding_model`, `embedding_dim`, `embedding_retry_*` |
+| Búsqueda | `pre_filter_threshold` (10 000) |
+| NS-Mem | `memory_consolidation_enabled`, `memory_working_ttl_secs`, `memory_fact_promotion_threshold` (0.85), `llm_provider` |
+| Grafo | `memory_walk_max_hops` (2), `memory_walk_min_similarity` (0.65), `memory_centrality_enabled` |
+| Decay | `memory_decay_enabled` (false), `memory_decay_half_life_days` (30), `memory_decay_archive_threshold` (0.1) |
+| Respaldos | `backup_enabled`, `backup_dir`, `backup_interval_secs`, `backup_retention` |
+| Operación | `rate_limit_rps` (0 = off), `rate_limit_burst`, `TLS_CERT_PATH`, `TLS_KEY_PATH`, `LIBSQL_URL` |
+
+Se puede leer y actualizar en caliente vía `GET`/`PUT /v1/config`. Detalle completo: [`docs/CONFIG.md`](docs/CONFIG.md).
+
+---
+
+<a id="tecnologias"></a>
 
 ## 🧰 Tecnologías clave
 
@@ -336,33 +491,77 @@ Retry con backoff exponencial + jitter: `EMBEDDING_RETRY_ATTEMPTS` (default 3), 
 
 ---
 
+<a id="layout"></a>
+
 ## 🗂️ Layout en disco
 
 ```
 data/
 ├── events-000001.log          # WAL segmentado (JSON lines)
 ├── snapshot.json              # Último snapshot de estado
-├── vectors/<collection>/       # manifest.json, vectors.bin (mmap), diskann/
-└── sqlite/rustkiss.db          # Relacional + auth + docstore + tablas NS-Mem y sys_*
+├── vectors/<collection>/      # manifest.json, vectors.bin (mmap), diskann/
+└── sqlite/rustkiss.db         # Relacional + auth + docstore + tablas NS-Mem y sys_*
 backups/<timestamp>/           # Respaldos (VACUUM INTO + snapshot + WAL)
 ```
 
 ---
 
+<a id="estado"></a>
+
 ## ✅ Estado actual del proyecto
 
-Implementado y verificable en el código de hoy (crate `luma` v4.11.0):
+Implementado y verificable en el código de hoy (crate `luma` v4.24.0):
 
 - **Núcleo convergente**: motor vectorial (HNSW / IVF-FLAT-Q8 / DiskANN), KV con TTL/CAS, WAL segmentado + snapshots, SQLite embebido vía actor, bus de eventos SSE, hub RAG híbrido y motor de búsqueda de texto. Todo montado en el router y cubierto por `tests/`.
 - **Object storage, colas e imágenes**: primitivas tipo R2 + Queues + Images ya montadas en `/v1/blob`, `/v1/queue`, `/v1/image`.
 - **NS-Mem**: memoria de agentes con grafo tipado, semantic walk BFS, PageRank, versionado de beliefs, deduplicación y detección de contradicciones. Decay opt-in.
 - **Capa empresarial**: cuentas/orgs/usuarios, roles owner/admin/member/viewer, login Argon2id + tokens de sesión, aislamiento multi-tenant por organización, auditoría, cifrado en reposo, respaldos (CLI + tarea de fondo) y **panel de administración React realmente compilado e incrustado** (`admin-ui/` → `ui/dist`).
-- **Operación**: TLS opcional, rate limiting opt-in, CORS configurable, timeouts, cabeceras de seguridad y documentación Scalar en `/docs`.
+- **SDKs**: cliente Python (async + sync, `py.typed`), cliente TypeScript y `LumaVectorStore` para LangChain, todos en `sdk/`.
+- **Operación**: TLS opcional, rate limiting opt-in, CORS configurable, timeouts, cabeceras de seguridad, instaladores para Linux/macOS/Windows, dos Dockerfiles + compose, y documentación Scalar en `/docs`.
 
 Notas de honestidad:
+
 - Varias capacidades pesadas vienen **deshabilitadas por defecto** (`embedding_provider = "none"`, consolidación/decay/centralidad de memoria, `rate_limit_rps = 0`) — es un perfil de desarrollo; en producción se activan por configuración/entorno.
 - El backend remoto **libSQL/Turso** solo se activa si `LIBSQL_URL` está definido; de lo contrario se usa el SQLite local.
-- La durabilidad depende de montar un volumen persistente para `data_dir` cuando se corre en contenedor (`FROM scratch`).
+- La durabilidad depende de montar un volumen persistente para `data_dir` cuando se corre en contenedor.
+- La **comparativa contra Qdrant/Milvus** se hizo con scripts ad-hoc que **no están versionados** en el repo: las cifras son las observadas, pero hoy no se reejecutan con un comando del repositorio. Los benchmarks *internos* (`src/bin/bench.rs`) sí son reproducibles.
+- La **compatibilidad con el protocolo Redis (RESP)** está especificada en `docs/SPEC-resp.md` pero **no implementada** todavía.
+
+---
+
+<a id="documentacion"></a>
+
+## 📚 Documentación
+
+| Documento | Contenido |
+| :--- | :--- |
+| [`docs/API.md`](docs/API.md) | Referencia de endpoints |
+| [`docs/openapi.yaml`](docs/openapi.yaml) | Spec OpenAPI (servida en `/docs`) |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Arquitectura interna |
+| [`docs/CONFIG.md`](docs/CONFIG.md) | Todas las claves de configuración |
+| [`docs/CLI.md`](docs/CLI.md) | Subcomandos del binario |
+| [`docs/DATA_MODELS.md`](docs/DATA_MODELS.md) | Modelos de datos y esquemas |
+| [`docs/VECTOR_STORAGE.md`](docs/VECTOR_STORAGE.md) | Segmentos, mmap, cuantización |
+| [`docs/NS_MEM.md`](docs/NS_MEM.md) | Memoria de agentes (API completa) |
+| [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) | Guía del SDK Python |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Comparativa vs Qdrant/Milvus + benchmarks internos |
+| [`docs/BENCH.md`](docs/BENCH.md) | Cómo correr el binario de bench |
+| [`docs/FEATURES.md`](docs/FEATURES.md) | Inventario de funcionalidades |
+| [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Seguridad y modelo de amenazas |
+| [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) | Checklist de producción |
+| [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | Plan de producto y roadmap |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Historial de versiones |
+| [`docs/DEMO.md`](docs/DEMO.md) | Guion de demo |
+
+---
+
+<a id="licencia"></a>
+
+## 📄 Licencia
+
+[MIT](LICENSE) © Luma contributors.
+
+Reporte de vulnerabilidades: ver [`SECURITY.md`](SECURITY.md).
 
 ---
 
