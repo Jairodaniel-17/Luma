@@ -20,13 +20,17 @@ Quick start (sync)::
 
 Sub-clients
 -----------
-luma.vector   — VectorClient  (collections, CRUD, search, batch, scroll, rerank, aggregate)
+luma.vector   — VectorClient  (collections, CRUD, search, batch, scroll, rerank, aggregate, drop)
 luma.state    — StateClient   (KV store, TTL, CAS, indexes)
 luma.doc      — DocClient     (JSON document store)
 luma.admin    — AdminClient   (backup, audit log)
 luma.auth     — AuthClient    (API key management)
 luma.stream   — StreamClient  (SSE event stream)
-luma.config   — ConfigClient  (runtime configuration)
+luma.config   — ConfigClient  (runtime configuration, embedding probe)
+luma.accounts — AccountsClient (login/sessions, orgs, members, users, access policy)
+luma.blob     — BlobClient    (object storage + on-the-fly image transforms)
+luma.queue    — QueueClient   (durable queues, at-least-once delivery)
+luma.search   — SearchClient  (standalone text search engine)
 luma.hub(ns)  — HubClient     (LumaDatabase: text ingestion + hybrid search)
 luma.memory(ns) — MemoryClient (NS-Mem: episodic/semantic/procedural/working memory)
 luma.meta(c)  — MetaClient    (collection metadata queries)
@@ -37,6 +41,8 @@ from __future__ import annotations
 from ._http import Http
 from .admin import AdminClient
 from .auth import AuthClient
+from .accounts import AccountsClient
+from .blob import BlobClient
 from .config import ConfigClient
 from .diskann import DiskAnnClient
 from .doc import DocClient
@@ -50,13 +56,15 @@ from .exceptions import (
 from .hub import HubClient
 from .memory import MemoryClient
 from .meta import MetaClient
+from .queue import QueueClient
+from .search import SearchClient
 from .state import StateClient
 from .stream import StreamClient
 from .sync import SyncLuma
 from .vector import VectorClient
 from . import types
 
-__version__ = "3.0.0"
+__version__ = "4.24.0"
 
 __all__ = [
     # primary entry points
@@ -80,6 +88,10 @@ __all__ = [
     "AuthClient",
     "StreamClient",
     "ConfigClient",
+    "AccountsClient",
+    "BlobClient",
+    "QueueClient",
+    "SearchClient",
     # typed shapes
     "types",
     # transport
@@ -112,6 +124,10 @@ class Luma:
         self.auth = AuthClient(self._http)
         self.stream = StreamClient(self._http)
         self.config = ConfigClient(self._http)
+        self.accounts = AccountsClient(self._http)
+        self.blob = BlobClient(self._http)
+        self.queue = QueueClient(self._http)
+        self.search = SearchClient(self._http)
 
     # ── namespace-scoped factories ────────────────────────────────────────────
 

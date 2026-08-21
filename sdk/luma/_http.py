@@ -98,6 +98,30 @@ class Http:
         """Return a sync context manager for SSE / chunked streaming."""
         return self._sync.stream("GET", self._url(path), params=params)
 
+    def put_bytes(self, path: str, data: bytes,
+                  content_type: str = "application/octet-stream") -> Any:
+        """PUT a raw byte payload (blob store).
+
+        The session default Content-Type is application/json, so it is
+        overridden per request here — sending bytes under a JSON content type
+        would misrepresent the body to any proxy in between.
+        """
+        return self._req("PUT", path, content=data,
+                         headers={"Content-Type": content_type})
+
+    def get_bytes(self, path: str) -> bytes:
+        """GET a response body as raw bytes, bypassing JSON/text decoding.
+
+        Used for objects and transformed images, where decoding to str would
+        corrupt the payload.
+        """
+        return self._raw("GET", path)
+
+    def _raw(self, method: str, path: str, **kwargs: Any) -> bytes:
+        resp = self._sync.request(method, self._url(path), **kwargs)
+        _raise(resp)
+        return resp.content
+
     def _req(self, method: str, path: str, **kwargs: Any) -> Any:
         t0 = time.monotonic()
         resp = self._sync.request(method, self._url(path), **kwargs)
@@ -123,6 +147,21 @@ class Http:
     def astream(self, path: str, params: Optional[Dict[str, Any]] = None):
         """Return an async context manager for SSE / chunked streaming."""
         return self._async.stream("GET", self._url(path), params=params)
+
+    async def aput_bytes(self, path: str, data: bytes,
+                         content_type: str = "application/octet-stream") -> Any:
+        """Async counterpart of :meth:`put_bytes`."""
+        return await self._areq("PUT", path, content=data,
+                                headers={"Content-Type": content_type})
+
+    async def aget_bytes(self, path: str) -> bytes:
+        """Async counterpart of :meth:`get_bytes`."""
+        return await self._araw("GET", path)
+
+    async def _araw(self, method: str, path: str, **kwargs: Any) -> bytes:
+        resp = await self._async.request(method, self._url(path), **kwargs)
+        _raise(resp)
+        return resp.content
 
     async def _areq(self, method: str, path: str, **kwargs: Any) -> Any:
         t0 = time.monotonic()

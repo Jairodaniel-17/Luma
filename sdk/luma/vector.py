@@ -29,6 +29,14 @@ class VectorClient:
     async def acreate(self, collection: str, dim: int, metric: str = "cosine") -> dict:
         return await self._http.apost(f"/v1/vector/{collection}", {"dim": dim, "metric": metric})
 
+    def drop(self, collection: str) -> dict:
+        """Delete an entire collection: in-memory index, on-disk data and the
+        ownership row. Irreversible — there is no tombstone to restore from."""
+        return self._http.delete(f"/v1/vector/{collection}")
+
+    async def adrop(self, collection: str) -> dict:
+        return await self._http.adelete(f"/v1/vector/{collection}")
+
     # ── write ────────────────────────────────────────────────────────────────
 
     def add(self, collection: str, id: str, vector: List[float],

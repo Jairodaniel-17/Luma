@@ -35,7 +35,9 @@ import functools
 from typing import Any, Optional, TypeVar
 
 from ._http import Http
+from .accounts import AccountsClient
 from .admin import AdminClient
+from .blob import BlobClient
 from .auth import AuthClient
 from .config import ConfigClient
 from .diskann import DiskAnnClient
@@ -43,6 +45,8 @@ from .doc import DocClient
 from .hub import HubClient
 from .memory import MemoryClient
 from .meta import MetaClient
+from .queue import QueueClient
+from .search import SearchClient
 from .state import StateClient
 from .stream import StreamClient
 from .vector import VectorClient
@@ -271,6 +275,13 @@ class SyncLuma:
         self.admin = _SyncAdminClient(AdminClient(self._http))
         self.auth = _SyncAuthClient(AuthClient(self._http))
         self.config = _SyncConfigClient(ConfigClient(self._http))
+        # These three expose sync methods directly, so they need no narrowing
+        # facade: the facades above exist to pin signatures for clients whose
+        # sync and async surfaces diverged historically.
+        self.accounts = AccountsClient(self._http)
+        self.blob = BlobClient(self._http)
+        self.queue = QueueClient(self._http)
+        self.search = SearchClient(self._http)
         # SSE streaming is inherently sync-iterable already
         self.stream = StreamClient(self._http)
 
