@@ -766,6 +766,12 @@ fn map_vector_error(err: VectorError) -> ApiError {
             "dim_mismatch",
             "vector dimension mismatch",
         ),
+        // The reason string is built by the manifest check and names the
+        // recorded vs active model, so it is forwarded verbatim: a caller that
+        // hits this needs to know which model to switch back to.
+        VectorError::EmbeddingMismatch(reason) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "embedding_mismatch", reason)
+        }
         VectorError::IdExists => {
             ApiError::new(StatusCode::CONFLICT, "already_exists", "id already exists")
         }

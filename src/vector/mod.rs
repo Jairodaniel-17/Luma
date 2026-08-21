@@ -257,6 +257,11 @@ pub enum VectorError {
     StorageQuotaExceeded,
     #[error("invalid filter field name")]
     InvalidFilterField,
+    /// The active embedding model is incompatible with the one the collection
+    /// was built with. Carries the human-readable reason so the API can return
+    /// something actionable instead of a bare "mismatch".
+    #[error("{0}")]
+    EmbeddingMismatch(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -560,6 +565,37 @@ impl VectorStore {
             (c.dim, c.metric)
         })
     }
+    /// Validates a text-ingest against the collection's recorded embedding
+    /// provenance, then records that provenance if the collection did not have
+    /// it yet.
+    ///
+    /// This is the guard that stops a config change (a different
+    /// `embedding_model`) from quietly mixing incomparable vectors into one
+    /// index. Callers on the raw-vector path do not go through here: they are
+    /// explicitly supplying their own vectors and own the consequences.
+    ///
+    /// A missing collection is `Ok(())` — it is about to be created with the
+    /// current model, so there is nothing to conflict with.
+    pub fn check_and_stamp_embedding(
+        &self,
+        name: &str,
+        dim: usize,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), VectorError> {
+        let Some(collection) = self.0.collections.get(name) else {
+            return Ok(());
+        };
+        let mut c = collection.write();
+        c.manifest
+            .check_embedding_compat(dim, model)
+            .map_err(VectorError::EmbeddingMismatch)?;
+        if c.manifest.stamp_embedding(provider, model) {
+            c.persist_manifest().map_err(|_| VectorError::Persistence)?;
+        }
+        Ok(())
+    }
+
     pub fn get_collection_info(&self, name: &str) -> Option<VectorCollectionInfo> {
         self.0.collections.get(name).map(|c| {
             let c = c.read();

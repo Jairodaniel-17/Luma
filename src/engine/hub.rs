@@ -750,6 +750,16 @@ impl LumaDatabase {
                 crate::vector::Metric::Cosine,
             )?;
         }
+        // Reject before writing, not after: a dim or model mismatch here would
+        // otherwise land vectors that are numerically valid but incomparable
+        // with their neighbours, which degrades recall silently instead of
+        // failing loudly. Stamps the provenance on first text ingest.
+        self.engine.vectors().check_and_stamp_embedding(
+            namespace,
+            detected_dim,
+            self.embeddings.provider_name(),
+            self.embeddings.model_name(),
+        )?;
         Ok(())
     }
 

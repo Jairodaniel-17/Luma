@@ -143,6 +143,14 @@ pub struct Manifest {
     pub disk_index: DiskIndexManifest,
     #[serde(default = "default_diskann_last_built_upsert")]
     pub diskann_last_built_upsert: u64,
+    /// Embedding provider/model this collection was created with, when it was
+    /// created through a text-ingest path. `None` for collections created
+    /// before this field existed or built from raw vectors, which is why
+    /// [`Manifest::check_embedding_compat`] treats `None` as "unknown, allow".
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -257,6 +265,56 @@ impl Manifest {
             ivf_last_trained_upsert: 0,
             disk_index: DiskIndexManifest::default(),
             diskann_last_built_upsert: 0,
+            embedding_provider: None,
+            embedding_model: None,
+        }
+    }
+
+    /// Records which embedding provider/model produced this collection's
+    /// vectors. Only stamps the fields when they are still unset, so an
+    /// existing collection never has its provenance silently rewritten by a
+    /// later ingest running under a different config.
+    ///
+    /// Returns `true` when the manifest changed and needs to be persisted.
+    pub fn stamp_embedding(&mut self, provider: &str, model: &str) -> bool {
+        let mut changed = false;
+        if self.embedding_provider.is_none() && !provider.is_empty() {
+            self.embedding_provider = Some(provider.to_string());
+            changed = true;
+        }
+        if self.embedding_model.is_none() && !model.is_empty() {
+            self.embedding_model = Some(model.to_string());
+            changed = true;
+        }
+        changed
+    }
+
+    /// Checks an incoming text-ingest against the collection's recorded
+    /// embedding provenance and dimension.
+    ///
+    /// `Err(reason)` means the ingest would mix incompatible vectors into one
+    /// index — the caller must reject it rather than write a vector that is
+    /// numerically valid but semantically meaningless next to its neighbours.
+    ///
+    /// A dimension mismatch is always an error. A model mismatch at the same
+    /// dimension is also an error: same-width embeddings from different models
+    /// do not share a space, and that is the failure that silently degrades
+    /// recall instead of erroring out. Unknown provenance (`None`) is allowed,
+    /// so pre-existing collections keep working.
+    pub fn check_embedding_compat(&self, dim: usize, model: &str) -> Result<(), String> {
+        if dim != self.dim {
+            return Err(format!(
+                "collection dimension is {} but the active embedding model produces {dim}",
+                self.dim
+            ));
+        }
+        match self.embedding_model.as_deref() {
+            Some(recorded) if !model.is_empty() && recorded != model => Err(format!(
+                "collection was built with embedding model `{recorded}` but the active model is \
+                 `{model}`; vectors from different models are not comparable — reindex the \
+                 collection or ingest into a new one"
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -1068,5 +1126,85 @@ mod tests {
         assert!(read_manifest(&layout).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- M3.2: embedding provenance per collection ----
+
+    #[test]
+    fn stamp_embedding_records_once_and_does_not_overwrite() {
+        let mut m = Manifest::new(768, Metric::Cosine);
+        assert_eq!(m.embedding_provider, None);
+        assert_eq!(m.embedding_model, None);
+
+        assert!(m.stamp_embedding("ollama", "nomic-embed-text"));
+        assert_eq!(m.embedding_provider.as_deref(), Some("ollama"));
+        assert_eq!(m.embedding_model.as_deref(), Some("nomic-embed-text"));
+
+        // A later ingest under a different config must not silently rewrite
+        // provenance — that would erase the evidence of a real mismatch.
+        assert!(!m.stamp_embedding("openai", "text-embedding-3-small"));
+        assert_eq!(m.embedding_provider.as_deref(), Some("ollama"));
+        assert_eq!(m.embedding_model.as_deref(), Some("nomic-embed-text"));
+    }
+
+    #[test]
+    fn stamp_embedding_ignores_empty_names() {
+        let mut m = Manifest::new(8, Metric::Cosine);
+        // The `mock` and `none` providers have no model concept; storing an
+        // empty string would look like recorded provenance and then mismatch
+        // against every real model.
+        assert!(!m.stamp_embedding("", ""));
+        assert_eq!(m.embedding_model, None);
+    }
+
+    #[test]
+    fn check_embedding_compat_rejects_dim_mismatch() {
+        let m = Manifest::new(768, Metric::Cosine);
+        let err = m.check_embedding_compat(1536, "whatever").unwrap_err();
+        assert!(err.contains("768"), "reason should name the collection dim: {err}");
+        assert!(err.contains("1536"), "reason should name the incoming dim: {err}");
+    }
+
+    #[test]
+    fn check_embedding_compat_rejects_same_dim_different_model() {
+        // The dangerous case: both models emit 768-dim vectors, so nothing
+        // downstream would error — recall would just quietly get worse.
+        let mut m = Manifest::new(768, Metric::Cosine);
+        m.stamp_embedding("ollama", "nomic-embed-text");
+        let err = m.check_embedding_compat(768, "mxbai-embed-large").unwrap_err();
+        assert!(err.contains("nomic-embed-text"), "{err}");
+        assert!(err.contains("mxbai-embed-large"), "{err}");
+    }
+
+    #[test]
+    fn check_embedding_compat_allows_matching_and_unknown() {
+        let mut stamped = Manifest::new(768, Metric::Cosine);
+        stamped.stamp_embedding("ollama", "nomic-embed-text");
+        assert!(stamped.check_embedding_compat(768, "nomic-embed-text").is_ok());
+
+        // Pre-existing collections have no recorded provenance and must keep
+        // working rather than becoming un-ingestable after an upgrade.
+        let legacy = Manifest::new(768, Metric::Cosine);
+        assert!(legacy.check_embedding_compat(768, "any-model").is_ok());
+
+        // A provider with no model concept (mock) passes an empty name and
+        // must not trip the check either.
+        assert!(stamped.check_embedding_compat(768, "").is_ok());
+    }
+
+    #[test]
+    fn manifest_without_embedding_fields_still_deserializes() {
+        // Guards the compatibility rule: a manifest written before these
+        // fields existed must load, not fail.
+        let legacy = serde_json::json!({
+            "version": MANIFEST_VERSION,
+            "dim": 768,
+            "metric": "cosine",
+            "applied_offset": 0,
+        });
+        let m: Manifest = serde_json::from_value(legacy).expect("legacy manifest must load");
+        assert_eq!(m.dim, 768);
+        assert_eq!(m.embedding_provider, None);
+        assert_eq!(m.embedding_model, None);
     }
 }

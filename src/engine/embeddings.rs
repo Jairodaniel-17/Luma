@@ -170,6 +170,38 @@ impl EmbeddingClient {
     }
 
     /// Embed a single text string. Uses the LRU cache when enabled.
+    /// Stable short name of the active provider, for recording which engine
+    /// produced a collection's vectors.
+    pub fn provider_name(&self) -> &'static str {
+        match &self.provider {
+            EmbeddingProvider::OpenAI { .. } => "openai",
+            EmbeddingProvider::AzureOpenAI { .. } => "azure",
+            EmbeddingProvider::Cohere { .. } => "cohere",
+            EmbeddingProvider::HuggingFace { .. } => "huggingface",
+            EmbeddingProvider::Ollama { .. } => "ollama",
+            EmbeddingProvider::Mock { .. } => "mock",
+            EmbeddingProvider::None => "none",
+        }
+    }
+
+    /// Identifying model name of the active provider.
+    ///
+    /// Deliberately excludes the endpoint URL — unlike
+    /// [`Self::provider_cache_namespace`], which must invalidate cached vectors
+    /// when the endpoint moves. Here a host change is not a change of embedding
+    /// space, so folding the URL in would raise false mismatches after a
+    /// perfectly safe redeploy. Empty when the provider has no model concept.
+    pub fn model_name(&self) -> &str {
+        match &self.provider {
+            EmbeddingProvider::OpenAI { model, .. }
+            | EmbeddingProvider::Cohere { model, .. }
+            | EmbeddingProvider::HuggingFace { model, .. }
+            | EmbeddingProvider::Ollama { model, .. } => model,
+            EmbeddingProvider::AzureOpenAI { deployment, .. } => deployment,
+            EmbeddingProvider::Mock { .. } | EmbeddingProvider::None => "",
+        }
+    }
+
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         if let Some(cache) = &self.cache {
             let key = self.cache_key(text);
