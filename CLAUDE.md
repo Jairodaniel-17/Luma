@@ -220,8 +220,3 @@ Rules:
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
-<!-- tooling:log -->
-- 2026-07-19 — Agregada linea final «test» al README y publicada al remoto (archivos clave: README.md)
-- 2026-07-19 — Añadida nueva linea final «test» al README y publicada (push) al remoto (archivos clave: README.md)
-- 2026-07-19 — Eliminada la última linea «test» del README y publicada (push) al remoto (archivos clave: README.md)
-<!-- /tooling:log -->
