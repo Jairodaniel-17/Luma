@@ -50,7 +50,17 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
-    (StatusCode::OK, state.engine.metrics_text())
+    // Prometheus only parses a body served as `text/plain; version=0.0.4`;
+    // without the header axum falls back to a content type scrapers reject, so
+    // the exposition format was already correct but unscrapeable.
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.engine.metrics_text(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
