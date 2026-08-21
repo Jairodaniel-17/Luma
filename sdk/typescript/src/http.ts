@@ -113,6 +113,69 @@ export class HttpClient {
   }
 
   /**
+   * DELETE with a JSON body. Needed by routes that identify the thing to remove
+   * by its contents rather than by a path id (revoking a role permission), which
+   * the plain `delete` cannot express.
+   */
+  async deleteWithBody<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(this.url(path), {
+      method: "DELETE",
+      headers: this.headers,
+      body: JSON.stringify(body),
+      signal: this.signal(),
+    });
+    await throwForStatus(res);
+    return decodeResponse<T>(res);
+  }
+
+  /**
+   * PUT a raw binary payload (blob store).
+   *
+   * The session default Content-Type is application/json, so it is overridden
+   * per request: sending bytes under a JSON content type would misrepresent
+   * the body to any proxy in between.
+   */
+  async putBytes<T>(
+    path: string,
+    data: ArrayBuffer | Uint8Array | Blob,
+    contentType = "application/octet-stream",
+  ): Promise<T> {
+    const res = await fetch(this.url(path), {
+      method: "PUT",
+      headers: { ...this.headers, "Content-Type": contentType },
+      body: data as BodyInit,
+      signal: this.signal(),
+    });
+    await throwForStatus(res);
+    return decodeResponse<T>(res);
+  }
+
+  /**
+   * GET a response body as raw bytes, bypassing the JSON/text decoder.
+   *
+   * Objects and transformed images must not go through `decodeResponse`, which
+   * falls back to `text()` for non-JSON bodies and would corrupt binary data.
+   */
+  async getBytes(
+    path: string,
+    params?: Record<string, string | number | boolean | undefined>,
+  ): Promise<Uint8Array> {
+    // Drop the JSON Content-Type (there is no request body) and widen Accept:
+    // asking for application/json on a binary route invites a 406 from any
+    // proxy that honours it.
+    const headers: Record<string, string> = { ...this.headers };
+    delete headers["Content-Type"];
+    headers.Accept = "*/*";
+    const res = await fetch(this.url(path, params), {
+      method: "GET",
+      headers,
+      signal: this.signal(),
+    });
+    await throwForStatus(res);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  /**
    * Returns a raw Response suitable for streaming (SSE). The caller is
    * responsible for consuming the body.
    */

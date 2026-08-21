@@ -1,4 +1,7 @@
+import { AccountsClient } from "./accounts.js";
 import { AdminClient } from "./admin.js";
+import { BlobClient } from "./blob.js";
+import { ConfigClient } from "./config.js";
 import { AuthClient } from "./auth.js";
 import { DiskAnnClient } from "./diskann.js";
 import { DocClient } from "./doc.js";
@@ -6,6 +9,7 @@ import { EventsClient } from "./events.js";
 import { HttpClient } from "./http.js";
 import { HubClient } from "./hub.js";
 import { MemoryClient } from "./memory.js";
+import { QueueClient } from "./queue.js";
 import { StateClient } from "./state.js";
 import { VectorClient } from "./vector.js";
 import type { LumaClientOptions } from "./types.js";
@@ -43,6 +47,18 @@ export class LumaClient {
   /** Admin operations: backup and audit log (admin only). */
   readonly admin: AdminClient;
 
+  /** Accounts: sessions, organizations, members, users, access policy. */
+  readonly accounts: AccountsClient;
+
+  /** Object storage and on-the-fly image transforms. */
+  readonly blob: BlobClient;
+
+  /** Durable queues with at-least-once delivery. */
+  readonly queue: QueueClient;
+
+  /** Runtime configuration and the embedding probe (admin only). */
+  readonly config: ConfigClient;
+
   constructor(options: LumaClientOptions) {
     this.http = new HttpClient(options);
     this.vector = new VectorClient(this.http);
@@ -51,6 +67,10 @@ export class LumaClient {
     this.events = new EventsClient(this.http);
     this.auth = new AuthClient(this.http);
     this.admin = new AdminClient(this.http);
+    this.accounts = new AccountsClient(this.http);
+    this.blob = new BlobClient(this.http);
+    this.queue = new QueueClient(this.http);
+    this.config = new ConfigClient(this.http);
   }
 
   /**

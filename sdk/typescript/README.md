@@ -287,6 +287,83 @@ try {
 }
 ```
 
+## Accounts, organizations and sessions
+
+`login` returns an opaque `lums_…` token that is interchangeable with an API key
+in the `Authorization` header. The client does not store it for you — build a new
+`LumaClient` with it when you want later calls to use it.
+
+```typescript
+const session = await client.accounts.login('owner@acme.com', 'a-strong-password');
+const asUser = new LumaClient({ baseUrl: 'http://localhost:1234', apiKey: session.token });
+
+// Multi-org: switching rotates the token and revokes the old one
+const orgs = await asUser.accounts.myOrgs();
+const switched = await asUser.accounts.switchOrg(orgs.orgs[1].id);
+
+// Invite in one step. temp_password is returned ONCE when the account is new.
+const invited = await asUser.accounts.invite(orgId, 'dev@acme.com', 'member');
+if (invited.created) console.log('temporary password:', invited.temp_password);
+```
+
+`refresh` and `switchOrg` both revoke the token you presented, so replace it
+atomically — a retry with the old one fails.
+
+## Object storage and images
+
+Objects are raw bytes, so `get` returns a `Uint8Array` and never a decoded body.
+
+```typescript
+await client.blob.put('assets', 'logo.png', pngBytes, 'image/png');
+const bytes = await client.blob.get('assets', 'logo.png');
+const { keys } = await client.blob.list('assets');
+
+// Transform without touching the stored object
+const thumb = await client.blob.image('assets', 'logo.png', {
+  w: 128, h: 128, format: 'jpeg', quality: 80,
+});
+```
+
+## Durable queues
+
+Delivery is **at-least-once**: a message not acked before its visibility window
+expires is redelivered with `attempts` incremented, so consumers must be
+idempotent.
+
+```typescript
+await client.queue.enqueue('jobs', { task: 'reindex', id: 42 });
+
+const { messages } = await client.queue.receive('jobs', { max: 10, visibilitySecs: 60 });
+for (const msg of messages) {
+  if (msg.attempts > 1) console.warn('redelivered', msg.id);
+  await handle(msg.body);
+  await client.queue.ack('jobs', msg.id);   // without this it comes back
+}
+```
+
+## Roles and permissions
+
+```typescript
+await client.auth.createRole('auditor', undefined, 'read-only access to the audit log');
+await client.auth.grant(roleId, { resource: 'audit', action: 'read' });
+const { allowed } = await client.auth.can('auditor', 'audit', 'read');
+```
+
+## Configuration and the embedding probe
+
+`probeEmbedding` measures the dimension a provider actually returns, which beats
+typing `embedding_dim` from memory. It always answers 200 — check `ok`, and read
+`error` for the provider's own message.
+
+```typescript
+const probe = await client.config.probeEmbedding({
+  provider: 'ollama',
+  url: 'http://localhost:11434',
+  model: 'nomic-embed-text',
+});
+if (probe.ok) console.log('real dimension:', probe.dim);
+```
+
 ## TypeScript types
 
 All request and response shapes are fully typed. Import them from the package root:

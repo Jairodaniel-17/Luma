@@ -388,6 +388,218 @@ export interface DiskAnnStatus {
   search_list_size?: number;
 }
 
+// ─── Accounts, organizations and members ──────────────────────────────────────
+
+export interface SessionResult {
+  /** Opaque session token, prefixed `lums_`. Only its SHA-256 hash is stored. */
+  token: string;
+  expires_at_ms: number;
+  role: string;
+  org_id?: string | null;
+  user_id?: string;
+}
+
+export interface RefreshResult {
+  token: string;
+  expires_at_ms: number;
+}
+
+export interface SwitchOrgResult {
+  token: string;
+  expires_at_ms: number;
+  org_id: string;
+  role: string;
+}
+
+/** Session metadata. The token itself is never returned. */
+export interface SessionInfo {
+  created_at_ms?: number;
+  expires_at_ms?: number;
+  org_id?: string | null;
+  current?: boolean;
+}
+
+export interface SessionList {
+  sessions: SessionInfo[];
+  count: number;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  /** The caller's role in this org, when listing memberships. */
+  role?: string;
+  created_at_ms?: number;
+}
+
+export interface OrgList {
+  orgs: Organization[];
+}
+
+export interface Member {
+  user_id: string;
+  email: string;
+  role: string;
+}
+
+export interface MemberList {
+  members: Member[];
+}
+
+export interface InviteResult {
+  user_id: string;
+  email: string;
+  org_id: string;
+  role: string;
+  /** True when the account did not exist and was created. */
+  created: boolean;
+  /** Present only when generated. Returned once, never retrievable again. */
+  temp_password?: string | null;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  role: string;
+  org_id?: string | null;
+}
+
+export interface UserList {
+  users: User[];
+}
+
+/** Allow-list governing who may self-register. */
+export interface AccessPolicy {
+  domains?: string[];
+  emails?: string[];
+}
+
+export interface DomainOrgMapping {
+  domain: string;
+  org_id: string;
+  role: string;
+}
+
+export interface DomainOrgList {
+  mappings: DomainOrgMapping[];
+}
+
+/** Business-level event from sys_audit_events. */
+export interface AuditEventEntry {
+  ts?: number;
+  org_id?: string | null;
+  user_id?: string | null;
+  action?: string;
+  target?: string | null;
+  detail?: unknown;
+}
+
+export interface AuditEventList {
+  events: AuditEventEntry[];
+  count: number;
+}
+
+// ─── Roles and permissions ────────────────────────────────────────────────────
+
+export interface Role {
+  id: string;
+  name: string;
+  parent_role_id?: string | null;
+  description?: string | null;
+}
+
+export interface RoleList {
+  roles: Role[];
+}
+
+export interface Permission {
+  resource: string;
+  action: string;
+}
+
+export interface PermissionList {
+  permissions: Permission[];
+}
+
+export interface PermissionCheck extends Permission {
+  role: string;
+  allowed: boolean;
+}
+
+// ─── Object storage and images ────────────────────────────────────────────────
+
+export interface BlobPutResult {
+  bucket: string;
+  key: string;
+  /** Stored object size in bytes. */
+  size: number;
+  etag: string;
+}
+
+export interface BlobListResult {
+  keys: string[];
+  count: number;
+}
+
+export interface ImageTransformOptions {
+  w?: number;
+  h?: number;
+  format?: "png" | "jpeg";
+  /** JPEG only; ignored for png. */
+  quality?: number;
+}
+
+// ─── Queues ───────────────────────────────────────────────────────────────────
+
+export interface QueueEnqueueResult {
+  id: string;
+}
+
+export interface QueueMessage {
+  id: string;
+  body: unknown;
+  /** Delivery attempts so far, including this one. Above 1 means a lease expired. */
+  attempts: number;
+}
+
+export interface QueueReceiveResult {
+  messages: QueueMessage[];
+}
+
+export interface QueueAck {
+  ok: boolean;
+}
+
+export interface QueueStats {
+  queue: string;
+  /** Total messages held, leased ones included. */
+  depth: number;
+  /** Messages currently available to receive. */
+  visible: number;
+}
+
+// ─── Embedding probe ──────────────────────────────────────────────────────────
+
+export interface EmbeddingProbeRequest {
+  provider: string;
+  url?: string;
+  api_key?: string;
+  model?: string;
+  azure_api_base?: string;
+  azure_deployment?: string;
+  azure_api_version?: string;
+}
+
+export interface EmbeddingProbeResult {
+  ok: boolean;
+  /** Dimension actually returned by the provider. Present when ok is true. */
+  dim?: number;
+  provider?: string;
+  model?: string;
+  /** The provider's own error message. Present when ok is false. */
+  error?: string;
+}
+
 // ─── Client options ───────────────────────────────────────────────────────────
 
 export interface LumaClientOptions {
