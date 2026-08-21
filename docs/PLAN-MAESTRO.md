@@ -154,7 +154,7 @@ riesgo y deja el roadmap viejo a cero.
 - `[x]` **M3.4 — hot-reload de embeddings/LLM.** `EmbeddingClient` detrás de
   `ArcSwap`; `PUT /v1/config` reconstruye el cliente sin reiniciar.
   Verificable con `POST /v1/config/embedding/probe` mostrando el dim nuevo.
-- `[ ]` **M4.1 — SDKs + OpenAPI al día.** Los endpoints que existen en el
+- `[x]` **M4.1 — SDKs + OpenAPI al día.** Los endpoints que existen en el
   router pero no en los SDKs ni en el YAML: `my-orgs`, `switch-org`,
   `sessions`, `sessions/revoke-all`, `DELETE /v1/vector/:collection`,
   `config/embedding/probe`, `meta/:collection/execute`, invitaciones y
