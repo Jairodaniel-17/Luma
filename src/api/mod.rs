@@ -46,7 +46,7 @@ pub struct AppState {
     pub sqlite: Option<SqliteService>,
     pub search_engine: Arc<SearchEngine>,
     pub auth_store: Option<Arc<AuthStore>>,
-    pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
+    pub embeddings: crate::engine::embeddings::EmbeddingHandle,
     pub hub: Arc<crate::engine::hub::LumaDatabase>,
     pub memory: Arc<crate::memory::MemoryService>,
     pub audit_log: Option<Arc<audit::AuditLog>>,
@@ -186,7 +186,7 @@ pub struct RouterDeps {
     pub sqlite: Option<SqliteService>,
     pub search_engine: Arc<SearchEngine>,
     pub auth_store: Option<Arc<AuthStore>>,
-    pub embeddings: Arc<crate::engine::embeddings::EmbeddingClient>,
+    pub embeddings: crate::engine::embeddings::EmbeddingHandle,
     pub audit_log: Option<Arc<audit::AuditLog>>,
     pub rbac: Option<Arc<rbac::RbacService>>,
 }
@@ -206,13 +206,13 @@ pub fn router(deps: RouterDeps) -> Router<()> {
     let memory = Arc::new(crate::memory::MemoryService::new(
         Arc::new(engine.clone()),
         sqlite.clone().map(Arc::new),
-        (*embeddings).clone(),
+        embeddings.clone(),
         config.clone(),
     ));
     let hub = Arc::new(crate::engine::hub::LumaDatabase::new(
         Arc::new(engine.clone()),
         sqlite.clone().map(Arc::new),
-        (*embeddings).clone(),
+        embeddings.clone(),
         crate::engine::chunking::ChunkingEngine::default(),
         config.clone(),
     ));

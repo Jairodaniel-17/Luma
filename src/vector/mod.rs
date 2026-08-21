@@ -1799,7 +1799,10 @@ impl Collection {
             // Skip items whose q8 already lives in the disk-backed q8 mmap —
             // re-populating q8_store for them would defeat the RAM saving.
             .filter(|(id, item)| {
-                !self.q8_store.contains_key(*id) && !(q8_paged && item.mmap_offset.is_some())
+                if self.q8_store.contains_key(*id) {
+                    return false;
+                }
+                !(q8_paged && item.mmap_offset.is_some())
             })
             // Read via get_vector_slice so this works when the raw vector lives in
             // the mmap (disk) rather than in the in-RAM VectorItem.

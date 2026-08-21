@@ -23,9 +23,11 @@ async fn start() -> (String, oneshot::Sender<()>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let search_engine = Arc::new(SearchEngine::new(temp_dir.path().to_path_buf()).unwrap());
 
-    let embeddings = std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
-        luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
-    ));
+    let embeddings = luma::engine::embeddings::EmbeddingHandle::new(
+        luma::engine::embeddings::EmbeddingClient::new(
+            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
+        ),
+    );
     let app = api::router(api::RouterDeps {
         engine,
         config,

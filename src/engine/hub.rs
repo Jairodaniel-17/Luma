@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::engine::chunking::ChunkingEngine;
-use crate::engine::embeddings::EmbeddingClient;
+use crate::engine::embeddings::EmbeddingHandle;
 use crate::engine::Engine;
 use crate::sqlite::SqliteService;
 use anyhow::Context;
@@ -20,7 +20,7 @@ pub struct ChunkMetadata {
 pub struct LumaDatabase {
     pub engine: Arc<Engine>,
     pub sqlite: Option<Arc<SqliteService>>,
-    pub embeddings: EmbeddingClient,
+    pub embeddings: EmbeddingHandle,
     pub chunking: ChunkingEngine,
     pub schema_queue: mpsc::Sender<(String, String)>,
     config: Config,
@@ -110,7 +110,7 @@ impl LumaDatabase {
     pub fn new(
         engine: Arc<Engine>,
         sqlite: Option<Arc<SqliteService>>,
-        embeddings: EmbeddingClient,
+        embeddings: EmbeddingHandle,
         chunking: ChunkingEngine,
         config: Config,
     ) -> Self {
@@ -208,7 +208,8 @@ impl LumaDatabase {
         // connect + total request timeouts (see embeddings::build_http_client), and the
         // batch makes a finite number of such calls. So the permit is always released
         // promptly and can't be exhausted forever — no extra tokio::time::timeout needed.
-        let vectors = match self.embeddings.embed_batch(&chunk_strs).await {
+        let embedder = self.embeddings.current();
+        let vectors = match embedder.embed_batch(&chunk_strs).await {
             Ok(vectors) => vectors,
             Err(err) => {
                 self.engine.metrics().inc_embed_failure();
@@ -536,7 +537,7 @@ impl LumaDatabase {
 
         let embed_future = async {
             let start = std::time::Instant::now();
-            let vector = self.embeddings.embed(query).await;
+            let vector = self.embeddings.current().embed(query).await;
             (vector, start.elapsed())
         };
         let sql_future = async {
@@ -615,9 +616,14 @@ impl LumaDatabase {
         diagnostics: &mut QueryDiagnostics,
     ) -> anyhow::Result<Vec<RankedDocument>> {
         let embed_start = std::time::Instant::now();
-        let query_vector = self.embeddings.embed(query).await.inspect_err(|_| {
-            self.engine.metrics().inc_embed_failure();
-        })?;
+        let query_vector = self
+            .embeddings
+            .current()
+            .embed(query)
+            .await
+            .inspect_err(|_| {
+                self.engine.metrics().inc_embed_failure();
+            })?;
         diagnostics.embedding_ms = embed_start.elapsed().as_millis() as u64;
         self.engine
             .metrics()
@@ -754,11 +760,12 @@ impl LumaDatabase {
         // otherwise land vectors that are numerically valid but incomparable
         // with their neighbours, which degrades recall silently instead of
         // failing loudly. Stamps the provenance on first text ingest.
+        let embedder = self.embeddings.current();
         self.engine.vectors().check_and_stamp_embedding(
             namespace,
             detected_dim,
-            self.embeddings.provider_name(),
-            self.embeddings.model_name(),
+            embedder.provider_name(),
+            embedder.model_name(),
         )?;
         Ok(())
     }

@@ -374,67 +374,18 @@ fn init_sqlite(config: &Config) -> anyhow::Result<SqliteService> {
     SqliteService::new(path)
 }
 
+/// Builds the swappable embedding handle every subsystem shares.
+///
+/// The provider mapping itself lives in `EmbeddingProvider::from_config` so the
+/// hot-reload path in `PUT /v1/config` applies exactly the same rules as
+/// startup.
 fn init_embeddings(
     config: &Config,
     metrics: std::sync::Arc<luma::engine::metrics::Metrics>,
-) -> Arc<luma::engine::embeddings::EmbeddingClient> {
-    use luma::engine::embeddings::{EmbeddingClient, EmbeddingProvider};
+) -> luma::engine::embeddings::EmbeddingHandle {
+    use luma::engine::embeddings::{EmbeddingClient, EmbeddingHandle};
 
-    let provider = match config.embedding_provider.to_lowercase().as_str() {
-        "ollama" => EmbeddingProvider::Ollama {
-            api_url: config.embedding_url.clone(),
-            model: config.embedding_model.clone(),
-        },
-        "openai" => EmbeddingProvider::OpenAI {
-            api_url: config.embedding_url.clone(),
-            api_key: config.embedding_api_key.clone(),
-            model: config.embedding_model.clone(),
-        },
-        "azure" | "azure_openai" | "azure-openai" => EmbeddingProvider::AzureOpenAI {
-            api_base: config.embedding_azure_api_base.clone(),
-            deployment: config.embedding_azure_deployment.clone(),
-            api_key: config.embedding_api_key.clone(),
-            api_version: config.embedding_azure_api_version.clone(),
-        },
-        "cohere" => EmbeddingProvider::Cohere {
-            api_url: if config.embedding_url.is_empty() {
-                "https://api.cohere.ai".to_string()
-            } else {
-                config.embedding_url.clone()
-            },
-            api_key: config.embedding_api_key.clone(),
-            model: config.embedding_model.clone(),
-            input_type: config.embedding_cohere_input_type.clone(),
-        },
-        "huggingface" | "hf" => EmbeddingProvider::HuggingFace {
-            api_url: if config.embedding_url.is_empty() {
-                "https://api-inference.huggingface.co".to_string()
-            } else {
-                config.embedding_url.clone()
-            },
-            api_key: config.embedding_api_key.clone(),
-            model: config.embedding_model.clone(),
-        },
-        "mock" => EmbeddingProvider::Mock {
-            dim: config.embedding_dim,
-        },
-        _ => EmbeddingProvider::None,
-    };
-
-    Arc::new(
-        EmbeddingClient::with_limits_and_dim(
-            provider,
-            config.embedding_cache_size,
-            config.embedding_max_inflight_requests,
-            Some(metrics),
-            config.embedding_dim,
-        )
-        .with_retry(
-            config.embedding_retry_attempts,
-            config.embedding_retry_initial_ms,
-        )
-        .with_timeout(config.request_timeout_secs),
-    )
+    EmbeddingHandle::new(EmbeddingClient::from_config(config, Some(metrics)))
 }
 
 async fn shutdown_signal(token: CancellationToken) {

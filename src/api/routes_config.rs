@@ -18,7 +18,7 @@ pub async fn get_config(
 }
 
 pub async fn update_config(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Extension(ctx): Extension<TenantContext>,
     Json(payload): Json<Config>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -31,9 +31,31 @@ pub async fn update_config(
         )
     })?;
 
+    // Embedding settings apply immediately: the client is rebuilt and swapped
+    // into the shared handle, so the hub, NS-Mem and the vector text-search
+    // route all pick it up on their next call. Everything else in the config
+    // still needs a restart, and the response says which is which rather than
+    // claiming a blanket "restart required" that is no longer true.
+    let previous = state.embeddings.current();
+    let rebuilt = EmbeddingClient::from_config(&payload, Some(state.engine.metrics()));
+    let embedding_changed = previous.provider_name() != rebuilt.provider_name()
+        || previous.model_name() != rebuilt.model_name();
+    state.embeddings.replace(rebuilt);
+    if embedding_changed {
+        tracing::info!(
+            provider = state.embeddings.current().provider_name(),
+            model = state.embeddings.current().model_name(),
+            "embedding client reloaded from config without restart"
+        );
+    }
+
     Ok(Json(serde_json::json!({
         "status": "success",
-        "message": "Configuration saved to luma.toml. A server restart is required for changes to take effect."
+        "message": "Configuration saved to luma.toml. Embedding settings are already live; other settings require a server restart.",
+        "embedding_reloaded": true,
+        "embedding_changed": embedding_changed,
+        "embedding_provider": state.embeddings.current().provider_name(),
+        "embedding_model": state.embeddings.current().model_name(),
     })))
 }
 

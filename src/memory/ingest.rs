@@ -71,10 +71,12 @@ impl MemoryService {
                     if !content_changed {
                         break 'check false;
                     }
-                    let Ok(new_vec) = self.embeddings.embed(&request.content).await else {
+                    let Ok(new_vec) = self.embeddings.current().embed(&request.content).await
+                    else {
                         break 'check false;
                     };
-                    let Ok(old_vec) = self.embeddings.embed(&existing.content).await else {
+                    let Ok(old_vec) = self.embeddings.current().embed(&existing.content).await
+                    else {
                         break 'check false;
                     };
                     is_semantic_contradiction(
@@ -176,7 +178,7 @@ impl MemoryService {
             return Ok(());
         }
 
-        let vector = self.embeddings.embed(&record.content).await?;
+        let vector = self.embeddings.current().embed(&record.content).await?;
         self.ensure_memory_collection(&record.namespace, record.kind, vector.len())?;
         let collection = self.memory_collection(&record.namespace, record.kind);
         let item = VectorItem {

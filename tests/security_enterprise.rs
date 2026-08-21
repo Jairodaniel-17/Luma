@@ -37,9 +37,11 @@ async fn start_server(data_dir: &str) -> (String, oneshot::Sender<()>, String) {
     let rbac = Arc::new(luma::api::rbac::RbacService::new(sqlite_arc.clone()));
     rbac.init().await.unwrap();
 
-    let embeddings = Arc::new(luma::engine::embeddings::EmbeddingClient::new(
-        luma::engine::embeddings::EmbeddingProvider::Mock { dim: 4 },
-    ));
+    let embeddings = luma::engine::embeddings::EmbeddingHandle::new(
+        luma::engine::embeddings::EmbeddingClient::new(
+            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 4 },
+        ),
+    );
     let search_engine = Arc::new(SearchEngine::new(PathBuf::from(data_dir)).unwrap());
 
     let admin_key = config.api_key.clone();

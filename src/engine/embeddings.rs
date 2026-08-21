@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use lru::LruCache;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -169,7 +169,6 @@ impl EmbeddingClient {
         Self::with_limits(provider, cache_size, 16, metrics)
     }
 
-    /// Embed a single text string. Uses the LRU cache when enabled.
     /// Stable short name of the active provider, for recording which engine
     /// produced a collection's vectors.
     pub fn provider_name(&self) -> &'static str {
@@ -202,6 +201,7 @@ impl EmbeddingClient {
         }
     }
 
+    /// Embed a single text string. Uses the LRU cache when enabled.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         if let Some(cache) = &self.cache {
             let key = self.cache_key(text);
@@ -1004,9 +1004,123 @@ fn reorder_openai_embeddings(
         .collect()
 }
 
+/// A swappable handle to the active [`EmbeddingClient`].
+///
+/// Every subsystem that embeds text (the hub, NS-Mem, the vector text-search
+/// route) holds a clone of this handle rather than a copy of the client, so a
+/// configuration change reaches all of them at once. Before this existed the
+/// hub and NS-Mem each received `(*embeddings).clone()` — their own snapshot —
+/// which meant a reload could only ever have updated one of the three.
+///
+/// Reads take an uncontended read lock and clone an `Arc`; the client is only
+/// ever replaced wholesale, never mutated in place, so an in-flight request
+/// keeps using the client it started with instead of observing a half-applied
+/// config.
+#[derive(Clone)]
+pub struct EmbeddingHandle(Arc<RwLock<Arc<EmbeddingClient>>>);
+
+impl EmbeddingHandle {
+    pub fn new(client: EmbeddingClient) -> Self {
+        Self(Arc::new(RwLock::new(Arc::new(client))))
+    }
+
+    /// The client to use for one operation. Bind it before awaiting so the
+    /// whole operation runs against a single, consistent client.
+    pub fn current(&self) -> Arc<EmbeddingClient> {
+        self.0.read().clone()
+    }
+
+    /// Installs a new client. Takes effect for operations started after this
+    /// returns; in-flight ones finish on the previous client.
+    pub fn replace(&self, client: EmbeddingClient) {
+        *self.0.write() = Arc::new(client);
+    }
+}
+
+impl From<EmbeddingClient> for EmbeddingHandle {
+    fn from(client: EmbeddingClient) -> Self {
+        Self::new(client)
+    }
+}
+
+impl EmbeddingProvider {
+    /// Builds a provider from the instance configuration.
+    ///
+    /// Lives here rather than in `server.rs` so that the config-update route
+    /// can rebuild the provider with exactly the same mapping the server used
+    /// at startup — two copies of this match statement would drift, and the
+    /// drift would only show up as a hot-reload that silently applies
+    /// different settings than a restart.
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        match config.embedding_provider.to_lowercase().as_str() {
+            "ollama" => Self::Ollama {
+                api_url: config.embedding_url.clone(),
+                model: config.embedding_model.clone(),
+            },
+            "openai" => Self::OpenAI {
+                api_url: config.embedding_url.clone(),
+                api_key: config.embedding_api_key.clone(),
+                model: config.embedding_model.clone(),
+            },
+            "azure" | "azure_openai" | "azure-openai" => Self::AzureOpenAI {
+                api_base: config.embedding_azure_api_base.clone(),
+                deployment: config.embedding_azure_deployment.clone(),
+                api_key: config.embedding_api_key.clone(),
+                api_version: config.embedding_azure_api_version.clone(),
+            },
+            "cohere" => Self::Cohere {
+                api_url: if config.embedding_url.is_empty() {
+                    "https://api.cohere.ai".to_string()
+                } else {
+                    config.embedding_url.clone()
+                },
+                api_key: config.embedding_api_key.clone(),
+                model: config.embedding_model.clone(),
+                input_type: config.embedding_cohere_input_type.clone(),
+            },
+            "huggingface" | "hf" => Self::HuggingFace {
+                api_url: if config.embedding_url.is_empty() {
+                    "https://api-inference.huggingface.co".to_string()
+                } else {
+                    config.embedding_url.clone()
+                },
+                api_key: config.embedding_api_key.clone(),
+                model: config.embedding_model.clone(),
+            },
+            "mock" => Self::Mock {
+                dim: config.embedding_dim,
+            },
+            _ => Self::None,
+        }
+    }
+}
+
+impl EmbeddingClient {
+    /// Builds a fully configured client (provider, cache, concurrency limit,
+    /// retry policy, timeout) from the instance configuration. Used both at
+    /// startup and by the hot-reload path.
+    pub fn from_config(
+        config: &crate::config::Config,
+        metrics: Option<Arc<crate::engine::metrics::Metrics>>,
+    ) -> Self {
+        Self::with_limits_and_dim(
+            EmbeddingProvider::from_config(config),
+            config.embedding_cache_size,
+            config.embedding_max_inflight_requests,
+            metrics,
+            config.embedding_dim,
+        )
+        .with_retry(
+            config.embedding_retry_attempts,
+            config.embedding_retry_initial_ms,
+        )
+        .with_timeout(config.request_timeout_secs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{reorder_openai_embeddings, EmbeddingClient, EmbeddingProvider};
+    use super::{reorder_openai_embeddings, EmbeddingClient, EmbeddingHandle, EmbeddingProvider};
 
     #[test]
     fn reorder_openai_embeddings_restores_order() {
@@ -1054,5 +1168,69 @@ mod tests {
         assert_eq!(vectors.len(), 3);
         assert_eq!(vectors[0], vectors[2]);
         assert_ne!(vectors[0], vectors[1]);
+    }
+
+    // ---- M3.4: hot-reload of the embedding client ----
+
+    #[test]
+    fn handle_swap_is_visible_through_a_clone() {
+        // The bug this guards: the hub and NS-Mem used to receive
+        // `(*embeddings).clone()` — their own snapshot of the client — so a
+        // config reload could only ever reach one of the three consumers.
+        // Cloning the handle must share the swap, not copy the client.
+        let handle = EmbeddingHandle::new(EmbeddingClient::new(EmbeddingProvider::Ollama {
+            api_url: "http://localhost:11434".into(),
+            model: "nomic-embed-text".into(),
+        }));
+        let consumer = handle.clone();
+        assert_eq!(consumer.current().model_name(), "nomic-embed-text");
+
+        handle.replace(EmbeddingClient::new(EmbeddingProvider::Ollama {
+            api_url: "http://localhost:11434".into(),
+            model: "mxbai-embed-large".into(),
+        }));
+
+        assert_eq!(consumer.current().model_name(), "mxbai-embed-large");
+        assert_eq!(consumer.current().provider_name(), "ollama");
+    }
+
+    #[test]
+    fn in_flight_client_survives_a_swap() {
+        // `current()` hands out an Arc, so an operation that already started
+        // finishes against the client it picked up rather than observing a
+        // half-applied config.
+        let handle = EmbeddingHandle::new(EmbeddingClient::new(EmbeddingProvider::Mock { dim: 8 }));
+        let in_flight = handle.current();
+
+        handle.replace(EmbeddingClient::new(EmbeddingProvider::Ollama {
+            api_url: "http://localhost:11434".into(),
+            model: "nomic-embed-text".into(),
+        }));
+
+        assert_eq!(in_flight.provider_name(), "mock");
+        assert_eq!(handle.current().provider_name(), "ollama");
+    }
+
+    #[test]
+    fn provider_from_config_maps_aliases_and_unknowns() {
+        let mut config = crate::config::Config::default();
+
+        for (name, expected) in [
+            ("ollama", "ollama"),
+            ("openai", "openai"),
+            ("azure-openai", "azure"),
+            ("azure_openai", "azure"),
+            ("cohere", "cohere"),
+            ("hf", "huggingface"),
+            ("mock", "mock"),
+            // An unset or misspelled provider must degrade to `none`, never
+            // panic and never silently pick a paid provider.
+            ("", "none"),
+            ("nonsense", "none"),
+        ] {
+            config.embedding_provider = name.to_string();
+            let client = EmbeddingClient::from_config(&config, None);
+            assert_eq!(client.provider_name(), expected, "provider `{name}`");
+        }
     }
 }

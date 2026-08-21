@@ -32,6 +32,7 @@ pub async fn search(
         Some(v) => v,
         None => state
             .embeddings
+            .current()
             .embed(&payload.query)
             .await
             .map_err(|err| {

@@ -120,7 +120,7 @@ impl MemoryService {
         request: MemoryQueryRequest,
         mode: MemoryQueryMode,
     ) -> anyhow::Result<MemoryQueryResponse> {
-        let query_vector = self.embeddings.embed(&request.query).await?;
+        let query_vector = self.embeddings.current().embed(&request.query).await?;
         let limit = self.default_limit(request.limit);
 
         // ── Step 1: Initial K-NN seeds ────────────────────────────────────

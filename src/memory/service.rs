@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::engine::embeddings::EmbeddingClient;
+use crate::engine::embeddings::EmbeddingHandle;
 use crate::engine::Engine;
 use crate::memory::consolidator::Consolidator;
 use crate::memory::graph::GraphService;
@@ -13,7 +13,7 @@ use tokio::sync::OnceCell;
 pub struct MemoryService {
     pub(crate) engine: Arc<Engine>,
     pub(crate) sqlite: Option<Arc<SqliteService>>,
-    pub(crate) embeddings: EmbeddingClient,
+    pub(crate) embeddings: EmbeddingHandle,
     pub(crate) llm: InferenceClient,
     pub(crate) config: Config,
     pub(crate) schema_ready: Arc<OnceCell<()>>,
@@ -25,7 +25,7 @@ impl MemoryService {
     pub fn new(
         engine: Arc<Engine>,
         sqlite: Option<Arc<SqliteService>>,
-        embeddings: EmbeddingClient,
+        embeddings: EmbeddingHandle,
         config: Config,
     ) -> Self {
         let graph = sqlite.as_ref().map(|sq| GraphService::new(sq.clone()));

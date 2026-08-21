@@ -32,9 +32,11 @@ async fn start() -> TestApp {
     let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
     let sqlite = SqliteService::new(&db_path).unwrap();
     let search_engine = Arc::new(SearchEngine::new(dir.path().to_path_buf()).unwrap());
-    let embeddings = Arc::new(luma::engine::embeddings::EmbeddingClient::new(
-        luma::engine::embeddings::EmbeddingProvider::Mock { dim: 4 },
-    ));
+    let embeddings = luma::engine::embeddings::EmbeddingHandle::new(
+        luma::engine::embeddings::EmbeddingClient::new(
+            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 4 },
+        ),
+    );
     let app = api::router(api::RouterDeps {
         engine,
         config,

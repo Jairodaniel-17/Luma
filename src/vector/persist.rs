@@ -1161,8 +1161,14 @@ mod tests {
     fn check_embedding_compat_rejects_dim_mismatch() {
         let m = Manifest::new(768, Metric::Cosine);
         let err = m.check_embedding_compat(1536, "whatever").unwrap_err();
-        assert!(err.contains("768"), "reason should name the collection dim: {err}");
-        assert!(err.contains("1536"), "reason should name the incoming dim: {err}");
+        assert!(
+            err.contains("768"),
+            "reason should name the collection dim: {err}"
+        );
+        assert!(
+            err.contains("1536"),
+            "reason should name the incoming dim: {err}"
+        );
     }
 
     #[test]
@@ -1171,7 +1177,9 @@ mod tests {
         // downstream would error — recall would just quietly get worse.
         let mut m = Manifest::new(768, Metric::Cosine);
         m.stamp_embedding("ollama", "nomic-embed-text");
-        let err = m.check_embedding_compat(768, "mxbai-embed-large").unwrap_err();
+        let err = m
+            .check_embedding_compat(768, "mxbai-embed-large")
+            .unwrap_err();
         assert!(err.contains("nomic-embed-text"), "{err}");
         assert!(err.contains("mxbai-embed-large"), "{err}");
     }
@@ -1180,7 +1188,9 @@ mod tests {
     fn check_embedding_compat_allows_matching_and_unknown() {
         let mut stamped = Manifest::new(768, Metric::Cosine);
         stamped.stamp_embedding("ollama", "nomic-embed-text");
-        assert!(stamped.check_embedding_compat(768, "nomic-embed-text").is_ok());
+        assert!(stamped
+            .check_embedding_compat(768, "nomic-embed-text")
+            .is_ok());
 
         // Pre-existing collections have no recorded provenance and must keep
         // working rather than becoming un-ingestable after an upgrade.

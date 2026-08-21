@@ -29,9 +29,11 @@ async fn test_api_vector_flow() {
         sqlite: None,
         search_engine,
         auth_store: None,
-        embeddings: std::sync::Arc::new(luma::engine::embeddings::EmbeddingClient::new(
-            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
-        )),
+        embeddings: luma::engine::embeddings::EmbeddingHandle::new(
+            luma::engine::embeddings::EmbeddingClient::new(
+                luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
+            ),
+        ),
         audit_log: None,
         rbac: None,
     });

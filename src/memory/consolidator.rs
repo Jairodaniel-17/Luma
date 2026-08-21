@@ -19,7 +19,7 @@ impl Consolidator {
         namespace: &str,
         content: &str,
     ) -> Option<String> {
-        let vector = service.embeddings.embed(content).await.ok()?;
+        let vector = service.embeddings.current().embed(content).await.ok()?;
         let collection = service.memory_collection(namespace, MemoryKind::Semantic);
         let exists = service
             .engine

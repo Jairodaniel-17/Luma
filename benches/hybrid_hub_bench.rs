@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use luma::config::Config;
 use luma::engine::chunking::ChunkingEngine;
-use luma::engine::embeddings::{EmbeddingClient, EmbeddingProvider};
+use luma::engine::embeddings::{EmbeddingClient, EmbeddingHandle, EmbeddingProvider};
 use luma::engine::hub::LumaDatabase;
 use luma::engine::Engine;
 use luma::sqlite::SqliteService;
@@ -31,7 +31,7 @@ fn bench_hybrid_queries(c: &mut Criterion) {
         Arc::new(LumaDatabase::new(
             engine,
             Some(sqlite),
-            EmbeddingClient::new(EmbeddingProvider::Mock { dim: 384 }),
+            EmbeddingHandle::new(EmbeddingClient::new(EmbeddingProvider::Mock { dim: 384 })),
             ChunkingEngine::default(),
             config,
         ))

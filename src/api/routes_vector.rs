@@ -1063,7 +1063,7 @@ pub async fn rerank(
     let query_vector = if let Some(v) = body.query_vector {
         v
     } else if let Some(text) = body.query {
-        state.embeddings.embed(&text).await.map_err(|e| {
+        state.embeddings.current().embed(&text).await.map_err(|e| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "embedding_error",

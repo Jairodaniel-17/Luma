@@ -41,9 +41,11 @@ async fn start() -> (TenantApp, Arc<AuthStore>) {
         sqlite: Some(sqlite),
         search_engine,
         auth_store: Some(auth_store.clone()),
-        embeddings: Arc::new(luma::engine::embeddings::EmbeddingClient::new(
-            luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
-        )),
+        embeddings: luma::engine::embeddings::EmbeddingHandle::new(
+            luma::engine::embeddings::EmbeddingClient::new(
+                luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
+            ),
+        ),
         audit_log: None,
         rbac: None,
     });
