@@ -3,6 +3,7 @@ pub mod audit;
 pub mod auth;
 pub mod auth_store;
 pub mod errors;
+pub mod pathsafe;
 pub mod rbac;
 pub mod routes_accounts;
 pub mod routes_admin;
@@ -357,14 +358,19 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         // handler existía pero no estaba montado — caía al SPA fallback (HTML).
         .route("/v1/meta/:collection/execute", post(routes_meta::execute))
         .route("/v1/blob/:bucket", get(routes_blob::list))
-        .route("/v1/blob/:bucket/:key", put(routes_blob::put))
-        .route("/v1/blob/:bucket/:key", get(routes_blob::get))
-        .route("/v1/blob/:bucket/:key", delete(routes_blob::delete))
+        // Wildcard, not `:key`: object keys carry `/` (an S3 key is a path,
+        // and W3.2 S3-compatibility depends on it). `resolve_blob_path` and
+        // `validate_key` already split the key and validate every segment, so
+        // the single-segment route was blocking a case the handler was built
+        // for.
+        .route("/v1/blob/:bucket/*key", put(routes_blob::put))
+        .route("/v1/blob/:bucket/*key", get(routes_blob::get))
+        .route("/v1/blob/:bucket/*key", delete(routes_blob::delete))
         .route("/v1/queue/:queue", post(routes_queue::enqueue))
         .route("/v1/queue/:queue", get(routes_queue::stats))
         .route("/v1/queue/:queue/receive", post(routes_queue::receive))
         .route("/v1/queue/:queue/:id", delete(routes_queue::ack))
-        .route("/v1/image/:bucket/:key", get(routes_image::transform))
+        .route("/v1/image/:bucket/*key", get(routes_image::transform))
         .route("/v1/events", get(routes_events::events))
         .route("/v1/stream", get(routes_events::stream))
         .route("/v1/vector", get(routes_vector::list_collections))

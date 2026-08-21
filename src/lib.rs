@@ -23,6 +23,8 @@ pub mod config;
 pub mod crypto;
 /// Document store: chunking, storage, and retrieval of ingested documents.
 pub mod docstore;
+
+pub mod durability;
 /// Core engine: subsystem coordination, event sourcing, WAL, and persistence.
 pub mod engine;
 /// NS-Mem: the agent memory layer (episodic, semantic, procedural, working).

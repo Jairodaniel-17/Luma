@@ -15,7 +15,7 @@ use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader};
 use serde::Deserialize;
 use std::io::Cursor;
-use std::path::{Component, Path as StdPath, PathBuf};
+use std::path::{Path as StdPath, PathBuf};
 
 /// Cap on requested output dimension (px) to reject absurd resizes / OOM.
 const MAX_DIMENSION: u32 = 5000;
@@ -89,26 +89,18 @@ fn validate_key(key: &str) -> Result<(), ApiError> {
 
 /// Defense-in-depth: confirm a built path is lexically contained within `root`.
 fn ensure_within_root(root: &StdPath, candidate: &StdPath) -> Result<(), ApiError> {
-    for comp in candidate.components() {
-        match comp {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_argument",
-                    "path traversal detected",
-                ));
-            }
-        }
-    }
-    if !candidate.starts_with(root) {
-        return Err(ApiError::new(
+    crate::api::pathsafe::ensure_within_root(root, candidate).map_err(|why| match why {
+        crate::api::pathsafe::PathRejection::Traversal => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "path traversal detected",
+        ),
+        crate::api::pathsafe::PathRejection::Escapes => ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_argument",
             "path escapes blob root",
-        ));
-    }
-    Ok(())
+        ),
+    })
 }
 
 fn resolve_blob_path(state: &AppState, bucket: &str, key: &str) -> Result<PathBuf, ApiError> {

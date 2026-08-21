@@ -18,7 +18,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Component, Path as StdPath, PathBuf};
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -159,26 +159,18 @@ fn validate_id(id: &str) -> Result<(), ApiError> {
 
 /// Defense-in-depth: confirm a built path is lexically contained within `root`.
 fn ensure_within_root(root: &StdPath, candidate: &StdPath) -> Result<(), ApiError> {
-    for comp in candidate.components() {
-        match comp {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_argument",
-                    "path traversal detected",
-                ));
-            }
-        }
-    }
-    if !candidate.starts_with(root) {
-        return Err(ApiError::new(
+    crate::api::pathsafe::ensure_within_root(root, candidate).map_err(|why| match why {
+        crate::api::pathsafe::PathRejection::Traversal => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "path traversal detected",
+        ),
+        crate::api::pathsafe::PathRejection::Escapes => ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_argument",
             "path escapes queue root",
-        ));
-    }
-    Ok(())
+        ),
+    })
 }
 
 /// Per-tenant isolation directory (`t_{tenant}`) under the queues root, or
@@ -252,16 +244,18 @@ fn check_delay(secs: u64) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Commit one message to disk durably.
+///
+/// An enqueue that returns OK must survive a crash, so this is a full durable
+/// write (fsync of the file, then of the directory after the rename) and not
+/// just an atomic rename: the rename was already atomic, but its directory
+/// entry could still be lost with the page cache, silently dropping a message
+/// the producer believes was accepted.
 async fn write_message_atomic(dir: &StdPath, msg: &StoredMessage) -> Result<(), ApiError> {
     let bytes = serde_json::to_vec(msg).map_err(|_| io_error("failed to serialize message"))?;
     let final_path = dir.join(format!("{}.json", msg.id));
-    let tmp_path = dir.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
-    tokio::fs::write(&tmp_path, &bytes)
-        .await
-        .map_err(|_| io_error("failed to write message"))?;
-    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        tracing::error!("queue message rename failed: {}", e);
+    if let Err(e) = crate::durability::write_atomic(&final_path, &bytes).await {
+        tracing::error!("queue message commit failed: {}", e);
         return Err(io_error("failed to commit message"));
     }
     Ok(())

@@ -112,26 +112,18 @@ fn validate_key(key: &str) -> Result<(), ApiError> {
 /// `canonicalize`; instead we reject any path containing `..`/root-dir/prefix
 /// components and verify it still starts with `root`.
 fn ensure_within_root(root: &StdPath, candidate: &StdPath) -> Result<(), ApiError> {
-    for comp in candidate.components() {
-        match comp {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_argument",
-                    "path traversal detected",
-                ));
-            }
-        }
-    }
-    if !candidate.starts_with(root) {
-        return Err(ApiError::new(
+    crate::api::pathsafe::ensure_within_root(root, candidate).map_err(|why| match why {
+        crate::api::pathsafe::PathRejection::Traversal => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "path traversal detected",
+        ),
+        crate::api::pathsafe::PathRejection::Escapes => ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_argument",
             "path escapes blob root",
-        ));
-    }
-    Ok(())
+        ),
+    })
 }
 
 /// Resolve and validate the full on-disk path for a bucket+key.
@@ -185,25 +177,12 @@ pub async fn put(
         ));
     }
 
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|_| io_error("failed to create blob directory"))?;
-    }
-
-    // Write to a unique temp file in the same directory, then atomically rename.
-    let tmp_path = match path.parent() {
-        Some(parent) => parent.join(format!(".tmp-{}", uuid::Uuid::new_v4())),
-        None => return Err(io_error("invalid blob path")),
-    };
-
-    tokio::fs::write(&tmp_path, &body)
-        .await
-        .map_err(|_| io_error("failed to write blob"))?;
-
-    if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        tracing::error!("blob rename failed: {}", e);
+    // Durable: temp file -> fsync the file -> rename -> fsync the directory.
+    // The rename alone was atomic but not durable: a crash right after a
+    // confirmed PUT could lose the object because the directory entry was still
+    // only in the page cache.
+    if let Err(e) = crate::durability::write_atomic(&path, &body).await {
+        tracing::error!("blob commit failed: {}", e);
         return Err(io_error("failed to commit blob"));
     }
 

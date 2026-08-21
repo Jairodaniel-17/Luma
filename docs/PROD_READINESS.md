@@ -7,24 +7,52 @@
 - **Bind seguro**: sin flags el binario sólo escucha en `127.0.0.1`. Usa `--bind 0.0.0.0` o `--unsafe-bind` sólo si lo pones detrás de un proxy.
 - **Auth**: exporta `RUSTKISS_API_KEY`/`API_KEY` para exigir `Authorization: Bearer …`. Si no lo haces, las rutas quedan abiertas (útil para laboratorio, no prod).
 
-## Durabilidad por plataforma (W1.2, parcial)
+## Durabilidad por primitiva (W1.2)
 
-Tabla en construcción — la auditoría completa de fsync por primitiva es el ítem
-W1.2 del [plan maestro](PLAN-MAESTRO.md). Lo verificado hasta ahora:
+Qué garantiza cada primitiva **en el momento en que devuelve OK**. Auditado
+extremo a extremo, no inferido de la configuración.
 
-| Operación | Linux / macOS | Windows |
+Leyenda de "confirmado":
+- **fsync** — los datos están en el medio antes de responder.
+- **fsync diferido** — se responde antes del flush; una caída puede perder una
+  ventana acotada de escrituras confirmadas.
+- **reconstruible** — no se sincroniza, pero el WAL es la fuente de verdad y el
+  replay al arrancar lo regenera. La pérdida no es de datos, es de trabajo.
+
+| Primitiva | Al devolver OK | Riesgo real de una caída |
 |---|---|---|
-| Escritura del manifest de una colección vectorial (`write_manifest`) | `write` → `sync_data` del fichero temporal → `rename` → **fsync del directorio** | igual, pero **sin fsync del directorio**: NTFS rechaza `FlushFileBuffers` sobre un handle de directorio, así que la durabilidad de la entrada del directorio depende del journaling de metadatos de NTFS |
+| **WAL de eventos** (`events-NNNNNN.log`) — respalda todas las mutaciones | **fsync diferido** por defecto: `wal_sync_mode = "group"`, lotes de `wal_batch_size` (64) o `wal_flush_interval_ms` (10 ms) | Hasta un lote o 10 ms de mutaciones confirmadas. Poner `wal_sync_mode = "per_write"` lo elimina a costa de throughput |
+| **Blob** (`/v1/blob`) | **fsync** del fichero, luego del directorio tras el rename | Ninguno en Linux. En Windows la entrada de directorio depende del journaling de NTFS |
+| **Colas** (`/v1/queue`) | **fsync** del fichero del mensaje, luego del directorio | Igual que blob. Un `enqueue` confirmado no se pierde |
+| **Manifest de colección vectorial** | **fsync** del temporal, rename, fsync del directorio | Igual que blob |
+| **Runs de vectores** (`runs/*.run`) | `sync_data` por registro en el camino unitario; en el camino por lotes un único `sync_active_run` al cerrar el lote | En el camino por lotes, hasta un lote de vectores. El WAL sigue teniéndolos, así que el replay los recupera |
+| **KV respaldado por redb** | **reconstruible**: las transacciones usan `Durability::Eventual`, sin fsync por commit | Ninguna pérdida de datos: redb es una proyección del WAL y el replay la reconstruye desde `applied_offset` |
+| **SQLite** (relacional, auth, docstore, NS-Mem) | **fsync diferido**: modo WAL con `synchronous = NORMAL` | Un corte de energía puede perder commits recientes. No corrompe la base (eso exigiría `synchronous = OFF`). `FULL` lo elimina a costa de latencia de escritura |
+| **Snapshots** (`snapshot.json`) | Escritura periódica, no en el camino de la petición | No aplica: el snapshot solo acorta el replay, nunca es la única copia |
 
-Cómo se comprobó en Windows: `File::open()` sobre un directorio devuelve
-`PermissionDenied`; con `FILE_FLAG_BACKUP_SEMANTICS` el handle sí abre, pero
-`sync_all()` sobre él vuelve a devolver `PermissionDenied`. No es un fallo de
-E/S: es que la operación no existe en esa plataforma, y por eso no puede hacer
-fallar la escritura que la solicitó.
+### Lo que esta tabla deja ver
 
-**Recomendación operativa:** el objetivo de despliegue es Linux (imagen musl).
-Windows es plataforma de desarrollo soportada, no de producción con garantías
-de durabilidad equivalentes.
+Dos puntos que conviene decidir de forma consciente antes de producción, no
+descubrir después:
+
+1. **El default de `wal_sync_mode` es `group`, no `per_write`.** Es la decisión
+   correcta para throughput, pero significa que "no pierde datos confirmados"
+   tiene una ventana de 64 escrituras o 10 ms. Quien necesite RPO cero por
+   escritura tiene que cambiarlo explícitamente.
+2. **SQLite corre con `synchronous = NORMAL`.** Las cuentas, la auditoría y las
+   tablas de NS-Mem viven ahí. Un corte de energía no corrompe nada, pero puede
+   perder los últimos commits — incluida una alta de usuario que la API ya
+   confirmó.
+
+El objetivo de despliegue es **Linux** (imagen musl). Windows es plataforma de
+desarrollo soportada, no de producción con garantías equivalentes: NTFS no
+expone flush de directorio, así que la durabilidad de los renames descansa en
+su journaling de metadatos y no en un flush que hagamos nosotros.
+
+> Pendiente de W1.1: la matriz de crash-recovery que **demuestra** esta tabla
+> matando el proceso durante ráfagas de escritura de cada motor. Hasta que
+> exista, la tabla describe el código auditado, no un comportamiento verificado
+> bajo fallo.
 
 ## SSE tuning
 
