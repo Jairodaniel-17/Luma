@@ -103,7 +103,7 @@ frentes a la vez y no cerrar ninguno.
 
 | # | Bloque | Release | Contenido | Tamaño |
 |---:|---|---|---|---|
-| 0 | Barrido de deuda del roadmap | `v4.25.0` | M3.2, M3.4, M4.1, M3.3 + fix de `content-type` en métricas | S |
+| 0 | ✅ Barrido de deuda del roadmap | `v4.25.0` | M3.2, M3.4, M4.1, M3.3 + fix de `content-type` en métricas | S |
 | 1 | **Durabilidad demostrada** | `v4.26.0` | W1.1 (harness compartido), W1.2, fixture dorado en CI | M |
 | 2 | Cimientos del motor RESP | `v4.27.0` | F0.1 `StoredVal`, F0.2 estructuras, F0.3 notificadores | **XL** |
 | 3 | RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
@@ -159,7 +159,7 @@ riesgo y deja el roadmap viejo a cero.
   `sessions`, `sessions/revoke-all`, `DELETE /v1/vector/:collection`,
   `config/embedding/probe`, `meta/:collection/execute`, invitaciones y
   miembros por org, `users/:id/orgs`, CRUD de roles.
-- `[ ]` **M3.3 — reindexado al cambiar de modelo.** El único medium-high del
+- `[x]` **M3.3 — reindexado al cambiar de modelo.** El único medium-high del
   bloque: `POST /v1/vector/:col/reindex {target_model}` como job en background
   con progreso. **Si el bloque se alarga, este es el ítem que se mueve al
   Bloque 1**, no los otros tres.
@@ -169,7 +169,11 @@ riesgo y deja el roadmap viejo a cero.
 
 **Puerta de verificación 0:** fmt + clippy + `cargo test`.
 
-> Corrida parcial tras M3.2 / M3.4 / metrics (el refactor a `EmbeddingHandle`
+> **Bloque 0 cerrado.** Puerta verde: fmt, `clippy --all-targets
+> --all-features` con 0 findings, **260 tests**, y `tsc --noEmit` del SDK TS
+> limpio.
+>
+> Corrida parcial previa tras M3.2 / M3.4 / metrics (el refactor a `EmbeddingHandle`
 > tocó 25 ficheros de test, así que se adelantó una pasada): fmt y
 > `clippy --all-targets --all-features` limpios, **257 tests verdes**. Destapó
 > un bug preexistente de Windows en `write_manifest` — ver W1.2 del Bloque 1,
