@@ -233,6 +233,484 @@ components:
         visible:
           type: integer
           description: Messages currently available to receive.
+    RegisterRequest:
+      type: object
+      required:
+      - org_name
+      - email
+      - password
+      properties:
+        org_name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+    RegisterResponse:
+      type: object
+      required:
+      - org_id
+      - user_id
+      - email
+      - role
+      properties:
+        org_id:
+          type: string
+        user_id:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+    LoginRequest:
+      type: object
+      required:
+      - email
+      - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    SessionResponse:
+      type: object
+      required:
+      - token
+      - expires_at_ms
+      - role
+      properties:
+        token:
+          type: string
+          description: Opaque session token, prefixed `lums_`. Only its SHA-256 hash is stored.
+        expires_at_ms:
+          type: integer
+          format: int64
+        role:
+          type: string
+        org_id:
+          type: string
+          nullable: true
+        user_id:
+          type: string
+    RefreshResponse:
+      type: object
+      required:
+      - token
+      - expires_at_ms
+      properties:
+        token:
+          type: string
+        expires_at_ms:
+          type: integer
+          format: int64
+    Session:
+      type: object
+      description: Session metadata. The token itself is never returned.
+      properties:
+        created_at_ms:
+          type: integer
+          format: int64
+        expires_at_ms:
+          type: integer
+          format: int64
+        org_id:
+          type: string
+          nullable: true
+        current:
+          type: boolean
+          description: Whether this is the session making the request.
+    SessionListResponse:
+      type: object
+      required:
+      - sessions
+      - count
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Session'
+        count:
+          type: integer
+    RevokeAllResponse:
+      type: object
+      required:
+      - revoked
+      properties:
+        revoked:
+          type: integer
+          description: Sessions revoked, excluding the current one.
+    Organization:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+          description: The caller's role in this org, when listing memberships.
+        created_at_ms:
+          type: integer
+          format: int64
+    OrgListResponse:
+      type: object
+      required:
+      - orgs
+      properties:
+        orgs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Organization'
+    CreateOrgRequest:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+    SwitchOrgRequest:
+      type: object
+      required:
+      - org_id
+      properties:
+        org_id:
+          type: string
+    SwitchOrgResponse:
+      type: object
+      required:
+      - token
+      - expires_at_ms
+      - org_id
+      - role
+      properties:
+        token:
+          type: string
+        expires_at_ms:
+          type: integer
+          format: int64
+        org_id:
+          type: string
+        role:
+          type: string
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        org_id:
+          type: string
+          nullable: true
+    UserListResponse:
+      type: object
+      required:
+      - users
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+    CreateUserRequest:
+      type: object
+      required:
+      - email
+      - password
+      - role
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+        role:
+          type: string
+        org_id:
+          type: string
+          nullable: true
+          description: Honored only for platform admins.
+    UpdateRoleRequest:
+      type: object
+      required:
+      - role
+      properties:
+        role:
+          type: string
+    Member:
+      type: object
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+    MemberListResponse:
+      type: object
+      required:
+      - members
+      properties:
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/Member'
+    AddMemberRequest:
+      type: object
+      required:
+      - email
+      - role
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+    InviteRequest:
+      type: object
+      required:
+      - email
+      - role
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+        password:
+          type: string
+          format: password
+          nullable: true
+          description: Omit to have a temporary password generated and returned once.
+    InviteResponse:
+      type: object
+      required:
+      - user_id
+      - email
+      - org_id
+      - role
+      - created
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+        org_id:
+          type: string
+        role:
+          type: string
+        created:
+          type: boolean
+          description: True when the account did not exist and was created.
+        temp_password:
+          type: string
+          nullable: true
+          description: Present only when a password was generated. Returned once, never retrievable again.
+    AccessPolicy:
+      type: object
+      description: Allow-list governing who may self-register.
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+        emails:
+          type: array
+          items:
+            type: string
+    DomainOrgMapping:
+      type: object
+      properties:
+        domain:
+          type: string
+        org_id:
+          type: string
+        role:
+          type: string
+    DomainOrgListResponse:
+      type: object
+      required:
+      - mappings
+      properties:
+        mappings:
+          type: array
+          items:
+            $ref: '#/components/schemas/DomainOrgMapping'
+    DomainOrgRequest:
+      type: object
+      required:
+      - domain
+      - org_id
+      properties:
+        domain:
+          type: string
+        org_id:
+          type: string
+        role:
+          type: string
+          nullable: true
+          description: Defaults to `member`.
+    UpdateKeyRoleRequest:
+      type: object
+      required:
+      - role
+      properties:
+        role:
+          type: string
+        permissions:
+          nullable: true
+          description: Optional explicit permission payload attached to the key.
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        parent_role_id:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+    RoleListResponse:
+      type: object
+      required:
+      - roles
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+    CreateRoleRequest:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+        parent_role_id:
+          type: string
+          nullable: true
+          description: Inherit this parent's permissions.
+        description:
+          type: string
+          nullable: true
+    Permission:
+      type: object
+      required:
+      - resource
+      - action
+      properties:
+        resource:
+          type: string
+        action:
+          type: string
+    PermissionListResponse:
+      type: object
+      required:
+      - permissions
+      properties:
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
+    PermissionCheckResponse:
+      type: object
+      required:
+      - role
+      - resource
+      - action
+      - allowed
+      properties:
+        role:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+        allowed:
+          type: boolean
+    AuditEvent:
+      type: object
+      description: Business-level event from sys_audit_events.
+      properties:
+        ts:
+          type: integer
+          format: int64
+        org_id:
+          type: string
+          nullable: true
+        user_id:
+          type: string
+          nullable: true
+        action:
+          type: string
+        target:
+          type: string
+          nullable: true
+        detail:
+          nullable: true
+    AuditEventListResponse:
+      type: object
+      required:
+      - events
+      - count
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        count:
+          type: integer
+    EmbeddingProbeRequest:
+      type: object
+      required:
+      - provider
+      properties:
+        provider:
+          type: string
+          description: 'One of ollama, openai, azure, cohere, huggingface, or an
+            OpenAI-wire-compatible alias (google, gemini, custom,
+            openai_compatible).'
+        url:
+          type: string
+        api_key:
+          type: string
+          format: password
+        model:
+          type: string
+        azure_api_base:
+          type: string
+        azure_deployment:
+          type: string
+        azure_api_version:
+          type: string
+    EmbeddingProbeResponse:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+        dim:
+          type: integer
+          description: Dimension actually returned by the provider. Present when ok is true.
+        provider:
+          type: string
+        model:
+          type: string
+        error:
+          type: string
+          description: The provider's own error message. Present when ok is false.
     ErrorBody:
       type: object
       required:
@@ -4028,6 +4506,903 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
         '404':
           description: Source object not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/register:
+    post:
+      tags:
+      - Accounts
+      summary: Register an organization and its first user
+      description: 'Public endpoint. Creates the org and its owner, unless the
+        email domain is mapped via `/v1/auth/domain-orgs` — in that case the user
+        joins the mapped org with the mapped role instead of creating a new one.
+        Passwords are hashed with Argon2id and must be at least 8 characters.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          description: Password shorter than 8 characters, or email already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Accounts unavailable (SQLite disabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/login:
+    post:
+      tags:
+      - Accounts
+      summary: Exchange email and password for a session token
+      description: 'Public endpoint. Returns an opaque `lums_…` token; only its
+        SHA-256 hash is stored server-side, so the token cannot be recovered from
+        the database. Default TTL is 7 days.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Session issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/logout:
+    post:
+      tags:
+      - Accounts
+      security:
+      - bearerAuth: []
+      summary: Revoke the current session token
+      responses:
+        '204':
+          description: Session revoked
+        '401':
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/refresh:
+    post:
+      tags:
+      - Accounts
+      security:
+      - bearerAuth: []
+      summary: Rotate the current session token
+      description: 'Issues a new token and revokes the presented one. The old
+        token stops working immediately, so clients must replace it atomically.
+
+        '
+      responses:
+        '200':
+          description: New token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshResponse'
+        '401':
+          description: Missing, expired or revoked token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/sessions:
+    get:
+      tags:
+      - Accounts
+      security:
+      - bearerAuth: []
+      summary: List the caller's active sessions
+      description: Tokens are never returned — only their metadata.
+      responses:
+        '200':
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionListResponse'
+  /v1/auth/sessions/revoke-all:
+    post:
+      tags:
+      - Accounts
+      security:
+      - bearerAuth: []
+      summary: Sign out of every other device
+      description: Revokes all of the caller's sessions except the one in use.
+      responses:
+        '200':
+          description: Number of sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeAllResponse'
+  /v1/auth/my-orgs:
+    get:
+      tags:
+      - Accounts
+      security:
+      - bearerAuth: []
+      summary: Organizations the caller belongs to
+      responses:
+        '200':
+          description: Memberships
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgListResponse'
+  /v1/auth/switch-org:
+    post:
+      tags:
+      - Accounts
+      security:
+      - bearerAuth: []
+      summary: Rebind the session to another organization
+      description: 'Rotates the token: the old one is revoked and the new one
+        carries the role the user holds in the target org. Fails if the caller is
+        not a member of it.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchOrgRequest'
+      responses:
+        '200':
+          description: Token rebound to the target org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwitchOrgResponse'
+        '403':
+          description: Caller is not a member of the target organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/access-policy:
+    get:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Read the self-registration allow policy
+      responses:
+        '200':
+          description: Allowed domains and emails
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessPolicy'
+    put:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Replace the self-registration allow policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessPolicy'
+      responses:
+        '200':
+          description: Policy saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessPolicy'
+        '403':
+          description: Requires platform admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/domain-orgs:
+    get:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: List email-domain to organization mappings
+      responses:
+        '200':
+          description: Mappings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainOrgListResponse'
+    post:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Map an email domain to an organization
+      description: 'With a mapping in place, registering with an address in that
+        domain joins the mapped org instead of creating a new one. Platform admin
+        only.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DomainOrgRequest'
+      responses:
+        '204':
+          description: Mapping saved
+        '403':
+          description: Requires platform admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/domain-orgs/{domain}:
+    delete:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Remove a domain mapping
+      parameters:
+      - in: path
+        name: domain
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Mapping removed
+        '403':
+          description: Requires platform admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/keys/{id}/role:
+    put:
+      tags:
+      - Authentication
+      security:
+      - bearerAuth: []
+      summary: Change an API key's role and permissions
+      description: 'Targets any key by global id and can set an arbitrary role, so
+        it is restricted to platform admins.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateKeyRoleRequest'
+      responses:
+        '204':
+          description: Key updated
+        '403':
+          description: Requires platform admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Key id not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/roles:
+    get:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: List roles
+      responses:
+        '200':
+          description: Roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleListResponse'
+        '501':
+          description: RBAC unavailable (SQLite disabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    post:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Create a role
+      description: 'A role may inherit from a parent, which is how the built-in
+        viewer < member < admin < owner ladder is expressed.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoleRequest'
+      responses:
+        '200':
+          description: Role created
+        '403':
+          description: Insufficient role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/roles/{id}:
+    delete:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Delete a role
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Role deleted
+        '404':
+          description: Role not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/auth/roles/{id}/permissions:
+    get:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: List a role's permissions
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionListResponse'
+    post:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Grant a permission to a role
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Permission'
+      responses:
+        '200':
+          description: Permission granted
+    delete:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Revoke a permission from a role
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Permission'
+      responses:
+        '200':
+          description: Permission revoked
+  /v1/auth/roles/check:
+    get:
+      tags:
+      - Access Control
+      security:
+      - bearerAuth: []
+      summary: Test whether a role may perform an action
+      description: 'Resolves inheritance, so a role inherits its parents''
+        permissions. Read-only: it does not grant anything.
+
+        '
+      parameters:
+      - in: query
+        name: role
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: resource
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: action
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionCheckResponse'
+  /v1/admin/stats:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Usage statistics for the panel dashboard
+      description: 'Includes `storage_bytes` when the SQLite file is readable.
+        Admin only.
+
+        '
+      responses:
+        '200':
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /v1/admin/audit-events:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Business audit trail (logins, user and membership changes)
+      description: 'Distinct from `GET /v1/admin/audit`, which is the HTTP access
+        log. This one records semantic events from `sys_audit_events`.
+
+        '
+      parameters:
+      - in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventListResponse'
+  /v1/admin/orgs:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: List organizations
+      description: 'A tenant-bound admin sees only their own org; a platform admin
+        sees all of them.
+
+        '
+      responses:
+        '200':
+          description: Organizations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgListResponse'
+    post:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Create an organization
+      description: Platform admin only — creating an org is platform-wide.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrgRequest'
+      responses:
+        '200':
+          description: Organization created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '403':
+          description: Requires platform admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/orgs/{id}:
+    delete:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Delete an organization
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Organization deleted
+        '404':
+          description: 'Not found. Returned instead of 403 for an org the caller
+            may not touch, so the existence of other organizations is not
+            revealed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/orgs/{id}/members:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: List an organization's members
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberListResponse'
+    post:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Add an existing user to the organization
+      description: 'Requires the target account to exist already. To create and
+        add in one step use `/invite`. A caller cannot grant a role at or above
+        their own.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '200':
+          description: Membership added
+        '403':
+          description: Not an org manager, or role grant above the caller's own
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/orgs/{id}/invite:
+    post:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Invite a user in one step
+      description: 'If the email already has an account, adds the membership
+        (`created: false`). Otherwise creates the account and adds it
+        (`created: true`); when no password is supplied a temporary one is
+        generated and returned **once** as `temp_password`.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteRequest'
+      responses:
+        '200':
+          description: Invitation applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InviteResponse'
+        '403':
+          description: Not an org manager, or role grant above the caller's own
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/orgs/{id}/members/{user_id}:
+    put:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Change a member's role in the organization
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoleRequest'
+      responses:
+        '204':
+          description: Role updated
+        '403':
+          description: Role grant at or above the caller's own
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Remove a member from the organization
+      description: 'Removing a membership revokes that user''s sessions bound to
+        the org, so access stops immediately rather than at token expiry.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Member removed
+  /v1/admin/users:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: List users
+      description: Scoped to the caller's org unless the caller is a platform admin.
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+    post:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Create a user
+      description: '`org_id` is honored only for platform admins; an org admin
+        always creates within their own org. Password must be at least 8
+        characters.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '200':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Weak password or email already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/users/{id}:
+    delete:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Delete a user
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: User deleted
+        '404':
+          description: User not found or not visible to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/users/{id}/role:
+    put:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Change a user's role
+      description: 'A non-platform admin cannot promote anyone to a role at or
+        above their own.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoleRequest'
+      responses:
+        '204':
+          description: Role updated
+        '403':
+          description: Role grant at or above the caller's own
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/admin/users/{id}/orgs:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: Organizations a user belongs to
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Memberships
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgListResponse'
+  /v1/config/embedding/probe:
+    post:
+      tags:
+      - Configuration
+      security:
+      - bearerAuth: []
+      summary: Test an embedding configuration and measure its real dimension
+      description: 'Embeds a short probe string with the candidate settings and
+        reports the dimension actually returned, which removes the most common
+        configuration mistake — hand-typing the wrong `embedding_dim`. Always
+        answers 200: `ok:false` carries the provider''s own error message so a
+        UI can show it inline instead of as an opaque HTTP failure. Admin only.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingProbeRequest'
+      responses:
+        '200':
+          description: Probe result, successful or not
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingProbeResponse'
+        '403':
+          description: Requires admin
           content:
             application/json:
               schema:
