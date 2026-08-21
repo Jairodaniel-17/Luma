@@ -880,6 +880,19 @@ fn create_new_run(layout: &CollectionLayout, manifest: &mut Manifest) -> std::io
 /// A directory fsync is a no-op or unsupported on some platforms; those errors
 /// are tolerated so we stay portable while still hardening the common (Linux)
 /// case.
+/// Flushes a directory entry so a preceding `rename` survives a crash.
+///
+/// Unix opens the directory read-only and fsyncs the handle. Windows cannot do
+/// either: a plain `File::open` on a directory fails with `PermissionDenied`,
+/// and even with `FILE_FLAG_BACKUP_SEMANTICS` (which does yield a handle)
+/// `FlushFileBuffers` on that handle is rejected the same way. Before this was
+/// handled, every `write_manifest` returned `Err` on Windows, so no persisted
+/// vector collection could update its manifest at all.
+///
+/// Durability note for `PROD_READINESS.md`: on Windows the durability of the
+/// rename's directory entry therefore rests on NTFS metadata journaling rather
+/// than on an explicit flush we perform.
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     match File::open(dir) {
         Ok(f) => match f.sync_all() {
@@ -888,6 +901,33 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
             Err(e) => Err(e),
         },
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(windows)]
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Required to obtain a handle to a directory at all on Windows.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?;
+    match handle.sync_all() {
+        Ok(()) => Ok(()),
+        // NTFS rejects a flush on a directory handle. That is the platform
+        // telling us the operation does not exist here, not an I/O failure, so
+        // it must not fail the write that asked for it.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }

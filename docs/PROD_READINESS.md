@@ -7,6 +7,25 @@
 - **Bind seguro**: sin flags el binario sólo escucha en `127.0.0.1`. Usa `--bind 0.0.0.0` o `--unsafe-bind` sólo si lo pones detrás de un proxy.
 - **Auth**: exporta `RUSTKISS_API_KEY`/`API_KEY` para exigir `Authorization: Bearer …`. Si no lo haces, las rutas quedan abiertas (útil para laboratorio, no prod).
 
+## Durabilidad por plataforma (W1.2, parcial)
+
+Tabla en construcción — la auditoría completa de fsync por primitiva es el ítem
+W1.2 del [plan maestro](PLAN-MAESTRO.md). Lo verificado hasta ahora:
+
+| Operación | Linux / macOS | Windows |
+|---|---|---|
+| Escritura del manifest de una colección vectorial (`write_manifest`) | `write` → `sync_data` del fichero temporal → `rename` → **fsync del directorio** | igual, pero **sin fsync del directorio**: NTFS rechaza `FlushFileBuffers` sobre un handle de directorio, así que la durabilidad de la entrada del directorio depende del journaling de metadatos de NTFS |
+
+Cómo se comprobó en Windows: `File::open()` sobre un directorio devuelve
+`PermissionDenied`; con `FILE_FLAG_BACKUP_SEMANTICS` el handle sí abre, pero
+`sync_all()` sobre él vuelve a devolver `PermissionDenied`. No es un fallo de
+E/S: es que la operación no existe en esa plataforma, y por eso no puede hacer
+fallar la escritura que la solicitó.
+
+**Recomendación operativa:** el objetivo de despliegue es Linux (imagen musl).
+Windows es plataforma de desarrollo soportada, no de producción con garantías
+de durabilidad equivalentes.
+
 ## SSE tuning
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).
