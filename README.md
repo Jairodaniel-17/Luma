@@ -24,6 +24,29 @@ La premisa es simple: **la IA necesita más que vectores.** Mientras la arquitec
 
 ---
 
+## 🧰 Superficie de plataforma: qué reemplaza cada primitiva
+
+Luma no es solo un motor vectorial — es una capa de servicios de plataforma. Cada primitiva está montada hoy en el router y cubierta por tests:
+
+| Primitiva | Endpoint | Reemplaza a | Semántica clave |
+|---|---|---|---|
+| **Object storage** | `/v1/blob/:bucket/:key` | S3 / R2 | buckets y objetos binarios |
+| **KV** | `/v1/state` | Redis (datos) / DynamoDB | TTL, compare-and-swap por revisión, índices secundarios, 16 shards |
+| **Colas durables** | `/v1/queue/:queue` | SQS / Cloudflare Queues | at-least-once, visibility timeout, intentos, respaldadas en disco |
+| **Bus de eventos** | `/v1/stream` (SSE) | SNS / EventBridge | pub/sub con offsets del WAL, replay con `since=` |
+| **Imágenes** | `/v1/image/:bucket/:key` | CloudFront + Lambda de imágenes | transformación on-the-fly |
+| **Document store** | `/v1/doc/:collection` | MongoDB / DocumentDB | JSON con find por filtros |
+| **Vectores + RAG híbrido** | `/v1/vector`, `/v1/db` | Qdrant / pgvector / OpenSearch | HNSW · IVF-FLAT-Q8 · DiskANN, rerank, búsqueda de texto |
+| **Memoria de agentes** | `/v1/memory` (NS-Mem) | — (no existe equivalente gestionado) | grafo tipado, beliefs versionados, contradicciones |
+| **SQL** | embebido | SQLite WAL (o libSQL/Turso remoto) | relacional ligero, no pretende reemplazar PostgreSQL |
+| **Cuentas y control de acceso** | `/v1/auth`, `/v1/admin` | Cognito (parcial) | orgs, roles, Argon2id, auditoría, aislamiento por organización |
+
+Todas las primitivas comparten WAL segmentado con checksums, snapshots, respaldos, cifrado en reposo y el aislamiento multi-tenant por organización.
+
+> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — tiene SPEC propio por fases en [`docs/SPEC-resp.md`](docs/SPEC-resp.md). Qué protegemos y de quién: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+
+---
+
 ## 📊 Rendimiento medido (Luma vs Qdrant vs Milvus)
 
 Benchmark reproducible, misma máquina, mismo dataset y misma métrica para los tres motores. Sin cifras vagas: todas las columnas están medidas.
@@ -348,8 +371,3 @@ Notas de honestidad:
 Luma redefine el backend para IA mediante la **convergencia**: orquesta motores de primer nivel (índices vectoriales, SQLite, redb) más una capa empresarial completa en una sola plataforma cohesionada y un solo binario.
 
 > **Keep It Simple, Stupid (KISS). Keep It Fast, Rust.**
-
-Proyecto de prueba interno
-Estado verificado el 15 de julio
-Ultima revision automatica
-test
