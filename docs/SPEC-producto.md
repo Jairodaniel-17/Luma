@@ -34,7 +34,7 @@ Lo que Luma **es** y para quién, para que cada ítem técnico tenga un norte:
   protocolos estándar (RESP, S3) como interfaz de adopción.
 - **Qué no es:** un reemplazo de PostgreSQL (W4 existe para lo contrario), ni
   un Redis clusterizado, ni una base distribuida multi-escritor.
-- **Usuario objetivo, por orden:** (1) la propia suite Plataforma/Core-suite como
+- **Usuario objetivo, por orden:** (1) las aplicaciones propias del autor como
   primer cliente exigente (dogfooding con los 5 pilotos), (2) equipos pequeños
   que hoy pagan 4–6 servicios gestionados para una app de IA y quieren un solo
   binario operable, (3) despliegues on-premise/edge donde los servicios
@@ -173,8 +173,8 @@ mapeadas a las api keys). XML de respuesta idéntico al de S3 — validar con la
 suite de conformidad de MinIO (mint) recortada.
 **Aceptación:** boto3 sube/lista/descarga/borra y hace multipart de 100 MB
 contra Luma sin configuración especial más allá de `endpoint_url`; rclone
-sync funciona. La adopción tipo Temis (adaptador «S3-compatible») se vuelve
-literal: cambiar `endpoint_url`.
+sync funciona. Para cualquier app con adaptador «S3-compatible» la adopción se
+vuelve literal: cambiar `endpoint_url`.
 
 ### 3.3 `[ ]` OpenAPI como contrato  · impacto MEDIO · esfuerzo BAJO
 **Objetivo:** `docs/openapi.yaml` generado desde el código (no mantenido a
@@ -283,15 +283,17 @@ post-GA. Versionado: congelar API v1 (cambios rompientes ⇒ v2, nunca dentro de
 
 Cada frente se valida con un piloto interno real, del más barato al más valioso:
 
-1. **feedback-qa** (hoy: 1 bucket S3 + 1 DynamoDB + 1 Lambda) → blob + KV de
-   Luma. Valida W1 + SDK. Esfuerzo mínimo, riesgo mínimo.
-2. **Engram (cerebro de equipo)** → NS-Mem + doc store. Sustituye una imagen
-   pública de terceros con acceso a datos internos: valida W1/W2 y elimina un
-   riesgo de cadena de suministro señalado en el assessment de infraestructura.
-3. **Colas de un módulo con arq/Celery** → RESP F3. El drop-in de verdad.
-4. **Documentos de Temis** (puerto de object storage ya existente) → 3.2 o SDK.
-   El piloto que demuestra datos de producción de un cliente.
-5. **RAG del núcleo (pgvector)** → W4. El cierre: Postgres + Luma conectados.
+1. **Una app interna pequeña de recolección de datos** (hoy: 1 bucket S3 +
+   1 tabla NoSQL + 1 función serverless) → blob + KV de Luma. Valida W1 + SDK.
+   Esfuerzo mínimo, riesgo mínimo.
+2. **Un servicio de memoria/conocimiento de equipo** → NS-Mem + doc store.
+   Sustituye una imagen pública de terceros con acceso a datos internos:
+   valida W1/W2 y elimina un riesgo de cadena de suministro.
+3. **Las colas de una app con arq/Celery** → RESP F3. El drop-in de verdad.
+4. **El almacén de documentos de una app con puerto S3-compatible** → 3.2 o
+   SDK. El piloto que demuestra datos de producción reales.
+5. **El RAG de una app que hoy usa pgvector** → W4. El cierre: Postgres +
+   Luma conectados.
 
 ## Riesgos del plan maestro
 

@@ -37,9 +37,8 @@ con el patrón de bind ya existente).
 **T2 — Cruce entre organizaciones (el riesgo nº 1 del multi-tenant).**
 Controles: `TenantContext` en cada ruta; keyspace RESP con prefijo de org
 (SPEC-resp D4); `KEYS/SCAN/PUBLISH` filtran por tenant.
-Pendiente: tests de aislamiento como suite de certificación permanente en CI
-(mismo espíritu que la certificación de módulos de Plataforma) — entra con
-SPEC-resp 1.2.
+Pendiente: tests de aislamiento como suite de certificación permanente en CI —
+entra con SPEC-resp 1.2.
 
 **T3 — Agotamiento de recursos (DoS de vecino ruidoso o externo).**
 Controles: `MAX_BODY_BYTES`, `MAX_JSON_BYTES`, límites de dimensión/k/longitud,
