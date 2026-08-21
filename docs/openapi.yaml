@@ -73,6 +73,166 @@ components:
       scheme: bearer
       description: Enter your API Key (default is `dev`)
   schemas:
+    SearchIngestDocument:
+      type: object
+      required:
+      - id
+      - vector
+      - content
+      properties:
+        id:
+          type: integer
+          format: int32
+        vector:
+          type: array
+          items:
+            type: number
+            format: float
+        content:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/SearchDocumentMetadata'
+    SearchDocumentMetadata:
+      type: object
+      description: All fields optional; omitted fields are not serialized back.
+      properties:
+        filename:
+          type: string
+        processed_at:
+          type: integer
+          format: int64
+        category:
+          type: string
+        language:
+          type: string
+        status:
+          type: string
+        version:
+          type: string
+        group_id:
+          type: integer
+          format: int32
+    SearchIngestRequest:
+      type: object
+      required:
+      - document
+      properties:
+        document:
+          $ref: '#/components/schemas/SearchIngestDocument'
+    BlobPutResponse:
+      type: object
+      required:
+      - bucket
+      - key
+      - size
+      - etag
+      properties:
+        bucket:
+          type: string
+        key:
+          type: string
+        size:
+          type: integer
+          format: int64
+          description: Stored object size in bytes.
+        etag:
+          type: string
+    BlobDeleteResponse:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+    BlobListResponse:
+      type: object
+      required:
+      - keys
+      - count
+      properties:
+        keys:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+    EnqueueRequest:
+      type: object
+      required:
+      - body
+      properties:
+        body:
+          description: Arbitrary JSON payload, returned verbatim on receive.
+        delay_secs:
+          type: integer
+          format: int64
+          nullable: true
+          description: Delay before the message becomes visible.
+    EnqueueResponse:
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    ReceiveRequest:
+      type: object
+      properties:
+        max:
+          type: integer
+          nullable: true
+          description: Maximum messages to lease in this call.
+        visibility_secs:
+          type: integer
+          format: int64
+          nullable: true
+          description: How long the lease lasts before the message is redelivered.
+    ReceivedMessage:
+      type: object
+      required:
+      - id
+      - body
+      - attempts
+      properties:
+        id:
+          type: string
+        body:
+          description: The payload as enqueued.
+        attempts:
+          type: integer
+          format: int64
+          description: Delivery attempts so far, including this one.
+    ReceiveResponse:
+      type: object
+      required:
+      - messages
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceivedMessage'
+    QueueAckResponse:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+    QueueStatsResponse:
+      type: object
+      required:
+      - queue
+      - depth
+      - visible
+      properties:
+        queue:
+          type: string
+        depth:
+          type: integer
+          description: Total messages held, leased ones included.
+        visible:
+          type: integer
+          description: Messages currently available to receive.
     ErrorBody:
       type: object
       required:
@@ -3501,6 +3661,373 @@ paths:
           description: Unauthorized
         '500':
           description: Failed to write luma.toml
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /search/ingest:
+    post:
+      tags:
+      - RAG Search
+      security:
+      - bearerAuth: []
+      summary: Ingest a document into the text search engine
+      description: 'Adds one document to the `src/search` engine index. The caller
+        supplies the vector: this endpoint does not embed. For text-in/vector-out
+        ingestion use `POST /v1/db/{namespace}/ingest` instead.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchIngestRequest'
+      responses:
+        '200':
+          description: Document indexed
+        '400':
+          description: Invalid argument
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '413':
+          description: Document content exceeds max_body_bytes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/blob/{bucket}:
+    get:
+      tags:
+      - Object Storage
+      security:
+      - bearerAuth: []
+      summary: List object keys in a bucket
+      parameters:
+      - in: path
+        name: bucket
+        required: true
+        schema:
+          type: string
+        description: 'Bucket name. Charset is restricted to `[A-Za-z0-9._-]`;
+          `.`, `..` and path separators are rejected.'
+      responses:
+        '200':
+          description: Keys in the bucket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobListResponse'
+        '400':
+          description: Invalid bucket name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Bucket not found, or owned by another organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/blob/{bucket}/{key}:
+    put:
+      tags:
+      - Object Storage
+      security:
+      - bearerAuth: []
+      summary: Store a binary object
+      description: 'Writes the raw request body as an object. The write is atomic
+        (temp file + rename), and every path component is validated against
+        path traversal.
+
+        '
+      parameters:
+      - in: path
+        name: bucket
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+        description: 'Object key. May contain `/` to form nested segments; each
+          segment is validated independently.'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Object stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobPutResponse'
+        '400':
+          description: Invalid bucket or key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '413':
+          description: Body exceeds max_body_bytes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    get:
+      tags:
+      - Object Storage
+      security:
+      - bearerAuth: []
+      summary: Fetch a binary object
+      parameters:
+      - in: path
+        name: bucket
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Object bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Object not found, or owned by another organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      tags:
+      - Object Storage
+      security:
+      - bearerAuth: []
+      summary: Delete a binary object
+      parameters:
+      - in: path
+        name: bucket
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Object deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobDeleteResponse'
+        '404':
+          description: Object not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/queue/{queue}:
+    post:
+      tags:
+      - Queues
+      security:
+      - bearerAuth: []
+      summary: Enqueue a message
+      parameters:
+      - in: path
+        name: queue
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnqueueRequest'
+      responses:
+        '200':
+          description: Message enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnqueueResponse'
+        '400':
+          description: Invalid queue name or body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    get:
+      tags:
+      - Queues
+      security:
+      - bearerAuth: []
+      summary: Queue depth and visible count
+      parameters:
+      - in: path
+        name: queue
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Queue stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatsResponse'
+  /v1/queue/{queue}/receive:
+    post:
+      tags:
+      - Queues
+      security:
+      - bearerAuth: []
+      summary: Receive messages (at-least-once)
+      description: 'Leases up to `max` messages for `visibility_secs`. A message
+        that is not acked before its visibility window expires becomes visible
+        again and its `attempts` counter increases — delivery is at-least-once,
+        so consumers must be idempotent.
+
+        '
+      parameters:
+      - in: path
+        name: queue
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiveRequest'
+      responses:
+        '200':
+          description: Leased messages (possibly empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiveResponse'
+  /v1/queue/{queue}/{id}:
+    delete:
+      tags:
+      - Queues
+      security:
+      - bearerAuth: []
+      summary: Acknowledge (delete) a received message
+      parameters:
+      - in: path
+        name: queue
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        description: Message id returned by receive.
+      responses:
+        '200':
+          description: Message acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueAckResponse'
+        '404':
+          description: Message not found or already acked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/image/{bucket}/{key}:
+    get:
+      tags:
+      - Images
+      security:
+      - bearerAuth: []
+      summary: Transform a stored image on the fly
+      description: 'Resizes (Lanczos3) and/or converts an object that already
+        exists in the blob store. The source object is never modified.
+
+        '
+      parameters:
+      - in: path
+        name: bucket
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: w
+        schema:
+          type: integer
+          format: int32
+        description: Target width in pixels.
+      - in: query
+        name: h
+        schema:
+          type: integer
+          format: int32
+        description: Target height in pixels.
+      - in: query
+        name: format
+        schema:
+          type: string
+          enum:
+          - png
+          - jpeg
+        description: Output encoding. Defaults to the source format.
+      - in: query
+        name: quality
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+        description: JPEG quality. Ignored for png.
+      responses:
+        '200':
+          description: Transformed image bytes
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid parameters or unsupported source format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Source object not found
           content:
             application/json:
               schema:
