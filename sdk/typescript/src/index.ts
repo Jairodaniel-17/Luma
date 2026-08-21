@@ -101,6 +101,8 @@ export type {
   QueueReceiveResult,
   QueueStats,
   RefreshResult,
+  ReindexProgress,
+  ReindexStart,
   RerankRequest,
   RerankResult,
   Role,

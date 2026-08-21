@@ -1340,3 +1340,217 @@ mod tests {
         assert!(ranked[0].score > ranked[1].score);
     }
 }
+
+/// Progress of a reindex job, published to the KV store under
+/// [`reindex_progress_key`] so a caller can poll it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReindexProgress {
+    pub job_id: String,
+    pub source: String,
+    pub target: String,
+    /// `running`, `done`, or `failed`.
+    pub status: String,
+    pub processed: usize,
+    pub reembedded: usize,
+    /// Vectors skipped because their metadata carried no chunk text to re-embed.
+    pub skipped_no_text: usize,
+    pub target_dim: Option<usize>,
+    pub error: Option<String>,
+    pub started_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+/// KV key a reindex job publishes its progress under.
+pub fn reindex_progress_key(job_id: &str) -> String {
+    format!("reindex:{job_id}")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl LumaDatabase {
+    /// Re-embed a collection with the currently configured embedding model,
+    /// writing the result into `target`.
+    ///
+    /// **Why this writes to a new collection instead of rewriting in place.** A
+    /// collection's dimension is fixed in its manifest, and the whole point of
+    /// reindexing is usually a model whose dimension differs. Rewriting in place
+    /// would mean dropping the collection first, so a provider failure halfway
+    /// through would leave no vectors and no way back. Writing new and letting
+    /// the caller swap keeps the original intact until the new one is verified —
+    /// the write-new then verify then swap rule from the data-compatibility
+    /// policy.
+    ///
+    /// **Where the text comes from.** Each chunk's full text is stored in its
+    /// metadata as `text_snippet` (the name is historical; it holds the entire
+    /// chunk, not a truncation). Re-embedding that exact text means chunk
+    /// boundaries are preserved and only the vectors change — reconstructing
+    /// chunks from the parent document would risk different boundaries if the
+    /// chunking config had moved since ingest.
+    ///
+    /// Vectors whose metadata has no chunk text are counted in
+    /// `skipped_no_text` and left behind rather than guessed at. That is the
+    /// case for collections filled through the raw-vector API, which this cannot
+    /// reindex because the source text was never stored.
+    pub async fn reindex_collection(
+        &self,
+        source: &str,
+        target: &str,
+        batch_size: usize,
+        job_id: &str,
+    ) -> anyhow::Result<ReindexProgress> {
+        if source == target {
+            anyhow::bail!(
+                "reindex target must differ from source: rewriting in place would drop the only copy"
+            );
+        }
+        let batch_size = batch_size.clamp(1, 512);
+        let embedder = self.embeddings.current();
+
+        let mut progress = ReindexProgress {
+            job_id: job_id.to_string(),
+            source: source.to_string(),
+            target: target.to_string(),
+            status: "running".to_string(),
+            processed: 0,
+            reembedded: 0,
+            skipped_no_text: 0,
+            target_dim: None,
+            error: None,
+            started_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        self.publish_progress(&progress);
+
+        let mut cursor: Option<String> = None;
+        loop {
+            let (items, next) = self
+                .engine
+                .vector_scroll(source, cursor.as_deref(), batch_size, false)
+                .map_err(|e| anyhow::anyhow!("scroll {source}: {e}"))?;
+            if items.is_empty() && next.is_none() {
+                break;
+            }
+
+            let mut texts: Vec<String> = Vec::with_capacity(items.len());
+            let mut carried: Vec<(String, serde_json::Value)> = Vec::with_capacity(items.len());
+            for item in items {
+                progress.processed += 1;
+                match chunk_text_from_meta(&item.meta) {
+                    Some(text) => {
+                        texts.push(text);
+                        carried.push((item.id, item.meta));
+                    }
+                    None => progress.skipped_no_text += 1,
+                }
+            }
+
+            if !texts.is_empty() {
+                let vectors = embedder
+                    .embed_batch(&texts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("embed batch during reindex: {e}"))?;
+                if vectors.len() != carried.len() {
+                    anyhow::bail!(
+                        "provider returned {} vectors for {} texts",
+                        vectors.len(),
+                        carried.len()
+                    );
+                }
+
+                // The target collection is created on the first batch, once the
+                // provider has reported its real output dimension. Trusting the
+                // configured `embedding_dim` instead would create the collection
+                // at the wrong width whenever that value is stale.
+                if progress.target_dim.is_none() {
+                    let dim = vectors[0].len();
+                    progress.target_dim = Some(dim);
+                    if self.engine.vector_collection_info(target).is_none() {
+                        self.engine
+                            .create_vector_collection(target, dim, crate::vector::Metric::Cosine)
+                            .map_err(|e| anyhow::anyhow!("create target {target}: {e}"))?;
+                    }
+                    self.engine.vectors().check_and_stamp_embedding(
+                        target,
+                        dim,
+                        embedder.provider_name(),
+                        embedder.model_name(),
+                    )?;
+                }
+
+                let batch: Vec<(String, Vec<f32>, serde_json::Value)> = carried
+                    .into_iter()
+                    .zip(vectors)
+                    .map(|((id, meta), vector)| (id, vector, meta))
+                    .collect();
+                let written = batch.len();
+                let outcomes = self
+                    .engine
+                    .vector_upsert_batch(target, batch)
+                    .map_err(|e| anyhow::anyhow!("upsert into {target}: {e}"))?;
+                if let Some(Err(err)) = outcomes.into_iter().find(|o| o.is_err()) {
+                    anyhow::bail!("upsert into {target} failed: {err}");
+                }
+                progress.reembedded += written;
+            }
+
+            progress.updated_at_ms = now_ms();
+            self.publish_progress(&progress);
+
+            match next {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
+
+        progress.status = "done".to_string();
+        progress.updated_at_ms = now_ms();
+        self.publish_progress(&progress);
+        Ok(progress)
+    }
+
+    /// Best-effort publication of progress. A KV failure must not abort a
+    /// reindex that is otherwise succeeding, so it is logged and swallowed.
+    fn publish_progress(&self, progress: &ReindexProgress) {
+        let key = reindex_progress_key(&progress.job_id);
+        match serde_json::to_value(progress) {
+            Ok(value) => {
+                if let Err(err) = self.engine.put_state(key, value, None, None) {
+                    tracing::warn!(%err, job = %progress.job_id, "reindex progress not published");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, job = %progress.job_id, "reindex progress not serializable")
+            }
+        }
+    }
+
+    /// Records a terminal failure so a poller sees `failed` rather than a job
+    /// that simply stops updating and looks hung forever.
+    pub fn publish_reindex_failure(&self, mut progress: ReindexProgress, error: String) {
+        progress.status = "failed".to_string();
+        progress.error = Some(error);
+        progress.updated_at_ms = now_ms();
+        self.publish_progress(&progress);
+    }
+}
+
+/// Extract the full chunk text a vector was built from.
+///
+/// `text_snippet` is where the hub stores it. `text` and `content` are accepted
+/// too, so a collection written by a caller that used either name can still be
+/// reindexed.
+fn chunk_text_from_meta(meta: &serde_json::Value) -> Option<String> {
+    for field in ["text_snippet", "text", "content"] {
+        if let Some(text) = meta.get(field).and_then(|v| v.as_str()) {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}

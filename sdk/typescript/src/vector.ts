@@ -6,6 +6,8 @@ import type {
   CollectionDetail,
   CollectionInfo,
   MetadataFilter,
+  ReindexProgress,
+  ReindexStart,
   RerankRequest,
   RerankResult,
   ScrollOptions,
@@ -39,6 +41,35 @@ export class VectorClient {
 
   deleteCollection(collection: string): Promise<void> {
     return this.http.delete(`/v1/vector/${collection}`);
+  }
+
+  /**
+   * Re-embed a collection under the currently configured model.
+   *
+   * Resolves as soon as the job is accepted; poll `reindexStatus`. The result
+   * lands in a **new** collection (default `{collection}__reindex`) because a
+   * collection's dimension is fixed and a new model usually has a different
+   * one — rewriting in place would mean dropping the source first, with nothing
+   * to fall back to if the provider fails midway.
+   *
+   * Vectors with no chunk text in their metadata come back as
+   * `skipped_no_text`: collections filled through the raw-vector API never
+   * stored the source text.
+   */
+  reindex(
+    collection: string,
+    options: { target?: string; batchSize?: number } = {},
+  ): Promise<ReindexStart> {
+    const body: Record<string, unknown> = { batch_size: options.batchSize ?? 64 };
+    if (options.target !== undefined) body.target = options.target;
+    return this.http.post(`/v1/vector/${collection}/reindex`, body);
+  }
+
+  /** Poll a reindex job. Throws `LumaNotFoundError` once progress is dropped. */
+  reindexStatus(collection: string, jobId: string): Promise<ReindexProgress> {
+    return this.http.get(
+      `/v1/vector/${collection}/reindex/${encodeURIComponent(jobId)}`,
+    );
   }
 
   // ── Write operations ─────────────────────────────────────────────────────

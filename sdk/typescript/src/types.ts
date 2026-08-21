@@ -600,6 +600,34 @@ export interface EmbeddingProbeResult {
   error?: string;
 }
 
+// ─── Reindex ──────────────────────────────────────────────────────────────────
+
+export interface ReindexStart {
+  job_id: string;
+  source: string;
+  target: string;
+  /** KV key the job publishes progress to. */
+  progress_key: string;
+}
+
+export interface ReindexProgress {
+  job_id: string;
+  source: string;
+  target: string;
+  status: "running" | "done" | "failed";
+  /** Vectors examined so far. */
+  processed: number;
+  /** Vectors written to the target. */
+  reembedded: number;
+  /** Vectors left behind for lack of chunk text to re-embed. */
+  skipped_no_text: number;
+  /** Dimension the provider actually returned, measured on the first batch. */
+  target_dim?: number | null;
+  error?: string | null;
+  started_at_ms?: number;
+  updated_at_ms?: number;
+}
+
 // ─── Client options ───────────────────────────────────────────────────────────
 
 export interface LumaClientOptions {

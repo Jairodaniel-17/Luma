@@ -399,6 +399,14 @@ pub fn router(deps: RouterDeps) -> Router<()> {
             post(routes_vector::aggregate),
         )
         .route(
+            "/v1/vector/:collection/reindex",
+            post(routes_vector::reindex),
+        )
+        .route(
+            "/v1/vector/:collection/reindex/:job_id",
+            get(routes_vector::reindex_status),
+        )
+        .route(
             "/v1/vector/:collection/diskann/build",
             post(routes_vector::diskann_build),
         )

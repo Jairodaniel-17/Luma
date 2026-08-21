@@ -37,6 +37,40 @@ class VectorClient:
     async def adrop(self, collection: str) -> dict:
         return await self._http.adelete(f"/v1/vector/{collection}")
 
+    def reindex(self, collection: str, target: Optional[str] = None,
+                batch_size: int = 64) -> dict:
+        """Re-embed a collection under the currently configured model.
+
+        Returns immediately with a job id; poll :meth:`reindex_status`. The
+        result lands in a **new** collection (default ``{collection}__reindex``)
+        because a collection's dimension is fixed and a new model usually has a
+        different one — rewriting in place would mean dropping the source first,
+        with nothing to fall back to if the provider fails midway.
+
+        Vectors with no chunk text in their metadata are reported as
+        ``skipped_no_text``: collections filled through the raw-vector API never
+        stored the source text.
+        """
+        body: dict = {"batch_size": batch_size}
+        if target is not None:
+            body["target"] = target
+        return self._http.post(f"/v1/vector/{collection}/reindex", body)
+
+    async def areindex(self, collection: str, target: Optional[str] = None,
+                       batch_size: int = 64) -> dict:
+        body: dict = {"batch_size": batch_size}
+        if target is not None:
+            body["target"] = target
+        return await self._http.apost(f"/v1/vector/{collection}/reindex", body)
+
+    def reindex_status(self, collection: str, job_id: str) -> dict:
+        """Poll a reindex job. Raises ``LumaNotFoundError`` once progress for
+        that job is no longer retained."""
+        return self._http.get(f"/v1/vector/{collection}/reindex/{job_id}")
+
+    async def areindex_status(self, collection: str, job_id: str) -> dict:
+        return await self._http.aget(f"/v1/vector/{collection}/reindex/{job_id}")
+
     # ── write ────────────────────────────────────────────────────────────────
 
     def add(self, collection: str, id: str, vector: List[float],

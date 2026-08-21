@@ -711,6 +711,80 @@ components:
         error:
           type: string
           description: The provider's own error message. Present when ok is false.
+    ReindexRequest:
+      type: object
+      properties:
+        target:
+          type: string
+          description: 'Collection to write into. Defaults to `{source}__reindex`.
+            Must differ from the source.'
+        batch_size:
+          type: integer
+          default: 64
+          description: Texts per embedding call. Clamped server-side to 1..512.
+    ReindexStartResponse:
+      type: object
+      required:
+      - job_id
+      - source
+      - target
+      - progress_key
+      properties:
+        job_id:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+        progress_key:
+          type: string
+          description: KV key the job publishes progress to.
+    ReindexProgress:
+      type: object
+      required:
+      - job_id
+      - source
+      - target
+      - status
+      - processed
+      - reembedded
+      - skipped_no_text
+      properties:
+        job_id:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+        status:
+          type: string
+          enum:
+          - running
+          - done
+          - failed
+        processed:
+          type: integer
+          description: Vectors examined so far.
+        reembedded:
+          type: integer
+          description: Vectors written to the target.
+        skipped_no_text:
+          type: integer
+          description: Vectors left behind for lack of chunk text to re-embed.
+        target_dim:
+          type: integer
+          nullable: true
+          description: 'Dimension the provider actually returned, measured on the
+            first batch rather than taken from config.'
+        error:
+          type: string
+          nullable: true
+        started_at_ms:
+          type: integer
+          format: int64
+        updated_at_ms:
+          type: integer
+          format: int64
     ErrorBody:
       type: object
       required:
@@ -5403,6 +5477,98 @@ paths:
                 $ref: '#/components/schemas/EmbeddingProbeResponse'
         '403':
           description: Requires admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/vector/{collection}/reindex:
+    post:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Re-embed a collection under the current model
+      description: 'Starts a background job that re-embeds every vector with the
+        currently configured embedding model, writing the result into a **new**
+        collection.
+
+
+        Returns 202 immediately with a job id: re-embedding is bounded by the
+        provider''s throughput, so holding the request open would tie the outcome
+        to a single HTTP timeout.
+
+
+        It writes to a new collection rather than rewriting in place because a
+        collection''s dimension is fixed in its manifest and a new model usually
+        has a different one — rewriting in place would mean dropping the source
+        first, and a provider failure halfway through would then leave nothing to
+        fall back to. Verify the new collection, then swap.
+
+
+        Vectors whose metadata carries no chunk text are reported in
+        `skipped_no_text` and left behind: collections filled through the
+        raw-vector API never stored the source text, so there is nothing to
+        re-embed.
+
+        '
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReindexRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReindexStartResponse'
+        '400':
+          description: Target equals source, or the name is too long
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Source collection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/vector/{collection}/reindex/{job_id}:
+    get:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Poll a reindex job
+      parameters:
+      - in: path
+        name: collection
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: job_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Job progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReindexProgress'
+        '404':
+          description: No job with that id. Progress is not retained forever.
           content:
             application/json:
               schema:

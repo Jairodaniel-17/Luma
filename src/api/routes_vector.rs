@@ -1182,3 +1182,140 @@ pub async fn aggregate(
         })?;
     Ok(axum::Json(AggregateResponse { buckets }))
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ReindexBody {
+    /// Collection to write the re-embedded vectors into. Defaults to
+    /// `{source}__reindex`.
+    pub target: Option<String>,
+    pub batch_size: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReindexStartResponse {
+    pub job_id: String,
+    pub source: String,
+    pub target: String,
+    /// KV key the job publishes progress to; also readable via
+    /// `GET /v1/vector/{collection}/reindex/{job_id}`.
+    pub progress_key: String,
+}
+
+/// Kick off a re-embedding of `collection` under the currently configured
+/// model.
+///
+/// Returns immediately with a job id: re-embedding is bounded by the provider's
+/// throughput, so holding the request open would tie the outcome to one HTTP
+/// timeout. Progress is polled via the status route.
+///
+/// The result lands in a **new** collection. A collection's dimension is fixed
+/// in its manifest and a new model usually has a different one, so rewriting in
+/// place would mean dropping first — and a provider failure halfway through
+/// would then leave nothing to fall back to. The caller verifies the new
+/// collection and swaps.
+pub async fn reindex(
+    State(state): State<AppState>,
+    Path(collection): Path<String>,
+    axum::Json(body): axum::Json<ReindexBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    if collection.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection too long",
+        ));
+    }
+    if state.engine.vector_collection_info(&collection).is_none() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "collection not found",
+        ));
+    }
+
+    let target = body
+        .target
+        .unwrap_or_else(|| format!("{collection}__reindex"));
+    if target == collection {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "target must differ from source: rewriting in place would drop the only copy",
+        ));
+    }
+    if target.len() > state.config.max_collection_len {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "target collection name too long",
+        ));
+    }
+
+    let job_id = format!("{}-{}", collection, now_ms());
+    let progress_key = crate::engine::hub::reindex_progress_key(&job_id);
+
+    let hub = state.hub.clone();
+    let source = collection.clone();
+    let job = job_id.clone();
+    let target_for_task = target.clone();
+    let batch_size = body.batch_size.unwrap_or(64);
+    tokio::spawn(async move {
+        if let Err(err) = hub
+            .reindex_collection(&source, &target_for_task, batch_size, &job)
+            .await
+        {
+            tracing::error!(%err, job = %job, "reindex failed");
+            // Publish the failure so a poller sees `failed` instead of a job
+            // that stops updating and is indistinguishable from a hang.
+            hub.publish_reindex_failure(
+                crate::engine::hub::ReindexProgress {
+                    job_id: job.clone(),
+                    source,
+                    target: target_for_task,
+                    status: "failed".to_string(),
+                    processed: 0,
+                    reembedded: 0,
+                    skipped_no_text: 0,
+                    target_dim: None,
+                    error: None,
+                    started_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                },
+                err.to_string(),
+            );
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        axum::Json(ReindexStartResponse {
+            job_id,
+            source: collection,
+            target,
+            progress_key,
+        }),
+    ))
+}
+
+/// Read a reindex job's progress.
+pub async fn reindex_status(
+    State(state): State<AppState>,
+    Path((_collection, job_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let key = crate::engine::hub::reindex_progress_key(&job_id);
+    match state.engine.get_state(&key) {
+        Some(item) => Ok(axum::Json(item.value)),
+        None => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no reindex job with that id (progress is not retained forever)",
+        )),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
