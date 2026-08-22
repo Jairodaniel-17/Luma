@@ -455,10 +455,36 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
 
 ### Bloque 11 — GA · `v4.36.0` → `1.0`
 
-- `[~]` **W5.2 — cuotas por organización** (claves aplicadas; blobs/colas/vectores pendientes del índice de propiedad) (≡ B.1 del roadmap): bytes en blob,
-  claves KV, mensajes en cola, vectores, rps por org. Excedido → error tipado +
-  métrica + evento de auditoría, visible en el panel. Test: org A en su límite
-  no degrada a org B.
+- `[~]` **W5.2 - cuotas por organización** (claves y bytes de blob aplicados;
+  colas y vectores pendientes) (≡ B.1 del roadmap). Excedido → 507 tipado con
+  los tres números (en uso, pedido, límite). Test de aceptación: org A en su
+  límite no degrada a org B, para las dos.
+
+  `max_keys` fue aplicable de inmediato porque las claves KV llevan prefijo de
+  tenant, así que el uso de una org es un escaneo por prefijo. Los bytes de
+  blob no, y el primer intento de guarda se **borró en vez de publicarse**: sin
+  forma de decir qué bytes son de quién, habría cobrado a una org el
+  almacenamiento de otra, que es justo el fallo que el criterio prohíbe.
+
+  Lo que lo hizo posible es que el middleware de aislamiento ya registra la
+  propiedad en `sys_collections` al primer contacto, así que cada bucket tiene
+  exactamente una org dueña.
+
+  El total se **guarda** en SQLite y lo ajusta cada escritura y borrado, en vez
+  de medirse: medir significa recorrer los buckets de la org en cada escritura,
+  que es O(ficheros) en una ruta caliente. En SQLite y no en memoria porque un
+  contador en memoria hay que reconstruirlo en cada arranque, y reconstruirlo
+  ES el recorrido que se quería evitar. Se siembra con un recorrido la primera
+  vez que se ve una org, así que una org anterior a esta contabilidad se cobra
+  lo que ya tiene en vez de empezar de cero.
+
+  Si los ficheros cambian por fuera el total deriva, y para eso está `recount`.
+  Dicho claramente porque una cuota calladamente equivocada es peor que una
+  ausente.
+
+  **Pendiente:** colas y vectores. Las colas necesitan el mismo tratamiento y
+  los vectores ya tienen colección con dueño, así que ninguna es un problema de
+  diseño — solo trabajo.
 - `[~]` **W5.3 - supply chain** (hecho salvo verificar la publicación real de
   la imagen, que necesita un tag).
 

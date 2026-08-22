@@ -228,6 +228,261 @@ pub fn guard_key_write(
 // async lookup this synchronous guard cannot make. That is the next step, not
 // a shortcut to take now.
 
+// ── Object-store bytes per organization ──────────────────────────────────────
+//
+// The remaining half of W5.2. `max_keys` was enforceable straight away because
+// KV keys carry a tenant prefix, so an org's usage is a prefix scan. Blob bytes
+// were not, and the first attempt at a guard was deliberately deleted: without a
+// way to say which bytes belong to whom, it would have charged one org for
+// another's storage — the exact failure the acceptance criterion forbids.
+//
+// What makes it possible now is that the tenant-isolation middleware already
+// records ownership in `sys_collections` on first touch, so every bucket has
+// exactly one owning org.
+//
+// ## Why the total is stored rather than measured
+//
+// Measuring means walking the org's buckets on every write, which is O(files) on
+// a hot path — an org with a hundred thousand objects would pay for all of them
+// to store one. So the total lives in SQLite and is adjusted by each write and
+// delete.
+//
+// In SQLite rather than in memory on purpose. An in-memory counter has to be
+// rebuilt on every restart, and a rebuild is the walk we were avoiding; worse, a
+// process that restarts often would spend its life walking. The cost is one
+// small query per blob write, which is far below the cost of the write itself.
+//
+// The total is seeded by walking **once**, the first time an org is seen. If the
+// files change out of band — someone deletes from the filesystem — the total
+// drifts, and `recount` exists for exactly that. Said plainly because a quota
+// that is quietly wrong is worse than one that is absent.
+
+/// Bytes an organization holds in the object store.
+pub struct BlobUsage {
+    sqlite: crate::sqlite::SqliteService,
+}
+
+impl BlobUsage {
+    pub fn new(sqlite: crate::sqlite::SqliteService) -> Self {
+        Self { sqlite }
+    }
+
+    async fn ensure_table(&self) -> anyhow::Result<()> {
+        self.sqlite
+            .execute(
+                "CREATE TABLE IF NOT EXISTS sys_blob_usage (
+                    org_id TEXT PRIMARY KEY,
+                    bytes INTEGER NOT NULL
+                )"
+                .to_string(),
+                vec![],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Current bytes for an org, seeding from a walk the first time.
+    pub async fn bytes_for(
+        &self,
+        org: &str,
+        blobs_root: &std::path::Path,
+        owned_buckets: &[String],
+    ) -> anyhow::Result<u64> {
+        self.ensure_table().await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT bytes FROM sys_blob_usage WHERE org_id = ?".to_string(),
+                vec![serde_json::json!(org)],
+            )
+            .await?;
+        if let Some(row) = rows.first() {
+            let bytes = row
+                .get("bytes")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0) as u64;
+            return Ok(bytes);
+        }
+
+        // First sighting: measure once, then remember.
+        let measured = walk_bytes(blobs_root, owned_buckets);
+        self.sqlite
+            .execute(
+                "INSERT OR REPLACE INTO sys_blob_usage (org_id, bytes) VALUES (?, ?)".to_string(),
+                vec![serde_json::json!(org), serde_json::json!(measured as i64)],
+            )
+            .await?;
+        Ok(measured)
+    }
+
+    /// Adjust the stored total. `delta` may be negative for a delete.
+    ///
+    /// Clamped at zero: a total that went negative would make the next write
+    /// look free, and a stuck-at-zero quota is a quota that is not enforced.
+    pub async fn adjust(&self, org: &str, delta: i64) -> anyhow::Result<()> {
+        self.ensure_table().await?;
+        self.sqlite
+            .execute(
+                "UPDATE sys_blob_usage SET bytes = MAX(0, bytes + ?) WHERE org_id = ?".to_string(),
+                vec![serde_json::json!(delta), serde_json::json!(org)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Re-measure from the filesystem and overwrite the stored total.
+    ///
+    /// For when the two have diverged: files removed out of band, a restore, a
+    /// bug here. Exposed so an operator can fix a wrong quota without editing
+    /// the database.
+    pub async fn recount(
+        &self,
+        org: &str,
+        blobs_root: &std::path::Path,
+        owned_buckets: &[String],
+    ) -> anyhow::Result<u64> {
+        self.ensure_table().await?;
+        let measured = walk_bytes(blobs_root, owned_buckets);
+        self.sqlite
+            .execute(
+                "INSERT OR REPLACE INTO sys_blob_usage (org_id, bytes) VALUES (?, ?)".to_string(),
+                vec![serde_json::json!(org), serde_json::json!(measured as i64)],
+            )
+            .await?;
+        Ok(measured)
+    }
+}
+
+/// Total bytes under the named buckets.
+///
+/// `owned_buckets` comes from the ownership registry, which is keyed by name
+/// across every scoped resource — so it also contains vector collections and doc
+/// namespaces. Those simply have no directory under `blobs/` and contribute
+/// nothing, which is why the list is used as-is rather than filtered: a filter
+/// would need to know every resource kind and would go stale when one is added.
+fn walk_bytes(blobs_root: &std::path::Path, owned_buckets: &[String]) -> u64 {
+    owned_buckets
+        .iter()
+        .map(|bucket| directory_bytes(&blobs_root.join(bucket)))
+        .sum()
+}
+
+fn directory_bytes(directory: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += directory_bytes(&path);
+        } else if let Ok(meta) = entry.metadata() {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+/// Refuse a blob write that would take the organization past its byte limit.
+///
+/// **507, not 429.** The caller is out of room, not being rate limited: the
+/// identical request will never succeed, and a 429 invites exactly the retry
+/// loop that cannot help.
+///
+/// Returns `Ok(())` with no limit configured, with no organization (a
+/// platform-level caller), or with no accounts layer — in each case there is
+/// nothing to attribute the bytes to, and inventing an attribution is how one
+/// org ends up paying for another's storage.
+///
+/// Takes the pieces it needs rather than the whole `AppState`: the guard depends
+/// on SQLite, the ownership registry and where the blobs live, and saying so
+/// makes it callable from a test without standing up a router.
+pub async fn guard_blob_write(
+    store: BlobQuotaStore<'_>,
+    ctx: &TenantContext,
+    incoming: u64,
+    replacing: u64,
+) -> Result<(), ApiError> {
+    let quotas = Quotas::from_value(&ctx.quotas);
+    let Some(limit) = quotas.max_blob_bytes else {
+        return Ok(());
+    };
+    let Some(org) = ctx.tenant_id.as_deref() else {
+        return Ok(());
+    };
+    let (Some(sqlite), Some(accounts)) = (store.sqlite, store.accounts) else {
+        return Ok(());
+    };
+
+    let owned = accounts
+        .names_owned_by(org)
+        .await
+        .map_err(|e| internal(format!("ownership lookup failed: {e}")))?;
+    let root = store.blobs_root;
+    let usage = BlobUsage::new(sqlite.clone());
+    let current = usage
+        .bytes_for(org, root, &owned)
+        .await
+        .map_err(|e| internal(format!("usage lookup failed: {e}")))?;
+
+    // An overwrite only costs the difference. Charging the full size would make
+    // updating an object in place impossible at the limit, which is not what a
+    // storage limit means.
+    let after = current.saturating_sub(replacing).saturating_add(incoming);
+    if after > limit {
+        return Err(to_api_error(Exceeded {
+            resource: Resource::BlobBytes,
+            limit,
+            current,
+            requested: incoming,
+        }));
+    }
+    Ok(())
+}
+
+/// Record the byte change after a successful write or delete.
+///
+/// Best effort, and deliberately so: the object is already committed, and
+/// failing the request now would tell the caller their write did not happen when
+/// it did. A logged warning plus `recount` is the honest trade.
+pub async fn record_blob_delta(
+    sqlite: Option<&crate::sqlite::SqliteService>,
+    ctx: &TenantContext,
+    delta: i64,
+) {
+    if delta == 0 {
+        return;
+    }
+    let Some(org) = ctx.tenant_id.as_deref() else {
+        return;
+    };
+    let Some(sqlite) = sqlite else {
+        return;
+    };
+    if let Err(e) = BlobUsage::new(sqlite.clone()).adjust(org, delta).await {
+        tracing::warn!(
+            org = %org,
+            "blob usage accounting failed; the quota for this org may drift until a recount: {e}"
+        );
+    }
+}
+
+/// What the blob quota guard needs, and nothing else.
+pub struct BlobQuotaStore<'a> {
+    pub sqlite: Option<&'a crate::sqlite::SqliteService>,
+    pub accounts: Option<&'a crate::api::accounts::AccountsService>,
+    pub blobs_root: &'a std::path::Path,
+}
+
+fn internal(message: String) -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        message,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

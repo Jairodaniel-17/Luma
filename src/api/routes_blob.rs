@@ -156,6 +156,19 @@ fn max_blob_bytes(state: &AppState) -> usize {
     }
 }
 
+/// The pieces the blob quota guard needs, gathered from the router state.
+fn blob_quota_store(state: &AppState) -> crate::api::quotas::BlobQuotaStore<'_> {
+    crate::api::quotas::BlobQuotaStore {
+        sqlite: state.sqlite.as_ref(),
+        accounts: state.accounts.as_deref(),
+        blobs_root: BLOBS_ROOT.get_or_init(|| blobs_root(state)),
+    }
+}
+
+/// Resolved once: the path is derived from config, which does not change while
+/// the process runs, and the guard needs a borrow that outlives the call.
+static BLOBS_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn io_error(msg: &'static str) -> ApiError {
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", msg)
 }
@@ -163,6 +176,7 @@ fn io_error(msg: &'static str) -> ApiError {
 /// PUT /v1/blob/:bucket/:key — store raw bytes atomically.
 pub async fn put(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::TenantContext>,
     Path((bucket, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -177,6 +191,22 @@ pub async fn put(
         ));
     }
 
+    // What this write replaces, so an overwrite is charged the difference rather
+    // than its full size. Charging the full size would make updating an object
+    // impossible once the org is at its limit, which is not what a storage limit
+    // means.
+    let replacing = tokio::fs::metadata(&path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    crate::api::quotas::guard_blob_write(
+        blob_quota_store(&state),
+        &ctx,
+        body.len() as u64,
+        replacing,
+    )
+    .await?;
+
     // Durable: temp file -> fsync the file -> rename -> fsync the directory.
     // The rename alone was atomic but not durable: a crash right after a
     // confirmed PUT could lose the object because the directory entry was still
@@ -187,6 +217,15 @@ pub async fn put(
     }
 
     let size = body.len() as u64;
+    // After the commit: the bytes are on disk, so this is what the org now holds.
+    // Accounted after rather than before because a failed write must not leave a
+    // charge behind.
+    crate::api::quotas::record_blob_delta(
+        state.sqlite.as_ref(),
+        &ctx,
+        size as i64 - replacing as i64,
+    )
+    .await;
     let etag = format!("{:08x}-{}", crc32fast::hash(&body), size);
 
     Ok(axum::Json(BlobPutResponse {
@@ -227,12 +266,25 @@ pub async fn get(
 /// DELETE /v1/blob/:bucket/:key — idempotent delete.
 pub async fn delete(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::TenantContext>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let path = resolve_blob_path(&state, &bucket, &key)?;
 
+    // Read the size before removing it: afterwards there is nothing to measure,
+    // and a delete that does not give the bytes back is a quota that only ever
+    // goes up.
+    let freed = tokio::fs::metadata(&path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+
     match tokio::fs::remove_file(&path).await {
-        Ok(()) => {}
+        Ok(()) => {
+            crate::api::quotas::record_blob_delta(state.sqlite.as_ref(), &ctx, -(freed as i64))
+                .await;
+        }
+        // Idempotent: deleting what is not there frees nothing.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(io_error("failed to delete blob")),
     }

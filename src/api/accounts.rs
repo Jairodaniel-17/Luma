@@ -1025,6 +1025,31 @@ impl AccountsService {
     // ---- Per-org collection ownership (data isolation) ----
 
     /// Return the org that owns a collection/namespace, if recorded.
+    /// Every resource name this organization owns.
+    ///
+    /// Not cached, unlike `collection_owner`: that cache is safe because
+    /// ownership never changes, but this answer *grows* every time the org
+    /// touches a new name, and a cached list would go stale in the direction
+    /// that under-counts usage.
+    pub async fn names_owned_by(&self, org: &str) -> anyhow::Result<Vec<String>> {
+        self.ensure_init().await?;
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT name FROM sys_collections WHERE org_id = ?".to_string(),
+                vec![json!(org)],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                row.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect())
+    }
+
     pub async fn collection_owner(&self, name: &str) -> anyhow::Result<Option<String>> {
         if let Some(owner) = self.owner_cache.get(name) {
             return Ok(Some(owner.clone()));
