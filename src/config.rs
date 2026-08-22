@@ -223,6 +223,10 @@ pub struct Config {
     /// Hard cap on one connection's read buffer.
     #[serde(default = "default_resp_max_buffer_bytes")]
     pub resp_max_buffer_bytes: usize,
+    /// Permit FLUSHDB/FLUSHALL over RESP. Off by default: an accidental flush
+    /// from a misconfigured client is unrecoverable without a restore.
+    #[serde(default)]
+    pub resp_allow_flush: bool,
     /// Seconds between WAL shipping passes. 0 disables it.
     ///
     /// This interval **is** the recovery point objective: a host lost between
@@ -376,6 +380,7 @@ impl Default for Config {
             resp_max_clients: default_resp_max_clients(),
             resp_idle_timeout_secs: default_resp_idle_timeout_secs(),
             resp_max_buffer_bytes: default_resp_max_buffer_bytes(),
+            resp_allow_flush: false,
         }
     }
 }
@@ -923,6 +928,9 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(default_resp_max_buffer_bytes),
+            resp_allow_flush: std::env::var("RESP_ALLOW_FLUSH")
+                .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+                .unwrap_or(false),
         })
     }
 }

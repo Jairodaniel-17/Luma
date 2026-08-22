@@ -83,6 +83,7 @@ pub fn dispatch(
     session: &mut Session,
     args: &[Vec<u8>],
     authenticate: impl Fn(&str, &str) -> Option<Option<String>>,
+    allow_flush: bool,
 ) -> Dispatch {
     let Some(first) = args.first() else {
         // An empty inline line: Redis answers nothing at all.
@@ -143,6 +144,18 @@ pub fn dispatch(
         "EXPIRE" => Dispatch::Reply(expire(engine, session, rest, 1000)),
         "PEXPIRE" => Dispatch::Reply(expire(engine, session, rest, 1)),
         "PERSIST" => Dispatch::Reply(persist(engine, session, rest)),
+        "EXPIREAT" => Dispatch::Reply(expire_at(engine, session, rest, 1000)),
+        "PEXPIREAT" => Dispatch::Reply(expire_at(engine, session, rest, 1)),
+        "RENAME" => Dispatch::Reply(rename(engine, session, rest, false)),
+        "RENAMENX" => Dispatch::Reply(rename(engine, session, rest, true)),
+        "APPEND" => Dispatch::Reply(append(engine, session, rest)),
+        "GETSET" => Dispatch::Reply(getset(engine, session, rest)),
+        "INCRBYFLOAT" => Dispatch::Reply(incrbyfloat(engine, session, rest)),
+        "KEYS" => Dispatch::Reply(keys(engine, session, rest)),
+        "SCAN" => Dispatch::Reply(scan(engine, session, rest)),
+        "DBSIZE" => Dispatch::Reply(dbsize(engine, session)),
+        "RANDOMKEY" => Dispatch::Reply(randomkey(engine, session)),
+        "FLUSHDB" | "FLUSHALL" => Dispatch::Reply(flushdb(engine, session, allow_flush)),
 
         other => Dispatch::Reply(err(format!(
             "ERR unknown command '{other}', with args beginning with: "
@@ -580,6 +593,381 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// ── keyspace scanning ────────────────────────────────────────────────────────
+
+/// Glob matcher for `KEYS` and `SCAN MATCH`, supporting `*`, `?` and `[...]`.
+///
+/// Written out rather than pulled from a regex crate because Redis globs are
+/// their own small language — `[a-c]`, `[^a]`, `\*` — and translating them into
+/// a regex correctly is more code than matching them directly, with more ways to
+/// be subtly wrong on a pattern a client sends.
+pub fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    // Position to resume from if the current `*` turns out to have matched too
+    // little — the standard backtracking pair, which keeps this linear in
+    // practice without recursion.
+    let (mut star, mut resume) = (None, 0usize);
+
+    while t < text.len() {
+        match pattern.get(p) {
+            Some(b'*') => {
+                star = Some(p);
+                resume = t;
+                p += 1;
+            }
+            Some(b'?') => {
+                p += 1;
+                t += 1;
+            }
+            Some(b'[') => match match_class(pattern, p, text[t]) {
+                Some((matched, next)) if matched => {
+                    p = next;
+                    t += 1;
+                }
+                Some((_, next)) => match star {
+                    Some(s) => {
+                        p = s + 1;
+                        resume += 1;
+                        t = resume;
+                    }
+                    None => {
+                        let _ = next;
+                        return false;
+                    }
+                },
+                // An unterminated class matches literally, as Redis does.
+                None => {
+                    if pattern[p] == text[t] {
+                        p += 1;
+                        t += 1;
+                    } else {
+                        return false;
+                    }
+                }
+            },
+            Some(b'\\') if p + 1 < pattern.len() => {
+                if pattern[p + 1] == text[t] {
+                    p += 2;
+                    t += 1;
+                } else if let Some(s) = star {
+                    p = s + 1;
+                    resume += 1;
+                    t = resume;
+                } else {
+                    return false;
+                }
+            }
+            Some(&c) if c == text[t] => {
+                p += 1;
+                t += 1;
+            }
+            _ => match star {
+                Some(s) => {
+                    p = s + 1;
+                    resume += 1;
+                    t = resume;
+                }
+                None => return false,
+            },
+        }
+    }
+    // Trailing stars can absorb nothing.
+    while pattern.get(p) == Some(&b'*') {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+/// Match one `[...]` class against `c`. Returns `(matched, index after the
+/// class)`, or `None` when the class is unterminated.
+fn match_class(pattern: &[u8], start: usize, c: u8) -> Option<(bool, usize)> {
+    let mut i = start + 1;
+    let negated = pattern.get(i) == Some(&b'^');
+    if negated {
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < pattern.len() {
+        if pattern[i] == b']' && !first {
+            return Some((matched != negated, i + 1));
+        }
+        first = false;
+        // A range like `a-c`, but only when the `-` is not the last character.
+        if i + 2 < pattern.len() && pattern[i + 1] == b'-' && pattern[i + 2] != b']' {
+            if pattern[i] <= c && c <= pattern[i + 2] {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if pattern[i] == c {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Keys visible to this session, already unscoped, capped at `limit`.
+fn visible_keys(engine: &Engine, session: &Session, limit: usize) -> Vec<String> {
+    let prefix = session.tenant.as_ref().map(|t| format!("{t}:"));
+    engine
+        .list_state(prefix.as_deref(), limit)
+        .into_iter()
+        .filter_map(|item| match &prefix {
+            // Strip the tenant prefix so a caller only ever sees its own keys,
+            // exactly as the HTTP layer does.
+            Some(p) => item.key.strip_prefix(p.as_str()).map(|k| k.to_string()),
+            None => Some(item.key),
+        })
+        .collect()
+}
+
+/// Upper bound on keys a single `KEYS`/`SCAN`/`DBSIZE` will walk.
+///
+/// `KEYS *` on a large keyspace is the classic way to stall Redis; bounding it
+/// means a careless client degrades its own result rather than the server.
+const MAX_KEYSPACE_WALK: usize = 100_000;
+
+fn keys(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
+    if args.len() != 1 {
+        return err("ERR wrong number of arguments for 'keys' command");
+    }
+    let matched = visible_keys(engine, session, MAX_KEYSPACE_WALK)
+        .into_iter()
+        .filter(|key| glob_match(&args[0], key.as_bytes()))
+        .map(Value::bulk)
+        .collect();
+    Value::Array(Some(matched))
+}
+
+/// `SCAN cursor [MATCH pattern] [COUNT n]`.
+///
+/// The cursor is an index into the sorted key list rather than Redis's hash
+/// bucket. That keeps the guarantee clients actually rely on — a full iteration
+/// returns every key present throughout it — while being far simpler than
+/// emulating the bucket layout of a hash table we do not have.
+fn scan(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
+    let Some(cursor_raw) = args.first() else {
+        return err("ERR wrong number of arguments for 'scan' command");
+    };
+    let Ok(cursor) = String::from_utf8_lossy(cursor_raw).parse::<usize>() else {
+        return err("ERR invalid cursor");
+    };
+
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut count = 10usize;
+    let mut i = 1;
+    while i < args.len() {
+        match command_name(&args[i]).as_str() {
+            "MATCH" => {
+                let Some(p) = args.get(i + 1) else {
+                    return err("ERR syntax error");
+                };
+                pattern = Some(p.clone());
+                i += 2;
+            }
+            "COUNT" => {
+                let Some(n) = args.get(i + 1) else {
+                    return err("ERR syntax error");
+                };
+                let Ok(n) = String::from_utf8_lossy(n).parse::<usize>() else {
+                    return err("ERR value is not an integer or out of range");
+                };
+                count = n.clamp(1, 10_000);
+                i += 2;
+            }
+            // TYPE is accepted and ignored: everything here is a string, and
+            // erroring would break a client that passes it defensively.
+            "TYPE" => i += 2,
+            _ => return err("ERR syntax error"),
+        }
+    }
+
+    let mut all = visible_keys(engine, session, MAX_KEYSPACE_WALK);
+    all.sort();
+
+    let end = cursor.saturating_add(count).min(all.len());
+    let page: Vec<Value> = all[cursor.min(all.len())..end]
+        .iter()
+        .filter(|key| match &pattern {
+            Some(p) => glob_match(p, key.as_bytes()),
+            None => true,
+        })
+        .map(|key| Value::bulk(key.clone()))
+        .collect();
+
+    // Cursor 0 means the iteration is finished — a client loops until it sees
+    // it, so returning a non-zero cursor at the end would loop forever.
+    let next = if end >= all.len() { 0 } else { end };
+    Value::Array(Some(vec![
+        Value::bulk(next.to_string()),
+        Value::Array(Some(page)),
+    ]))
+}
+
+fn dbsize(engine: &Engine, session: &Session) -> Value {
+    Value::Integer(visible_keys(engine, session, MAX_KEYSPACE_WALK).len() as i64)
+}
+
+fn randomkey(engine: &Engine, session: &Session) -> Value {
+    let keys = visible_keys(engine, session, 1);
+    match keys.into_iter().next() {
+        Some(key) => Value::bulk(key),
+        None => Value::nil(),
+    }
+}
+
+fn flushdb(engine: &Engine, session: &Session, allowed: bool) -> Value {
+    // Gated behind config: an accidental FLUSHDB from a misconfigured client is
+    // unrecoverable without a restore, so it is off unless explicitly enabled.
+    if !allowed {
+        return err("ERR FLUSHDB is disabled on this server (set resp_allow_flush = true)");
+    }
+    for key in visible_keys(engine, session, MAX_KEYSPACE_WALK) {
+        let _ = engine.delete_state(&scope(session, key.as_bytes()));
+    }
+    Value::ok()
+}
+
+fn rename(engine: &Engine, session: &Session, args: &[Vec<u8>], only_if_absent: bool) -> Value {
+    if args.len() != 2 {
+        return err("ERR wrong number of arguments for 'rename' command");
+    }
+    let from = scope(session, &args[0]);
+    let to = scope(session, &args[1]);
+    let Some(item) = engine.get_state(&from) else {
+        // Redis distinguishes these: RENAME errors on a missing source, RENAMENX
+        // reports 0. A client uses the difference to tell "gone" from "taken".
+        return if only_if_absent {
+            Value::Integer(0)
+        } else {
+            err("ERR no such key")
+        };
+    };
+    if only_if_absent && engine.get_state(&to).is_some() {
+        return Value::Integer(0);
+    }
+    // The TTL travels with the value, as Redis specifies.
+    let ttl_ms = item
+        .expires_at_ms
+        .map(|at| at.saturating_sub(now_ms()))
+        .filter(|remaining| *remaining > 0);
+    match engine.put_state(to, item.value, ttl_ms, None) {
+        Ok(_) => {
+            let _ = engine.delete_state(&from);
+            if only_if_absent {
+                Value::Integer(1)
+            } else {
+                Value::ok()
+            }
+        }
+        Err(e) => err(format!("ERR {e}")),
+    }
+}
+
+fn append(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
+    if args.len() != 2 {
+        return err("ERR wrong number of arguments for 'append' command");
+    }
+    let key = scope(session, &args[0]);
+    let mut current = read_bytes(engine, &key).unwrap_or_default();
+    current.extend_from_slice(&args[1]);
+    let len = current.len() as i64;
+    match engine.put_state(key, StoredVal::raw(current, None), None, None) {
+        Ok(_) => Value::Integer(len),
+        Err(e) => err(format!("ERR {e}")),
+    }
+}
+
+fn getset(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
+    if args.len() != 2 {
+        return err("ERR wrong number of arguments for 'getset' command");
+    }
+    let key = scope(session, &args[0]);
+    let previous = read_bytes(engine, &key);
+    match engine.put_state(key, StoredVal::raw(args[1].clone(), None), None, None) {
+        Ok(_) => match previous {
+            Some(bytes) => Value::Bulk(Some(bytes)),
+            None => Value::nil(),
+        },
+        Err(e) => err(format!("ERR {e}")),
+    }
+}
+
+fn incrbyfloat(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
+    if args.len() != 2 {
+        return err("ERR wrong number of arguments for 'incrbyfloat' command");
+    }
+    let Ok(delta) = String::from_utf8_lossy(&args[1]).parse::<f64>() else {
+        return err("ERR value is not a valid float");
+    };
+    if !delta.is_finite() {
+        return err("ERR value is not a valid float");
+    }
+    let key = scope(session, &args[0]);
+    let current = match read_bytes(engine, &key) {
+        Some(bytes) => match std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|t| t.trim().parse::<f64>().ok())
+        {
+            Some(n) => n,
+            None => return err("ERR value is not a valid float"),
+        },
+        None => 0.0,
+    };
+    let next = current + delta;
+    if !next.is_finite() {
+        return err("ERR increment would produce NaN or Infinity");
+    }
+    // Redis trims trailing zeros so `1.0 + 0.5` reads back as `1.5`, not
+    // `1.5000000000000000`.
+    let rendered = format_float(next);
+    match engine.put_state(
+        key,
+        StoredVal::raw(rendered.clone().into_bytes(), None),
+        None,
+        None,
+    ) {
+        Ok(_) => Value::bulk(rendered),
+        Err(e) => err(format!("ERR {e}")),
+    }
+}
+
+fn format_float(value: f64) -> String {
+    let mut text = format!("{value:.17}");
+    if text.contains('.') {
+        text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    text
+}
+
+/// `EXPIREAT`/`PEXPIREAT`: an absolute deadline rather than a duration.
+fn expire_at(engine: &Engine, session: &Session, args: &[Vec<u8>], multiplier: u64) -> Value {
+    if args.len() != 2 {
+        return err("ERR wrong number of arguments for 'expireat' command");
+    }
+    let Ok(at) = String::from_utf8_lossy(&args[1]).parse::<i64>() else {
+        return err("ERR value is not an integer or out of range");
+    };
+    let key = scope(session, &args[0]);
+    let Some(item) = engine.get_state(&key) else {
+        return Value::Integer(0);
+    };
+    let deadline_ms = (at.max(0) as u64).saturating_mul(multiplier);
+    let now = now_ms();
+    if deadline_ms <= now {
+        // A deadline in the past deletes immediately, as Redis does.
+        let _ = engine.delete_state(&key);
+        return Value::Integer(1);
+    }
+    match engine.put_state(key, item.value, Some(deadline_ms - now), None) {
+        Ok(_) => Value::Integer(1),
+        Err(_) => Value::Integer(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,7 +991,7 @@ mod tests {
 
     fn run(engine: &Engine, session: &mut Session, argv: &[&str]) -> Value {
         let args: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
-        match dispatch(engine, session, &args, allow_all) {
+        match dispatch(engine, session, &args, allow_all, true) {
             Dispatch::Reply(value) => value,
             Dispatch::Quit => Value::Simple("QUIT".into()),
         }
@@ -712,7 +1100,7 @@ mod tests {
         let (e, _d) = engine();
         let mut s = Session::new(true);
         let args = vec![b"AUTH".to_vec(), b"wrong".to_vec()];
-        let reply = match dispatch(&e, &mut s, &args, |_, _| None) {
+        let reply = match dispatch(&e, &mut s, &args, |_, _| None, true) {
             Dispatch::Reply(v) => v,
             Dispatch::Quit => panic!(),
         };
@@ -764,7 +1152,7 @@ mod tests {
             b"bin".to_vec(),
             vec![0x80, 0x04, 0x00, 0xFF],
         ];
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all, true) else {
             panic!()
         };
         assert_eq!(reply, Value::ok());
@@ -1009,8 +1397,342 @@ mod tests {
         let mut s = Session::new(false);
         let args = vec![b"QUIT".to_vec()];
         assert!(matches!(
-            dispatch(&e, &mut s, &args, allow_all),
+            dispatch(&e, &mut s, &args, allow_all, true),
             Dispatch::Quit
         ));
+    }
+
+    // ── glob matching ────────────────────────────────────────────────────────
+
+    #[test]
+    fn glob_handles_the_redis_pattern_language() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("*", "anything", true),
+            ("*", "", true),
+            ("h?llo", "hello", true),
+            ("h?llo", "hllo", false),
+            ("h*llo", "heeeello", true),
+            ("h[ae]llo", "hallo", true),
+            ("h[ae]llo", "hillo", false),
+            ("h[^e]llo", "hallo", true),
+            ("h[^e]llo", "hello", false),
+            ("h[a-c]llo", "hbllo", true),
+            ("h[a-c]llo", "hdllo", false),
+            ("celery*", "celery-queue", true),
+            ("celery*", "arq-queue", false),
+            ("*-queue", "celery-queue", true),
+            ("a*b*c", "axxbyyc", true),
+            ("a*b*c", "axxbyy", false),
+            // A literal star, escaped.
+            ("a\\*b", "a*b", true),
+            ("a\\*b", "axb", false),
+            // Exact matches with no wildcards at all.
+            ("plain", "plain", true),
+            ("plain", "plainer", false),
+        ];
+        for (pattern, text, expected) in cases {
+            assert_eq!(
+                glob_match(pattern.as_bytes(), text.as_bytes()),
+                *expected,
+                "pattern `{pattern}` against `{text}`"
+            );
+        }
+    }
+
+    #[test]
+    fn glob_backtracks_rather_than_giving_up_on_the_first_star() {
+        // The classic failure: `*abc` against `aabc` needs the star to give
+        // back a character. A greedy non-backtracking matcher reports no match.
+        assert!(glob_match(b"*abc", b"aabc"));
+        assert!(glob_match(b"*a*b", b"zzazzb"));
+    }
+
+    // ── keyspace ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn keys_filters_by_pattern_and_stays_inside_the_tenant() {
+        let (e, _d) = engine();
+        let mut acme = Session::new(false);
+        acme.tenant = Some("acme".into());
+        let mut globex = Session::new(false);
+        globex.tenant = Some("globex".into());
+
+        run(
+            &e,
+            &mut acme,
+            &["MSET", "job:1", "a", "job:2", "b", "other", "c"],
+        );
+        run(&e, &mut globex, &["SET", "job:9", "z"]);
+
+        let Value::Array(Some(found)) = run(&e, &mut acme, &["KEYS", "job:*"]) else {
+            panic!("KEYS must return an array");
+        };
+        let mut names: Vec<String> = found
+            .iter()
+            .map(|v| match v {
+                Value::Bulk(Some(b)) => String::from_utf8_lossy(b).to_string(),
+                _ => panic!("keys must be bulk strings"),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["job:1".to_string(), "job:2".to_string()],
+            "another tenant's job:9 must be invisible, and the keys must come \
+             back unprefixed"
+        );
+    }
+
+    #[test]
+    fn scan_walks_the_whole_keyspace_and_terminates() {
+        // The property a client depends on: loop until the cursor is 0 and you
+        // have seen every key. A cursor that never reaches 0 loops forever.
+        let (e, _d, mut s) = open();
+        for i in 0..25 {
+            run(&e, &mut s, &["SET", &format!("k{i:02}"), "v"]);
+        }
+
+        let mut cursor = "0".to_string();
+        let mut seen = Vec::new();
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            assert!(rounds < 100, "SCAN did not terminate");
+            let Value::Array(Some(reply)) = run(&e, &mut s, &["SCAN", &cursor, "COUNT", "7"])
+            else {
+                panic!("SCAN must return an array");
+            };
+            let Value::Bulk(Some(next)) = &reply[0] else {
+                panic!("cursor must be a bulk string");
+            };
+            let Value::Array(Some(page)) = &reply[1] else {
+                panic!("page must be an array");
+            };
+            for item in page {
+                if let Value::Bulk(Some(b)) = item {
+                    seen.push(String::from_utf8_lossy(b).to_string());
+                }
+            }
+            cursor = String::from_utf8_lossy(next).to_string();
+            if cursor == "0" {
+                break;
+            }
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 25, "SCAN must eventually return every key");
+    }
+
+    #[test]
+    fn scan_honours_match() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MSET", "a:1", "x", "a:2", "x", "b:1", "x"]);
+        let Value::Array(Some(reply)) =
+            run(&e, &mut s, &["SCAN", "0", "MATCH", "a:*", "COUNT", "100"])
+        else {
+            panic!()
+        };
+        let Value::Array(Some(page)) = &reply[1] else {
+            panic!()
+        };
+        assert_eq!(page.len(), 2);
+    }
+
+    #[test]
+    fn scan_rejects_a_bad_cursor_and_bad_syntax() {
+        let (e, _d, mut s) = open();
+        assert!(matches!(
+            run(&e, &mut s, &["SCAN", "notanumber"]),
+            Value::Error(m) if m.contains("invalid cursor")
+        ));
+        assert!(matches!(
+            run(&e, &mut s, &["SCAN", "0", "NONSENSE"]),
+            Value::Error(m) if m.contains("syntax")
+        ));
+    }
+
+    #[test]
+    fn dbsize_and_randomkey_are_tenant_scoped() {
+        let (e, _d) = engine();
+        let mut acme = Session::new(false);
+        acme.tenant = Some("acme".into());
+        let mut globex = Session::new(false);
+        globex.tenant = Some("globex".into());
+
+        run(&e, &mut acme, &["MSET", "a", "1", "b", "2"]);
+        run(&e, &mut globex, &["SET", "c", "3"]);
+
+        assert_eq!(run(&e, &mut acme, &["DBSIZE"]), Value::Integer(2));
+        assert_eq!(run(&e, &mut globex, &["DBSIZE"]), Value::Integer(1));
+
+        let Value::Bulk(Some(key)) = run(&e, &mut globex, &["RANDOMKEY"]) else {
+            panic!("RANDOMKEY must return a key")
+        };
+        assert_eq!(String::from_utf8_lossy(&key), "c");
+    }
+
+    #[test]
+    fn randomkey_on_an_empty_keyspace_is_nil() {
+        let (e, _d, mut s) = open();
+        assert_eq!(run(&e, &mut s, &["RANDOMKEY"]), Value::nil());
+    }
+
+    #[test]
+    fn flushdb_is_refused_unless_enabled() {
+        // An accidental flush from a misconfigured client is unrecoverable
+        // without a restore, so it is off unless explicitly turned on.
+        let (e, _d) = engine();
+        let mut s = Session::new(false);
+        run(&e, &mut s, &["SET", "k", "v"]);
+
+        let args = vec![b"FLUSHDB".to_vec()];
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all, false) else {
+            panic!()
+        };
+        assert!(matches!(reply, Value::Error(m) if m.contains("disabled")));
+        assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::bulk("v"));
+
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all, true) else {
+            panic!()
+        };
+        assert_eq!(reply, Value::ok());
+        assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::nil());
+    }
+
+    #[test]
+    fn flushdb_only_clears_the_calling_tenant() {
+        let (e, _d) = engine();
+        let mut acme = Session::new(false);
+        acme.tenant = Some("acme".into());
+        let mut globex = Session::new(false);
+        globex.tenant = Some("globex".into());
+        run(&e, &mut acme, &["SET", "k", "acme"]);
+        run(&e, &mut globex, &["SET", "k", "globex"]);
+
+        let args = vec![b"FLUSHDB".to_vec()];
+        let _ = dispatch(&e, &mut acme, &args, allow_all, true);
+
+        assert_eq!(run(&e, &mut acme, &["GET", "k"]), Value::nil());
+        assert_eq!(
+            run(&e, &mut globex, &["GET", "k"]),
+            Value::bulk("globex"),
+            "one org's FLUSHDB must never touch another's keyspace"
+        );
+    }
+
+    // ── rename, append, getset, float ────────────────────────────────────────
+
+    #[test]
+    fn rename_moves_the_value_and_its_ttl() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "old", "payload", "EX", "100"]);
+        assert_eq!(run(&e, &mut s, &["RENAME", "old", "new"]), Value::ok());
+        assert_eq!(run(&e, &mut s, &["GET", "old"]), Value::nil());
+        assert_eq!(run(&e, &mut s, &["GET", "new"]), Value::bulk("payload"));
+
+        let Value::Integer(remaining) = run(&e, &mut s, &["TTL", "new"]) else {
+            panic!()
+        };
+        assert!(
+            remaining > 0,
+            "the TTL must travel with the value, got {remaining}"
+        );
+    }
+
+    #[test]
+    fn rename_and_renamenx_differ_on_a_missing_source() {
+        // The difference is how a client tells "gone" from "taken".
+        let (e, _d, mut s) = open();
+        assert!(matches!(
+            run(&e, &mut s, &["RENAME", "nope", "x"]),
+            Value::Error(m) if m.contains("no such key")
+        ));
+        assert_eq!(
+            run(&e, &mut s, &["RENAMENX", "nope", "x"]),
+            Value::Integer(0)
+        );
+
+        run(&e, &mut s, &["MSET", "a", "1", "b", "2"]);
+        assert_eq!(run(&e, &mut s, &["RENAMENX", "a", "b"]), Value::Integer(0));
+        assert_eq!(run(&e, &mut s, &["GET", "a"]), Value::bulk("1"));
+    }
+
+    #[test]
+    fn append_creates_then_extends_and_returns_the_length() {
+        let (e, _d, mut s) = open();
+        assert_eq!(run(&e, &mut s, &["APPEND", "k", "abc"]), Value::Integer(3));
+        assert_eq!(run(&e, &mut s, &["APPEND", "k", "de"]), Value::Integer(5));
+        assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::bulk("abcde"));
+    }
+
+    #[test]
+    fn getset_returns_the_previous_value() {
+        let (e, _d, mut s) = open();
+        assert_eq!(run(&e, &mut s, &["GETSET", "k", "first"]), Value::nil());
+        assert_eq!(
+            run(&e, &mut s, &["GETSET", "k", "second"]),
+            Value::bulk("first")
+        );
+        assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::bulk("second"));
+    }
+
+    #[test]
+    fn incrbyfloat_trims_trailing_zeros() {
+        // Redis renders `1.5`, not `1.50000000000000000`. A client that parses
+        // the reply and re-sends it would otherwise drift.
+        let (e, _d, mut s) = open();
+        assert_eq!(
+            run(&e, &mut s, &["INCRBYFLOAT", "f", "1.0"]),
+            Value::bulk("1")
+        );
+        assert_eq!(
+            run(&e, &mut s, &["INCRBYFLOAT", "f", "0.5"]),
+            Value::bulk("1.5")
+        );
+        assert_eq!(
+            run(&e, &mut s, &["INCRBYFLOAT", "f", "-1.5"]),
+            Value::bulk("0")
+        );
+    }
+
+    #[test]
+    fn incrbyfloat_refuses_non_numbers_and_infinities() {
+        let (e, _d, mut s) = open();
+        assert!(matches!(
+            run(&e, &mut s, &["INCRBYFLOAT", "f", "abc"]),
+            Value::Error(m) if m.contains("not a valid float")
+        ));
+        assert!(matches!(
+            run(&e, &mut s, &["INCRBYFLOAT", "f", "inf"]),
+            Value::Error(m) if m.contains("not a valid float")
+        ));
+        run(&e, &mut s, &["SET", "word", "hello"]);
+        assert!(matches!(
+            run(&e, &mut s, &["INCRBYFLOAT", "word", "1"]),
+            Value::Error(m) if m.contains("not a valid float")
+        ));
+    }
+
+    #[test]
+    fn expireat_in_the_past_deletes_immediately() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "k", "v"]);
+        assert_eq!(run(&e, &mut s, &["EXPIREAT", "k", "1"]), Value::Integer(1));
+        assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::nil());
+    }
+
+    #[test]
+    fn expireat_in_the_future_sets_a_ttl() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "k", "v"]);
+        let deadline = (now_ms() / 1000) + 100;
+        assert_eq!(
+            run(&e, &mut s, &["EXPIREAT", "k", &deadline.to_string()]),
+            Value::Integer(1)
+        );
+        let Value::Integer(remaining) = run(&e, &mut s, &["TTL", "k"]) else {
+            panic!()
+        };
+        assert!((90..=100).contains(&remaining), "got {remaining}");
     }
 }

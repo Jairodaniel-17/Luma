@@ -94,6 +94,9 @@ pub struct RespServer {
     /// Hard cap on a single connection's read buffer. A peer that never
     /// completes a frame must not be able to grow it without bound.
     pub max_buffer_bytes: usize,
+    /// Whether FLUSHDB/FLUSHALL are permitted. Off by default: an accidental
+    /// flush from a misconfigured client is unrecoverable without a restore.
+    pub allow_flush: bool,
 }
 
 impl RespServer {
@@ -123,6 +126,7 @@ pub async fn spawn(
         max_clients: config.resp_max_clients.max(1),
         idle_timeout: Duration::from_secs(config.resp_idle_timeout_secs.max(1)),
         max_buffer_bytes: config.resp_max_buffer_bytes.max(1024),
+        allow_flush: config.resp_allow_flush,
     });
 
     tracing::info!(
@@ -231,11 +235,17 @@ async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io
 
                     let was_authenticated = session.authenticated;
                     let password = server.password.clone();
-                    let outcome = dispatch(&server.engine, &mut session, &args, |_user, given| {
-                        // Static password for now; the api-key/role mapping of
-                        // D3 arrives with the accounts wiring.
-                        (given == password).then_some(None)
-                    });
+                    let outcome = dispatch(
+                        &server.engine,
+                        &mut session,
+                        &args,
+                        |_user, given| {
+                            // Static password for now; the api-key/role mapping of
+                            // D3 arrives with the accounts wiring.
+                            (given == password).then_some(None)
+                        },
+                        server.allow_flush,
+                    );
 
                     match outcome {
                         Dispatch::Reply(value) => {

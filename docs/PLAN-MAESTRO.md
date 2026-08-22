@@ -107,7 +107,7 @@ frentes a la vez y no cerrar ninguno.
 | 1 | ✅ **Durabilidad demostrada** | `v4.26.0` | W1.1 (harness compartido), W1.2, fixture dorado en CI | M |
 | 2 | ✅ Cimientos del motor RESP | `v4.27.0` | F0.1 `StoredVal`, F0.2 estructuras, F0.3 notificadores | **XL** |
 | 3 | ✅ RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
-| 4 | Listener RESP + strings/keys | `v4.29.0` | F1.1–F1.4 + **F4.1** (ver D-1) | L |
+| 4 | ✅ Listener RESP + strings/keys | `v4.29.0` | F1.1–F1.4 + **F4.1** (ver D-1) | L |
 | 5 | Estructuras por RESP | `v4.30.0` | F2.1 listas, F2.2 hashes, F2.3 sets, F2.4 zsets | L |
 | 6 | **Celery y arq funcionando** | `v4.31.0` | F3.1 bloqueantes, F3.2 MULTI/WATCH, F3.3 Pub/Sub, F3.4 E2E + **F4.3** (ver D-2) | L |
 | 7 | Operar con vista | `v4.32.0` | W5.1 métricas/OTel, W2.2 réplica de lectura | L |
@@ -266,7 +266,7 @@ El hito visible: `redis-cli -p 6379` conversa con Luma.
   actuales; keyspace prefijado por `{org_id}\x1f`; `KEYS`/`SCAN` filtran por
   tenant. Dos orgs con la misma clave no se ven. Key revocada corta en el
   siguiente comando.
-- `[~]` **F1.3 — comandos de strings/keys** El set completo del SPEC
+- `[x]` **F1.3 — comandos de strings/keys** El set completo del SPEC
   (`GET SET SETEX … SCAN RENAME`), con `FLUSHDB` solo bajo
   `resp_allow_flush = true`. **La suite diferencial contra Redis 7 real en
   docker es la fuente de verdad**, no la documentación de Redis: ~200
