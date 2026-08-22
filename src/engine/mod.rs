@@ -11,6 +11,7 @@ mod persist;
 mod state;
 mod state_db;
 pub mod stored;
+pub mod structures;
 pub mod traits;
 
 use crate::config::Config;
