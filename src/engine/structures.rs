@@ -59,6 +59,10 @@ pub enum StructureError {
     NotANumber,
     #[error("value is not an integer or out of range")]
     NotAnInteger,
+    /// A hash field that `HINCRBY` cannot parse. Redis words this one
+    /// differently from the generic case, and clients surface the message.
+    #[error("hash value is not an integer")]
+    HashNotAnInteger,
     /// `LSET` past the end. A read out of range is a nil, but a *write* out of
     /// range is an error: the client asked to overwrite something that is not
     /// there, and silently appending would corrupt its idea of the list.
@@ -812,7 +816,7 @@ impl Structure {
             Some(raw) => std::str::from_utf8(raw)
                 .ok()
                 .and_then(|s| s.trim().parse::<i64>().ok())
-                .ok_or(StructureError::NotAnInteger)?,
+                .ok_or(StructureError::HashNotAnInteger)?,
             None => 0,
         };
         let next = current
@@ -918,6 +922,18 @@ impl<'a> Structures<'a> {
     /// direction entirely.
     pub fn load(&self, key: &str) -> Result<Option<(Structure, u64)>, StructureError> {
         let Some(item) = self.engine.get_state(&structure_key(key)) else {
+            // Nothing in the structure slot. If the plain slot is taken, the
+            // name belongs to a string and every structure command on it is a
+            // type error — the two slots are one keyspace to a client.
+            //
+            // The check lives here rather than in front of the dispatcher so it
+            // runs *after* each command has validated its own arity. Redis
+            // reports a malformed command before a type conflict, and a client
+            // debugging `LPUSH k` with no value must be told about the missing
+            // value, not about the type.
+            if self.engine.get_state(key).is_some() {
+                return Err(StructureError::WrongType);
+            }
             return Ok(None);
         };
         let Some(json) = item.value.as_json() else {
@@ -1145,7 +1161,7 @@ mod tests {
         hash.hset(vec![(b("word"), b("not a number"))]).unwrap();
         assert_eq!(
             hash.hincrby(b("word"), 1),
-            Err(StructureError::NotAnInteger),
+            Err(StructureError::HashNotAnInteger),
             "incrementing a non-integer must fail rather than silently reset it"
         );
     }
@@ -1418,25 +1434,41 @@ mod tests {
         );
     }
 
+    /// A name taken by a plain value is not available to a structure.
+    ///
+    /// This test used to assert the opposite — that the two "live in separate
+    /// namespaces" and neither disturbs the other. That was the design
+    /// assumption written down as a guarantee, and the differential suite
+    /// against a real Redis 7 showed it was wrong: Redis has one keyspace with
+    /// one type per key, and clients depend on `SET lock 1` making `LPUSH lock`
+    /// fail. Two slots underneath is an implementation detail; two keyspaces is
+    /// a different database.
     #[test]
-    fn structures_do_not_collide_with_plain_keys() {
+    fn a_plain_key_blocks_the_structure_slot_of_the_same_name() {
         let (engine, _dir) = test_engine();
         let structures = Structures::new(&engine);
 
         engine
             .put_state("shared".to_string(), serde_json::json!("plain"), None, None)
             .unwrap();
-        structures
-            .mutate("shared", Structure::empty_set, |s| s.sadd(vec![b("m")]))
-            .unwrap();
 
-        // The plain key is untouched, and the structure is readable: they live
-        // in separate namespaces.
+        assert_eq!(
+            structures.load("shared").err(),
+            Some(StructureError::WrongType),
+            "a string under this name makes every structure command a type error"
+        );
+        assert_eq!(
+            structures
+                .mutate("shared", Structure::empty_set, |s| s.sadd(vec![b("m")]))
+                .err(),
+            Some(StructureError::WrongType),
+            "and it must refuse the write, not create a shadow structure"
+        );
+        // The plain value is untouched by the refusal.
         assert_eq!(
             engine.get_state("shared").unwrap().value.as_json(),
             Some(&serde_json::json!("plain"))
         );
-        assert_eq!(structures.load("shared").unwrap().unwrap().0.len(), 1);
     }
 
     #[test]

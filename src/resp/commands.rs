@@ -132,6 +132,152 @@ fn scope(session: &Session, key: &[u8]) -> String {
     scope_key(session.tenant.as_deref(), &String::from_utf8_lossy(key))
 }
 
+/// What a key holds, looking in **both** places a value can live.
+///
+/// ## Why this exists
+///
+/// Structures are stored in the same KV store under a `struct:` prefix, so
+/// physically one name can hold a string *and* a list at once. Redis has one
+/// keyspace with one type per key, and clients lean on that hard: `SET lock 1`
+/// followed by `LPUSH lock x` has to fail. Without this, both succeeded and the
+/// name carried two unrelated values that no command could reconcile — `TYPE`
+/// said `none` for every structure, `EXISTS` said 0, `SETNX` succeeded on a key
+/// that was plainly taken, and `KEYS *` handed the client raw `struct:` names.
+///
+/// Found by the differential suite against a real Redis 7. It could not have
+/// been found by our own tests, which encoded the same wrong model as the code.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Held {
+    Nothing,
+    /// A plain value in the string keyspace.
+    Str,
+    /// A structure, carrying the type name `TYPE` reports.
+    Structure(&'static str),
+}
+
+impl Held {
+    fn exists(self) -> bool {
+        self != Held::Nothing
+    }
+}
+
+/// Resolve what an already-scoped key holds.
+///
+/// The structure side is checked first: a `SET` over a structure deletes it, so
+/// the two can only coexist through a bug, and reporting the structure makes
+/// that bug visible rather than silently preferring the string.
+pub fn held(engine: &Engine, scoped: &str) -> Held {
+    let structure_key = crate::engine::structures::structure_key(scoped);
+    if engine.get_state(&structure_key).is_some() {
+        let name = crate::engine::structures::Structures::new(engine)
+            .load(scoped)
+            .ok()
+            .flatten()
+            .map(|(structure, _)| structure.type_name())
+            .unwrap_or("string");
+        return Held::Structure(name);
+    }
+    if engine.get_state(scoped).is_some() {
+        return Held::Str;
+    }
+    Held::Nothing
+}
+
+/// String commands that read or extend an existing value, and therefore must
+/// refuse a key holding a structure.
+///
+/// `SET`/`SETEX`/`PSETEX`/`MSET` are deliberately absent: Redis lets them
+/// replace any type. `MGET` is absent too — it answers nil per wrongly-typed
+/// key rather than failing the whole command. `SETNX` is absent because it
+/// reports 0 for a taken key of any type, not an error.
+/// Each with the exact argument count it takes, so the guard can stay quiet on
+/// a malformed command and let the command report the arity error itself.
+/// Redis validates shape before type, and telling a client "wrong type" when it
+/// actually forgot an argument sends it looking in the wrong place.
+const STRING_ONLY: &[(&str, usize)] = &[
+    ("GET", 1),
+    ("GETDEL", 1),
+    ("GETSET", 2),
+    ("STRLEN", 1),
+    ("APPEND", 2),
+    ("INCR", 1),
+    ("DECR", 1),
+    ("INCRBY", 2),
+    ("DECRBY", 2),
+    ("INCRBYFLOAT", 2),
+];
+
+/// Refuse a command aimed at a key whose type it cannot operate on.
+fn keyspace_guard(
+    engine: &Engine,
+    session: &Session,
+    name: &str,
+    rest: &[Vec<u8>],
+) -> Option<Value> {
+    let key = rest.first()?;
+    let scoped = scope(session, key);
+    let wrong_type = || err("WRONGTYPE Operation against a key holding the wrong kind of value");
+
+    if let Some((_, arity)) = STRING_ONLY.iter().find(|(c, _)| *c == name) {
+        if rest.len() != *arity {
+            return None;
+        }
+        return matches!(held(engine, &scoped), Held::Structure(_)).then(wrong_type);
+    }
+    // A move has a second key, and a string sitting at the destination is a type
+    // error too. Checking only the source would let the pop happen and then fail
+    // the push, which is the one path where an element can be lost outside a
+    // crash. The source itself is caught by `Structures::load`, after the
+    // command has checked its own arity.
+    if matches!(name, "RPOPLPUSH" | "LMOVE" | "BRPOPLPUSH" | "BLMOVE") {
+        let expected = match name {
+            "RPOPLPUSH" => 2,
+            "BRPOPLPUSH" => 3,
+            "LMOVE" => 4,
+            _ => 5,
+        };
+        if rest.len() == expected {
+            if let Some(destination) = rest.get(1) {
+                if matches!(held(engine, &scope(session, destination)), Held::Str) {
+                    return Some(wrong_type());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Drop a structure a string command is about to overwrite.
+///
+/// Only for the commands Redis defines as type-agnostic replacements. Leaving
+/// the structure behind would resurrect it the moment the string was deleted.
+fn clear_replaced_structures(engine: &Engine, session: &Session, name: &str, rest: &[Vec<u8>]) {
+    match name {
+        "SET" | "SETEX" | "PSETEX" | "GETSET" => {
+            if let Some(key) = rest.first() {
+                clear_structure(engine, &scope(session, key));
+            }
+        }
+        "MSET" => {
+            for pair in rest.chunks_exact(2) {
+                clear_structure(engine, &scope(session, &pair[0]));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Delete whatever else lives under a key before writing a string to it.
+///
+/// `SET` is type-agnostic in Redis: it replaces a list with a string without
+/// complaint. Leaving the structure behind would resurrect it the moment the
+/// string was deleted.
+fn clear_structure(engine: &Engine, scoped: &str) {
+    if matches!(held(engine, scoped), Held::Structure(_)) {
+        crate::engine::structures::Structures::new(engine).delete(scoped);
+    }
+}
+
 /// Remove the tenant prefix so a reply names the key the client actually sent.
 ///
 /// A client that asked for `jobs` must be told `jobs`; handing back the
@@ -249,6 +395,16 @@ pub fn dispatch(
         }
         return Dispatch::Reply(Value::Simple("QUEUED".into()));
     }
+
+    // One keyspace, one type per key. Enforced here rather than inside each
+    // command so the policy is auditable in one place — it previously lived
+    // nowhere, and every string command silently succeeded on a key holding a
+    // list.
+    if let Some(refusal) = keyspace_guard(engine, session, &name, rest) {
+        return Dispatch::Reply(refusal);
+    }
+    // `SET` and friends replace whatever a key held, including a structure.
+    clear_replaced_structures(engine, session, &name, rest);
 
     match name.as_str() {
         // ── connection ───────────────────────────────────────────────────────
@@ -736,7 +892,8 @@ fn setnx(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR wrong number of arguments for 'setnx' command");
     }
     let key = scope(session, &args[0]);
-    if engine.get_state(&key).is_some() {
+    // Taken is taken, whatever type took it.
+    if held(engine, &key).exists() {
         return Value::Integer(0);
     }
     match engine.put_state(key, StoredVal::raw(args[1].clone(), None), None, None) {
@@ -806,12 +963,21 @@ fn mget(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     }
     Value::Array(Some(
         args.iter()
-            .map(|key| match read_bytes(engine, &scope(session, key)) {
-                Some(bytes) => Value::Bulk(Some(bytes)),
-                // A missing key is a nil *within* the array, not a shorter
-                // array: the reply is positional and clients zip it with their
-                // key list.
-                None => Value::nil(),
+            .map(|key| {
+                let scoped = scope(session, key);
+                // Redis answers nil for a wrongly-typed key here rather than
+                // failing the whole command, so one bad key does not cost the
+                // caller the other ninety-nine.
+                if matches!(held(engine, &scoped), Held::Structure(_)) {
+                    return Value::nil();
+                }
+                match read_bytes(engine, &scoped) {
+                    Some(bytes) => Value::Bulk(Some(bytes)),
+                    // A missing key is a nil *within* the array, not a shorter
+                    // array: the reply is positional and clients zip it with their
+                    // key list.
+                    None => Value::nil(),
+                }
             })
             .collect(),
     ))
@@ -840,9 +1006,16 @@ fn del(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     if args.is_empty() {
         return err("ERR wrong number of arguments for 'del' command");
     }
+    // Both slots: a `DEL` that left the structure behind reported 0 and the
+    // key stayed alive, so the client could not remove its own data.
     let removed = args
         .iter()
-        .filter(|key| engine.delete_state(&scope(session, key)).unwrap_or(false))
+        .filter(|key| {
+            let scoped = scope(session, key);
+            let structure = crate::engine::structures::Structures::new(engine).delete(&scoped);
+            let plain = engine.delete_state(&scoped).unwrap_or(false);
+            structure || plain
+        })
         .count();
     Value::Integer(removed as i64)
 }
@@ -854,7 +1027,7 @@ fn exists(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     // Counts occurrences, not distinct keys: `EXISTS k k` is 2 in Redis.
     let count = args
         .iter()
-        .filter(|key| engine.get_state(&scope(session, key)).is_some())
+        .filter(|key| held(engine, &scope(session, key)).exists())
         .count();
     Value::Integer(count as i64)
 }
@@ -863,10 +1036,11 @@ fn type_of(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     if args.len() != 1 {
         return err("ERR wrong number of arguments for 'type' command");
     }
-    match engine.get_state(&scope(session, &args[0])) {
-        Some(_) => Value::Simple("string".into()),
+    match held(engine, &scope(session, &args[0])) {
+        Held::Str => Value::Simple("string".into()),
+        Held::Structure(name) => Value::Simple(name.into()),
         // A missing key is `none`, a simple string — not an error and not a nil.
-        None => Value::Simple("none".into()),
+        Held::Nothing => Value::Simple("none".into()),
     }
 }
 
@@ -874,7 +1048,7 @@ fn ttl(engine: &Engine, session: &Session, args: &[Vec<u8>], divisor: u64) -> Va
     if args.len() != 1 {
         return err("ERR wrong number of arguments for 'ttl' command");
     }
-    match engine.get_state(&scope(session, &args[0])) {
+    match engine.get_state(&physical_key(engine, &scope(session, &args[0]))) {
         // The two negative sentinels are part of the contract: -2 means the key
         // does not exist, -1 means it exists with no expiry. A client cannot
         // tell them apart any other way.
@@ -883,9 +1057,24 @@ fn ttl(engine: &Engine, session: &Session, args: &[Vec<u8>], divisor: u64) -> Va
             None => Value::Integer(-1),
             Some(at) => {
                 let remaining = at.saturating_sub(now_ms());
-                Value::Integer((remaining / divisor) as i64)
+                // Round up. Redis answers 100 right after `SETEX k 100 v`;
+                // truncating gives 99, and a client asserting on the value it
+                // just set sees an off-by-one it cannot explain.
+                Value::Integer(remaining.div_ceil(divisor) as i64)
             }
         },
+    }
+}
+
+/// Where a key's value physically lives: the structure slot when it holds a
+/// structure, the plain slot otherwise.
+///
+/// Expiry, renaming and deletion all act on the stored item, so they need the
+/// physical name; everything the client sees stays the logical one.
+fn physical_key(engine: &Engine, scoped: &str) -> String {
+    match held(engine, scoped) {
+        Held::Structure(_) => crate::engine::structures::structure_key(scoped),
+        _ => scoped.to_string(),
     }
 }
 
@@ -896,7 +1085,7 @@ fn expire(engine: &Engine, session: &Session, args: &[Vec<u8>], multiplier: u64)
     let Ok(n) = String::from_utf8_lossy(&args[1]).parse::<i64>() else {
         return err("ERR value is not an integer or out of range");
     };
-    let key = scope(session, &args[0]);
+    let key = physical_key(engine, &scope(session, &args[0]));
     let Some(item) = engine.get_state(&key) else {
         return Value::Integer(0);
     };
@@ -916,7 +1105,7 @@ fn persist(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     if args.len() != 1 {
         return err("ERR wrong number of arguments for 'persist' command");
     }
-    let key = scope(session, &args[0]);
+    let key = physical_key(engine, &scope(session, &args[0]));
     let Some(item) = engine.get_state(&key) else {
         return Value::Integer(0);
     };
@@ -1054,17 +1243,48 @@ fn match_class(pattern: &[u8], start: usize, c: u8) -> Option<(bool, usize)> {
 
 /// Keys visible to this session, already unscoped, capped at `limit`.
 fn visible_keys(engine: &Engine, session: &Session, limit: usize) -> Vec<String> {
-    let prefix = session.tenant.as_ref().map(|t| format!("{t}{TENANT_SEP}"));
-    engine
-        .list_state(prefix.as_deref(), limit)
+    let tenant = session.tenant.as_ref().map(|t| format!("{t}{TENANT_SEP}"));
+    let structure_prefix = crate::engine::structures::structure_key("");
+
+    // Plain keys, minus the structure slots, which are storage detail and must
+    // never be handed to a client — a platform-level `KEYS *` used to return
+    // `struct:myhash`.
+    let mut names: Vec<String> = engine
+        .list_state(tenant.as_deref(), limit)
         .into_iter()
-        .filter_map(|item| match &prefix {
-            // Strip the tenant prefix so a caller only ever sees its own keys,
-            // exactly as the HTTP layer does.
-            Some(p) => item.key.strip_prefix(p.as_str()).map(|k| k.to_string()),
-            None => Some(item.key),
+        .filter_map(|item| {
+            if item.key.starts_with(&structure_prefix) {
+                return None;
+            }
+            match &tenant {
+                // Strip the tenant prefix so a caller only ever sees its own
+                // keys, exactly as the HTTP layer does.
+                Some(p) => item.key.strip_prefix(p.as_str()).map(|k| k.to_string()),
+                None => Some(item.key),
+            }
         })
-        .collect()
+        .collect();
+
+    // Structures, listed under their own prefix and reported by their logical
+    // name. One keyspace to the client, two slots underneath.
+    let structure_scan = match &tenant {
+        Some(t) => format!("{structure_prefix}{t}"),
+        None => structure_prefix.clone(),
+    };
+    names.extend(
+        engine
+            .list_state(Some(&structure_scan), limit)
+            .into_iter()
+            .filter_map(|item| {
+                let logical = item.key.strip_prefix(structure_prefix.as_str())?;
+                match &tenant {
+                    Some(p) => logical.strip_prefix(p.as_str()).map(|k| k.to_string()),
+                    None => Some(logical.to_string()),
+                }
+            }),
+    );
+    names.truncate(limit);
+    names
 }
 
 /// Upper bound on keys a single `KEYS`/`SCAN`/`DBSIZE` will walk.
@@ -1169,7 +1389,9 @@ fn flushdb(engine: &Engine, session: &Session, allowed: bool) -> Value {
         return err("ERR FLUSHDB is disabled on this server (set resp_allow_flush = true)");
     }
     for key in visible_keys(engine, session, MAX_KEYSPACE_WALK) {
-        let _ = engine.delete_state(&scope(session, key.as_bytes()));
+        let scoped = scope(session, key.as_bytes());
+        clear_structure(engine, &scoped);
+        let _ = engine.delete_state(&scoped);
     }
     Value::ok()
 }
@@ -1178,8 +1400,16 @@ fn rename(engine: &Engine, session: &Session, args: &[Vec<u8>], only_if_absent: 
     if args.len() != 2 {
         return err("ERR wrong number of arguments for 'rename' command");
     }
-    let from = scope(session, &args[0]);
-    let to = scope(session, &args[1]);
+    let logical_from = scope(session, &args[0]);
+    let logical_to = scope(session, &args[1]);
+    // A structure moves as a structure: renaming only the plain slot would
+    // leave the data behind under the old name and create nothing under the new
+    // one, which is what `RENAME` on a list used to do.
+    let from = physical_key(engine, &logical_from);
+    let to = match held(engine, &logical_from) {
+        Held::Structure(_) => crate::engine::structures::structure_key(&logical_to),
+        _ => logical_to.clone(),
+    };
     let Some(item) = engine.get_state(&from) else {
         // Redis distinguishes these: RENAME errors on a missing source, RENAMENX
         // reports 0. A client uses the difference to tell "gone" from "taken".
@@ -1189,8 +1419,13 @@ fn rename(engine: &Engine, session: &Session, args: &[Vec<u8>], only_if_absent: 
             err("ERR no such key")
         };
     };
-    if only_if_absent && engine.get_state(&to).is_some() {
+    if only_if_absent && held(engine, &logical_to).exists() {
         return Value::Integer(0);
+    }
+    // The destination is overwritten whatever type it held.
+    if !only_if_absent {
+        clear_structure(engine, &logical_to);
+        let _ = engine.delete_state(&logical_to);
     }
     // The TTL travels with the value, as Redis specifies.
     let ttl_ms = item

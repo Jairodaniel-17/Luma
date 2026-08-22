@@ -21,6 +21,76 @@ use crate::engine::Engine;
 use crate::resp::commands::Session;
 use crate::resp::protocol::Value;
 
+/// Every command whose first argument names a key that must hold a structure.
+///
+/// Kept beside the dispatch table on purpose: the one-keyspace guard in
+/// `commands.rs` reads this to know that a plain string under that name is a
+/// type error. A command added to the table and forgotten here loses the guard
+/// silently, so the two belong within sight of each other.
+///
+/// The blocking commands are included even though they are dispatched in
+/// `commands.rs`: they operate on lists and sorted sets like the rest.
+pub const STRUCTURE_COMMANDS: &[&str] = &[
+    "BLMOVE",
+    "BLPOP",
+    "BRPOP",
+    "BRPOPLPUSH",
+    "BZPOPMAX",
+    "BZPOPMIN",
+    "HDEL",
+    "HEXISTS",
+    "HGET",
+    "HGETALL",
+    "HINCRBY",
+    "HKEYS",
+    "HLEN",
+    "HMGET",
+    "HSCAN",
+    "HSET",
+    "HSETNX",
+    "HVALS",
+    "LINDEX",
+    "LLEN",
+    "LMOVE",
+    "LPOP",
+    "LPUSH",
+    "LPUSHX",
+    "LRANGE",
+    "LREM",
+    "LSET",
+    "LTRIM",
+    "RPOP",
+    "RPOPLPUSH",
+    "RPUSH",
+    "RPUSHX",
+    "SADD",
+    "SCARD",
+    "SISMEMBER",
+    "SMEMBERS",
+    "SPOP",
+    "SRANDMEMBER",
+    "SREM",
+    "SSCAN",
+    "ZADD",
+    "ZCARD",
+    "ZCOUNT",
+    "ZINCRBY",
+    "ZMSCORE",
+    "ZPOPMAX",
+    "ZPOPMIN",
+    "ZRANGE",
+    "ZRANGEBYSCORE",
+    "ZRANK",
+    "ZREM",
+    "ZREMRANGEBYRANK",
+    "ZREMRANGEBYSCORE",
+    "ZREVRANGE",
+    "ZREVRANGEBYSCORE",
+    "ZREVRANK",
+    "ZSCAN",
+    "ZSCORE",
+];
+
 fn err(message: impl Into<String>) -> Value {
     Value::Error(message.into())
 }
@@ -33,6 +103,7 @@ fn structure_error(e: StructureError) -> Value {
             err("WRONGTYPE Operation against a key holding the wrong kind of value")
         }
         StructureError::NotAnInteger => err("ERR value is not an integer or out of range"),
+        StructureError::HashNotAnInteger => err("ERR hash value is not an integer"),
         StructureError::NotANumber => err("ERR value is not a valid float"),
         StructureError::MemberTooLong => err("ERR value is too large"),
         StructureError::TooManyEntries => err("ERR structure is at its configured entry limit"),
@@ -196,7 +267,9 @@ fn pop(
         None => None,
     };
 
-    let result = structures.mutate(&scoped(session, &args[0]), Structure::empty_list, |s| {
+    let key = scoped(session, &args[0]);
+    let existed = matches!(structures.load(&key), Ok(Some(_)));
+    let result = structures.mutate(&key, Structure::empty_list, |s| {
         if left {
             s.lpop(count.unwrap_or(1))
         } else {
@@ -206,6 +279,11 @@ fn pop(
 
     match result {
         Ok(applied) => match count {
+            // A *missing key* with COUNT is a null array, while an existing but
+            // exhausted list is an empty one. Redis keeps them distinct and a
+            // client uses the difference to tell "no such queue" from "queue is
+            // drained".
+            Some(_) if !existed => Value::Array(None),
             Some(_) => Value::Array(Some(applied.value.into_iter().map(Value::bulk).collect())),
             None => match applied.value.into_iter().next() {
                 Some(bytes) => Value::bulk(bytes),
@@ -261,8 +339,23 @@ fn cardinality(
     if args.len() != 1 {
         return wrong_args(command);
     }
+    // The variant has to be checked, not just the length. `SCARD` on a list
+    // used to return the list's length instead of `-WRONGTYPE`: a real answer
+    // to a question the client did not ask, which is worse than an error
+    // because nothing looks broken.
+    let expected = match command {
+        "llen" => "list",
+        "hlen" => "hash",
+        "scard" => "set",
+        _ => "zset",
+    };
     // A missing key is 0, not an error: `LLEN` of nothing is nothing.
-    match with_structure(structures, &scoped(session, &args[0]), 0, |s| Ok(s.len())) {
+    match with_structure(structures, &scoped(session, &args[0]), 0, |s| {
+        if s.type_name() != expected {
+            return Err(StructureError::WrongType);
+        }
+        Ok(s.len())
+    }) {
         Ok(len) => Value::Integer(len as i64),
         Err(e) => structure_error(e),
     }
@@ -1540,12 +1633,20 @@ mod tests {
     fn lpop_on_a_missing_key_is_nil_not_an_empty_bulk() {
         let (e, _d, mut s) = open();
         assert_eq!(run(&e, &mut s, &["LPOP", "nope"]), Value::nil());
-        // With COUNT the shape changes to an array, even when empty — a client
-        // that asked for a count expects to iterate the reply.
-        assert_eq!(
-            run(&e, &mut s, &["LPOP", "nope", "2"]),
-            Value::Array(Some(Vec::new()))
-        );
+        // With COUNT the reply is a *null* array for a key that is not there.
+        // This asserted an empty array until the differential run against a
+        // real Redis 7 showed otherwise, and it matters: a client tells "no such
+        // queue" from "queue is drained" by exactly this difference.
+        assert_eq!(run(&e, &mut s, &["LPOP", "nope", "2"]), Value::Array(None));
+
+        // An empty array is in fact unreachable here, and that is worth
+        // pinning: popping the last element deletes the key, so a drained list
+        // is a missing list on the next call. Verified against Redis 7, which
+        // does the same.
+        run(&e, &mut s, &["RPUSH", "real", "x"]);
+        run(&e, &mut s, &["LPOP", "real", "1"]);
+        assert_eq!(run(&e, &mut s, &["EXISTS", "real"]), Value::Integer(0));
+        assert_eq!(run(&e, &mut s, &["LPOP", "real", "2"]), Value::Array(None));
     }
 
     #[test]
@@ -1855,15 +1956,97 @@ mod tests {
         assert_eq!(items, vec![Value::Bulk(Some(payload))]);
     }
 
+    /// One keyspace, one type per key — in both directions.
+    ///
+    /// This test used to assert that `SET q v` and `RPUSH q x` "address
+    /// different namespaces, so neither silently overwrites the other". The
+    /// differential run against a real Redis 7 showed that is not a feature but
+    /// a divergence clients cannot survive: two unrelated values under one name,
+    /// with `TYPE` reporting `none` and `EXISTS` reporting 0 for the structure.
     #[test]
-    fn a_structure_key_does_not_collide_with_a_plain_key() {
-        // `SET q v` and `RPUSH q x` address different namespaces, so neither
-        // silently overwrites the other.
+    fn a_name_holds_one_type_at_a_time() {
         let (e, _d, mut s) = open();
         run(&e, &mut s, &["SET", "q", "plain"]);
-        run(&e, &mut s, &["RPUSH", "q", "item"]);
+        // A structure command on a string is a type error, not a second value.
+        assert!(matches!(
+            run(&e, &mut s, &["RPUSH", "q", "item"]),
+            Value::Error(m) if m.starts_with("WRONGTYPE")
+        ));
         assert_eq!(run(&e, &mut s, &["GET", "q"]), Value::bulk("plain"));
-        assert_eq!(run(&e, &mut s, &["LLEN", "q"]), Value::Integer(1));
+        assert_eq!(
+            run(&e, &mut s, &["TYPE", "q"]),
+            Value::Simple("string".into())
+        );
+
+        // `SET` is the one command that replaces any type, so it clears the way.
+        run(&e, &mut s, &["DEL", "q"]);
+        run(&e, &mut s, &["RPUSH", "q", "item"]);
+        assert_eq!(
+            run(&e, &mut s, &["TYPE", "q"]),
+            Value::Simple("list".into())
+        );
+        assert_eq!(run(&e, &mut s, &["EXISTS", "q"]), Value::Integer(1));
+        // And a string command on a list is the mirror-image error.
+        assert!(matches!(
+            run(&e, &mut s, &["GET", "q"]),
+            Value::Error(m) if m.starts_with("WRONGTYPE")
+        ));
+        assert_eq!(run(&e, &mut s, &["SETNX", "q", "v"]), Value::Integer(0));
+
+        // SET replaces the list outright, and the list does not come back.
+        assert_eq!(run(&e, &mut s, &["SET", "q", "now-a-string"]), Value::ok());
+        assert_eq!(
+            run(&e, &mut s, &["TYPE", "q"]),
+            Value::Simple("string".into())
+        );
+        assert_eq!(run(&e, &mut s, &["GET", "q"]), Value::bulk("now-a-string"));
+        run(&e, &mut s, &["DEL", "q"]);
+        assert_eq!(run(&e, &mut s, &["EXISTS", "q"]), Value::Integer(0));
+    }
+
+    #[test]
+    fn del_removes_a_structure_and_keys_report_it_by_its_own_name() {
+        // `DEL` used to leave the structure behind and report 0, so a client
+        // could not delete its own data; `KEYS *` handed back the internal
+        // `struct:` name.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["RPUSH", "jobs", "a"]);
+        run(&e, &mut s, &["SET", "flag", "1"]);
+        let listed = bulks(&run(&e, &mut s, &["KEYS", "*"]));
+        assert!(
+            listed.contains(&"jobs".to_string()) && listed.contains(&"flag".to_string()),
+            "both keys must be listed by the name the client used: {listed:?}"
+        );
+        assert!(
+            !listed.iter().any(|k| k.starts_with("struct:")),
+            "the storage prefix must never reach a client: {listed:?}"
+        );
+        assert_eq!(run(&e, &mut s, &["DEL", "jobs"]), Value::Integer(1));
+        assert_eq!(run(&e, &mut s, &["EXISTS", "jobs"]), Value::Integer(0));
+        assert_eq!(
+            run(&e, &mut s, &["TYPE", "jobs"]),
+            Value::Simple("none".into())
+        );
+    }
+
+    #[test]
+    fn expire_and_rename_reach_a_structure() {
+        // All three used to see only the plain slot, so a list could not be
+        // given a TTL and could not be renamed.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["RPUSH", "q", "a"]);
+        assert_eq!(run(&e, &mut s, &["EXPIRE", "q", "100"]), Value::Integer(1));
+        // Rounded up: right after setting 100 seconds the answer is 100, not 99.
+        assert_eq!(run(&e, &mut s, &["TTL", "q"]), Value::Integer(100));
+        assert_eq!(run(&e, &mut s, &["PERSIST", "q"]), Value::Integer(1));
+        assert_eq!(run(&e, &mut s, &["TTL", "q"]), Value::Integer(-1));
+
+        assert_eq!(run(&e, &mut s, &["RENAME", "q", "moved"]), Value::ok());
+        assert_eq!(
+            bulks(&run(&e, &mut s, &["LRANGE", "moved", "0", "-1"])),
+            ["a"]
+        );
+        assert_eq!(run(&e, &mut s, &["EXISTS", "q"]), Value::Integer(0));
     }
 
     #[test]

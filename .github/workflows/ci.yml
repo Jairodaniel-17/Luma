@@ -86,9 +86,36 @@ jobs:
       - name: Check bench compilation
         run: cargo bench --no-run --locked
 
+  redis-differential:
+    name: RESP Differential vs Redis 7
+    runs-on: ubuntu-latest
+    # `docs/SPEC-resp.md` names a real Redis the source of truth for RESP
+    # semantics, not our own tests. The first run of this suite found 13
+    # divergences the in-tree tests could not catch, because they encoded the
+    # same wrong model as the code.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Compare against Redis 7
+        env:
+          LUMA_DIFF_REDIS: 127.0.0.1:16379
+        # The test asserts the variable is set, so a service that failed to
+        # start fails the job instead of skipping silently.
+        run: cargo test --test redis_differential --locked -- --ignored
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile]
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential]
     runs-on: ubuntu-latest
     if: always()
     steps:

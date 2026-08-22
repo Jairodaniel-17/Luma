@@ -116,13 +116,40 @@ afecta, es mejor saberlo antes de migrar que descubrirlo en producción.
 |---|---|---|---|
 | `HELLO 3` | Cambia a RESP3 | Responde el handshake pero sigue en RESP2 | Declarar RESP3 y luego mandar respuestas RESP2 rompe clientes de formas que solo salen bajo carga |
 | Bases de datos | 16 por defecto | Solo la 0; `SELECT 1` da error | Responder OK a cualquier índice compartiría en silencio un keyspace entre bases que el cliente cree separadas |
-| `TYPE` | Devuelve el tipo real | Devuelve `string` para cualquier clave del keyspace plano | Las estructuras viven en un namespace aparte; `TYPE` sobre una lista aún no lo refleja |
 | `SCAN` | Cursor sobre buckets de hash | Índice sobre la lista ordenada de claves | Mantiene la garantía que los clientes usan (una iteración completa devuelve toda clave presente durante ella) sin emular una tabla hash que no existe |
 | `KEYS`/`SCAN`/`DBSIZE` | Recorren todo | Acotan en 100 000 claves | `KEYS *` sobre un keyspace grande es la forma clásica de atascar Redis |
 | `FLUSHDB` | Siempre disponible | Requiere `resp_allow_flush = true`, y solo borra el keyspace de tu organización | Un flush accidental es irrecuperable sin restore |
 | `PUBLISH` | Cuenta receptores globales | Cuenta receptores **de tu organización** | Un conteo global filtraría la existencia de suscriptores de otras |
 | Suscriptor | Solo acepta un subconjunto de comandos | Acepta todos | Es un superconjunto; un `PING` de keepalive obtiene respuesta en vez de silencio |
 | Tamaño de estructura | Sin límite práctico | `MAX_STRUCTURE_ENTRIES` = 1 000 000 | Una mutación es read-modify-write de la estructura entera. Luma no es para colas de diez millones de mensajes residentes |
+
+### Verificado contra Redis 7 real
+
+`tests/redis_differential.rs` envía **298 comandos idénticos** a un Redis 7 y
+a Luma por socket crudo y compara los bytes de respuesta. Está `#[ignore]`
+porque necesita un Redis que el proceso no controla:
+
+```bash
+docker run -d --name luma-diff-redis -p 16379:6379 redis:7-alpine
+LUMA_DIFF_REDIS=127.0.0.1:16379 \
+  cargo test --test redis_differential -- --ignored
+```
+
+Sin `LUMA_DIFF_REDIS` el test **falla** en vez de pasar en vacío: una suite
+que se pone verde sin su sujeto reporta cobertura que no tiene.
+
+La primera ejecución encontró 13 divergencias que la suite propia no podía
+cazar, porque codificaba el mismo modelo equivocado que el código. La más
+grave: **strings y estructuras vivían en keyspaces separados**, así que un
+mismo nombre podía tener a la vez un string y una lista. `TYPE` contestaba
+`none` para toda estructura, `EXISTS` contestaba 0, `DEL` no borraba,
+`SETNX` tenía éxito sobre una clave ocupada, `EXPIRE`/`TTL`/`RENAME` no
+alcanzaban las estructuras y `KEYS *` devolvía el prefijo interno
+`struct:`. Dos tests propios afirmaban esa separación **como garantía**.
+
+Ahora es un solo keyspace con un tipo por clave, igual que Redis. El
+almacenamiento sigue usando dos ranuras — eso es detalle de implementación;
+dos keyspaces era otra base de datos.
 
 ### Divergencias de los comandos añadidos
 
