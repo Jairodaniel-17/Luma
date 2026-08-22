@@ -278,7 +278,20 @@ fn structures_survive_backup_and_restore() {
             .unwrap();
         structures
             .mutate("due", Structure::empty_zset, |s| {
-                s.as_zset_mut()?.add(b"job-a".to_vec(), 1.5).map(|_| ())
+                s.as_zset_mut()?.add(b"job-a".to_vec(), 1.5)?;
+                // An infinite score, because JSON has no infinity: this used to
+                // serialize as `null` and made the whole sorted set unreadable
+                // on the way back. A restore is exactly where that would first
+                // be noticed, and far too late.
+                s.as_zset_mut()?.add(b"never".to_vec(), f64::INFINITY)?;
+                s.as_zset_mut()?
+                    .add(b"always".to_vec(), f64::NEG_INFINITY)
+                    .map(|_| ())
+            })
+            .unwrap();
+        structures
+            .mutate("tags", Structure::empty_set, |s| {
+                s.sadd(vec![b"alpha".to_vec(), b"beta".to_vec()])
             })
             .unwrap();
 
@@ -323,9 +336,20 @@ fn structures_survive_backup_and_restore() {
     );
 
     let (zset, _) = structures.load("due").unwrap().expect("zset must survive");
+    let zset = zset.as_zset().unwrap();
     assert_eq!(
-        zset.as_zset().unwrap().score(b"job-a"),
+        zset.score(b"job-a"),
         Some(1.5),
         "a float score must survive the JSON round trip exactly"
     );
+    assert_eq!(
+        zset.score(b"never"),
+        Some(f64::INFINITY),
+        "an infinite score must survive too, or the whole sorted set is lost"
+    );
+    assert_eq!(zset.score(b"always"), Some(f64::NEG_INFINITY));
+
+    let (set, _) = structures.load("tags").unwrap().expect("set must survive");
+    let members = set.as_set().unwrap();
+    assert!(members.contains(&b"alpha".to_vec()) && members.contains(&b"beta".to_vec()));
 }

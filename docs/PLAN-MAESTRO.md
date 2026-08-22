@@ -375,10 +375,27 @@ alcance, no un bug.
 
 - `[~]` **F4.2 —** backup/restore de estructuras verificado; panel pendiente. las estructuras entran en `/v1/admin/backup` y restore; el
   panel muestra conexiones RESP por org y comandos/s.
-- `[ ]` **F4.5 —** harness permanente en CI: matriz crash-recovery por tipo de
-  registro WAL, fuzzing del parser con corpus versionado, suite diferencial
-  completa como job nightly. **Criterio para quitar el flag "experimental" del
-  listener RESP: nightly verde 7 días seguidos.**
+- `[~]` **F4.5 - harness permanente en CI** (fuzzing y nightly hechos; falta la
+  matriz crash-recovery por *tipo de registro* del WAL).
+
+  - **Fuzzing del parser con corpus versionado** (`tests/resp_fuzz.rs`): corre
+    en cada push, determinista a proposito -- un fallo con semilla aleatoria no
+    es reproducible, y eso es la diferencia entre un informe y un encogimiento
+    de hombros. Encontro un **desbordamiento de pila**: 40 KB de `*1` repetido
+    mataba el proceso, y un desbordamiento no se puede capturar. Un peer sin
+    autenticar tumbaba el servidor por el precio de un paquete, antes de que
+    `AUTH` entrara en juego.
+  - **Nightly** (`.github/workflows/nightly.yml`): matriz crash-recovery con
+    200 iteraciones por motor, atomicidad multiclave, `cargo-fuzz` de verdad,
+    diferencial contra Redis 7, E2E de clientes y `cargo audit` -- este ultimo
+    tambien de noche, porque un advisory se publica en el calendario de otros y
+    una dependencia limpia al mergear puede estar vulnerable por la mañana sin
+    un solo commit.
+  - Pendiente: cubrir la matriz por **tipo de registro** del WAL, no solo por
+    motor.
+
+  **Criterio para quitar el flag "experimental" del listener RESP: nightly
+  verde 7 días seguidos.**
 
 ### Bloque 9 — Adopción por protocolo · `v4.34.0`
 

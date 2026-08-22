@@ -1283,3 +1283,53 @@ async fn a_blocking_move_wakes_a_worker_parked_on_its_destination() {
     assert_eq!(served, "*2\r\n$2\r\nip\r\n$4\r\nlate\r\n");
     server.shutdown.cancel();
 }
+
+#[tokio::test]
+async fn a_deeply_nested_frame_is_refused_with_a_protocol_error() {
+    // Small enough to fit in one write, so the refusal can be read back rather
+    // than racing the server's close.
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    let mut frame = Vec::new();
+    for _ in 0..200 {
+        frame.extend_from_slice(b"*1\r\n");
+    }
+    frame.extend_from_slice(b"$1\r\na\r\n");
+    let reply = exchange(&mut client, &frame).await;
+    assert!(
+        text(&reply).starts_with("-Protocol error"),
+        "expected a protocol error, got {:?}",
+        text(&reply)
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_huge_nested_frame_does_not_take_the_server_down() {
+    // 40 KB of `*1` used to overflow the parser's stack, and a stack overflow
+    // cannot be caught: the process died for the price of one packet, from an
+    // unauthenticated peer, before AUTH was ever consulted.
+    //
+    // The refusal itself is checked above. The only claim here is that the
+    // *server* survives — this connection may well be reset mid-write, because
+    // the server refuses as soon as it has seen enough bytes rather than
+    // politely reading all forty kilobytes first.
+    let server = start(|_| {}).await;
+    {
+        let mut client = connect(&server).await;
+        let mut frame = Vec::new();
+        for _ in 0..10_000 {
+            frame.extend_from_slice(b"*1\r\n");
+        }
+        frame.extend_from_slice(b"$1\r\na\r\n");
+        let _ = exchange(&mut client, &frame).await;
+    }
+
+    let mut other = connect(&server).await;
+    assert_eq!(
+        text(&exchange(&mut other, b"PING\r\n").await),
+        "+PONG\r\n",
+        "the server must still be serving everyone else"
+    );
+    server.shutdown.cancel();
+}

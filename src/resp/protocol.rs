@@ -31,6 +31,15 @@ use std::fmt;
 /// `with_capacity` on them is a one-packet out-of-memory. Redis uses 512 MiB for
 /// bulk strings; the array bound is well above any real pipeline.
 const MAX_BULK_LEN: usize = 512 * 1024 * 1024;
+/// How deeply arrays may nest before the frame is refused.
+///
+/// Real RESP2 traffic is flat: a command is an array of bulk strings, and a
+/// reply nests one or two levels at most. The bound exists for the frames
+/// nobody sends by accident — `*1\r\n` repeated is one stack frame per four
+/// bytes, and a stack overflow cannot be caught, so it kills the process
+/// rather than failing the connection.
+const MAX_NESTING_DEPTH: usize = 32;
+
 const MAX_ARRAY_LEN: usize = 1024 * 1024;
 
 /// A RESP value.
@@ -173,17 +182,32 @@ impl Decoder {
     /// incomplete — in that case **nothing** has been consumed and the caller
     /// should read more bytes and retry.
     pub fn decode(buf: &[u8]) -> Result<Option<(Value, usize)>, ProtocolError> {
+        Self::decode_at(buf, 0)
+    }
+
+    /// Decode at a known nesting depth.
+    ///
+    /// The depth is not decoration. This is a recursive descent parser, so
+    /// `*1\r\n` repeated is one stack frame per four bytes: 40 KB of it
+    /// overflowed the stack and killed the process. A stack overflow is not a
+    /// panic — it cannot be caught, unwound or reported — so an unauthenticated
+    /// peer took the server down for the price of one packet, before `AUTH` was
+    /// ever consulted.
+    fn decode_at(buf: &[u8], depth: usize) -> Result<Option<(Value, usize)>, ProtocolError> {
+        if depth > MAX_NESTING_DEPTH {
+            return Err(ProtocolError::TooLarge("nesting too deep"));
+        }
         if buf.is_empty() {
             return Ok(None);
         }
         match buf[0] {
-            b'+' | b'-' | b':' | b'$' | b'*' | b'%' => Self::decode_typed(buf),
+            b'+' | b'-' | b':' | b'$' | b'*' | b'%' => Self::decode_typed(buf, depth),
             // Anything else starts an inline command.
             _ => Self::decode_inline(buf),
         }
     }
 
-    fn decode_typed(buf: &[u8]) -> Result<Option<(Value, usize)>, ProtocolError> {
+    fn decode_typed(buf: &[u8], depth: usize) -> Result<Option<(Value, usize)>, ProtocolError> {
         let Some(line_end) = find_crlf(buf, 1) else {
             return Ok(None);
         };
@@ -234,7 +258,7 @@ impl Decoder {
                 // reserving on it lets one 5-byte header ask for gigabytes.
                 let mut items = Vec::new();
                 for _ in 0..count {
-                    match Self::decode(&buf[offset..])? {
+                    match Self::decode_at(&buf[offset..], depth + 1)? {
                         Some((value, used)) => {
                             offset += used;
                             items.push(value);
