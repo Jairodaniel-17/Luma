@@ -1,3 +1,4 @@
+use crate::engine::stored::StoredVal;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -34,7 +35,7 @@ struct Inner {
 
 #[derive(Clone, Debug)]
 struct Entry {
-    value: serde_json::Value,
+    value: StoredVal,
     revision: u64,
     expires_at_ms: Option<u64>,
 }
@@ -42,7 +43,7 @@ struct Entry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateItem {
     pub key: String,
-    pub value: serde_json::Value,
+    pub value: StoredVal,
     pub revision: u64,
     pub expires_at_ms: Option<u64>,
 }
@@ -123,10 +124,11 @@ impl StateStore {
     pub fn put(
         &self,
         key: String,
-        value: serde_json::Value,
+        value: impl Into<StoredVal>,
         ttl_ms: Option<u64>,
         if_revision: Option<u64>,
     ) -> Result<StateItem, StateError> {
+        let value = value.into();
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
         let shard = &self.0.shards[shard_index(&key)];
@@ -246,10 +248,11 @@ impl StateStore {
     pub fn apply_wal_set(
         &self,
         key: String,
-        value: serde_json::Value,
+        value: impl Into<StoredVal>,
         revision: u64,
         expires_at_ms: Option<u64>,
     ) {
+        let value = value.into();
         let shard = &self.0.shards[shard_index(&key)];
         let mut map = shard.write();
         if map
@@ -309,10 +312,11 @@ impl StateStore {
     pub fn apply_put_with_revision(
         &self,
         key: String,
-        value: serde_json::Value,
+        value: impl Into<StoredVal>,
         revision: u64,
         expires_at_ms: Option<u64>,
     ) -> StateItem {
+        let value = value.into();
         let shard = &self.0.shards[shard_index(&key)];
         let mut map = shard.write();
         let old = map.get(&key).map(|entry| entry.value.clone());
@@ -391,9 +395,10 @@ impl StateStore {
             .filter_map(|key| self.get(&key))
             .filter(|item| {
                 item.value
-                    .get(field)
+                    .as_json()
+                    .and_then(|json| json.get(field))
                     .and_then(|field_value| indexable_json_value(field_value, ""))
-                    .or_else(|| indexable_json_value(&item.value, field))
+                    .or_else(|| indexable_value(&item.value, field))
                     .is_some_and(|actual| actual == value)
             })
             .collect::<Vec<_>>();
@@ -417,7 +422,7 @@ impl StateStore {
                     continue;
                 }
                 for field in &fields {
-                    if let Some(value) = indexable_json_value(&entry.value, field) {
+                    if let Some(value) = indexable_value(&entry.value, field) {
                         secondary
                             .entry(field.clone())
                             .or_default()
@@ -432,20 +437,14 @@ impl StateStore {
         *self.0.expiry_heap.write() = heap;
     }
 
-    fn reindex_key(
-        &self,
-        key: &str,
-        old_value: Option<&serde_json::Value>,
-        new_value: Option<&serde_json::Value>,
-    ) {
+    fn reindex_key(&self, key: &str, old_value: Option<&StoredVal>, new_value: Option<&StoredVal>) {
         let fields = self.0.secondary_fields.read().clone();
         if fields.is_empty() {
             return;
         }
         let mut index = self.0.secondary_index.write();
         for field in fields {
-            if let Some(old_value) = old_value.and_then(|value| indexable_json_value(value, &field))
-            {
+            if let Some(old_value) = old_value.and_then(|value| indexable_value(value, &field)) {
                 if let Some(values) = index.get_mut(&field) {
                     if let Some(keys) = values.get_mut(&old_value) {
                         keys.remove(key);
@@ -455,8 +454,7 @@ impl StateStore {
                     }
                 }
             }
-            if let Some(new_value) = new_value.and_then(|value| indexable_json_value(value, &field))
-            {
+            if let Some(new_value) = new_value.and_then(|value| indexable_value(value, &field)) {
                 index
                     .entry(field.clone())
                     .or_default()
@@ -486,7 +484,7 @@ impl Default for StateStore {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistStateEntry {
-    pub value: serde_json::Value,
+    pub value: StoredVal,
     pub revision: u64,
     pub expires_at_ms: Option<u64>,
 }
@@ -512,6 +510,14 @@ fn next_prefix_boundary(prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract an indexable scalar from a stored value's field.
+///
+/// Raw byte values return `None`: they have no fields, so they stay out of the
+/// secondary index without needing a special case at every call site.
+fn indexable_value(value: &StoredVal, field: &str) -> Option<String> {
+    indexable_json_value(value.as_json()?, field)
 }
 
 fn indexable_json_value(value: &serde_json::Value, field: &str) -> Option<String> {
@@ -607,7 +613,10 @@ mod tests {
         let s = StateStore::new();
         s.apply_wal_set("k".to_string(), serde_json::json!(1), 4, None);
         s.apply_wal_set("k".to_string(), serde_json::json!(2), 3, None);
-        assert_eq!(s.get("k").unwrap().value, serde_json::json!(1));
+        assert_eq!(
+            s.get("k").unwrap().value.as_json(),
+            Some(&serde_json::json!(1))
+        );
     }
 
     #[test]
@@ -666,7 +675,7 @@ mod tests {
             (
                 "new-z".to_string(),
                 PersistStateEntry {
-                    value: serde_json::json!(10),
+                    value: serde_json::json!(10).into(),
                     revision: 3,
                     expires_at_ms: None,
                 },
@@ -674,7 +683,7 @@ mod tests {
             (
                 "new-a".to_string(),
                 PersistStateEntry {
-                    value: serde_json::json!(11),
+                    value: serde_json::json!(11).into(),
                     revision: 4,
                     expires_at_ms: None,
                 },

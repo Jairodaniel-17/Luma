@@ -19,7 +19,9 @@ pub fn put_doc(
     let previous = engine.get_state(&key);
     let stored = engine.put_state(key, doc.clone(), None, None)?;
     if let Some(prev) = previous {
-        update_indexes_remove(engine, collection, id, &prev.value)?;
+        if let Some(json) = prev.value.as_json() {
+            update_indexes_remove(engine, collection, id, json)?;
+        }
     }
     update_indexes_add(engine, collection, id, &doc)?;
     Ok(DocRecord {
@@ -37,7 +39,10 @@ pub fn get_doc(
     let key = doc_key(collection, id);
     Ok(engine.get_state(&key).map(|item| DocRecord {
         id: id.to_string(),
-        doc: item.value,
+        // The doc store is JSON-only: a raw byte value under a doc: key has
+        // no document representation, so it reads as null rather than being
+        // silently reinterpreted.
+        doc: item.value.into_json().unwrap_or(serde_json::Value::Null),
         revision: item.revision,
     }))
 }
@@ -48,7 +53,9 @@ pub fn delete_doc(engine: &Engine, collection: &str, id: &str) -> Result<bool, E
     let deleted = engine.delete_state(&key)?;
     if deleted {
         if let Some(prev) = existing {
-            update_indexes_remove(engine, collection, id, &prev.value)?;
+            if let Some(json) = prev.value.as_json() {
+                update_indexes_remove(engine, collection, id, json)?;
+            }
         }
     }
     Ok(deleted)
@@ -72,10 +79,14 @@ pub fn find_docs(
                     break;
                 }
                 if let Some(item) = engine.get_state(&doc_key(collection, &id)) {
-                    if doc_matches(&item.value, filter) {
+                    if item
+                        .value
+                        .as_json()
+                        .is_some_and(|json| doc_matches(json, filter))
+                    {
                         docs.push(DocRecord {
                             id,
-                            doc: item.value,
+                            doc: item.value.into_json().unwrap_or(serde_json::Value::Null),
                             revision: item.revision,
                         });
                     }
@@ -92,12 +103,15 @@ pub fn find_docs(
             continue;
         }
         let id = item.key[prefix.len()..].to_string();
-        if !doc_matches(&item.value, filter) {
+        let Some(json) = item.value.as_json() else {
+            continue;
+        };
+        if !doc_matches(json, filter) {
             continue;
         }
         docs.push(DocRecord {
             id,
-            doc: item.value,
+            doc: item.value.into_json().unwrap_or(serde_json::Value::Null),
             revision: item.revision,
         });
         if docs.len() >= limit {
@@ -186,7 +200,11 @@ fn string_fields(doc: &serde_json::Value) -> Vec<(String, String)> {
     out
 }
 
-fn parse_ids(value: &serde_json::Value) -> Vec<String> {
+/// Read the id list out of an index entry.
+///
+/// Takes the stored value rather than JSON so a raw byte value under an index
+/// key yields an empty list instead of forcing every caller to unwrap.
+fn parse_ids(value: &crate::engine::stored::StoredVal) -> Vec<String> {
     value
         .get("ids")
         .and_then(|v| v.as_array())

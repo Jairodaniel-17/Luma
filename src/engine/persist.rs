@@ -481,6 +481,10 @@ fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore,
                     .get("revision")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(1);
+                // Decode through StoredVal: a bare JSON value replays as
+                // `Json`, a marker object replays as the bytes it encodes.
+                let value = serde_json::from_value::<crate::engine::stored::StoredVal>(value)
+                    .unwrap_or_default();
                 state.apply_wal_set(key.to_string(), value, revision, expires_at_ms);
             }
         }

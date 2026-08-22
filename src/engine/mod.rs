@@ -10,6 +10,7 @@ pub mod parser;
 mod persist;
 mod state;
 mod state_db;
+pub mod stored;
 pub mod traits;
 
 use crate::config::Config;
@@ -607,13 +608,19 @@ impl Engine {
         self.0.state.query_secondary_index(field, value, limit)
     }
 
+    /// Store a value under `key`.
+    ///
+    /// Takes `impl Into<StoredVal>` so the many existing callers that pass a
+    /// `serde_json::Value` are unchanged, while a caller with raw bytes can hand
+    /// over a `StoredVal::Raw` directly.
     pub fn put_state(
         &self,
         key: String,
-        value: serde_json::Value,
+        value: impl Into<stored::StoredVal>,
         ttl_ms: Option<u64>,
         if_revision: Option<u64>,
     ) -> Result<state::StateItem, EngineError> {
+        let value = value.into();
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
         let revision = if let Some(db) = &self.0.state_db {
@@ -625,10 +632,13 @@ impl Engine {
         let event_data = serde_json::json!({
             "key": key,
             "revision": revision,
-            "value": value,
+            "value": value.clone(),
             "expires_at_ms": expires_at_ms,
         });
-        let value = event_data["value"].clone();
+        // Keep the typed value rather than re-extracting it from the event JSON.
+        // Reading it back out of the envelope would hand us a raw payload's
+        // marker object instead of its bytes, silently changing the value's type
+        // between the WAL record and the in-memory store.
         let key = event_data["key"].as_str().unwrap_or_default().to_string();
         // Hold the append guard across offset allocation, WAL append and publish
         // so offset order == WAL file order == publish order (no false gaps).
@@ -717,8 +727,10 @@ impl Engine {
     }
 
     pub fn vector_manifest_value(&self, collection: &str) -> Option<serde_json::Value> {
+        // A manifest is JSON by construction; `into_json` yields None for a raw
+        // value, which is the right answer rather than a fabricated document.
         self.get_state(&vector_manifest_key(collection))
-            .map(|item| item.value)
+            .and_then(|item| item.value.into_json())
     }
 
     pub fn list_vector_collections(&self) -> Vec<VectorCollectionInfo> {
@@ -736,7 +748,10 @@ impl Engine {
             let Some(collection) = collection_from_manifest_key(&item.key) else {
                 continue;
             };
-            let Some(meta) = parse_vector_manifest_metadata(&collection, &item.value) else {
+            let Some(json) = item.value.as_json() else {
+                continue;
+            };
+            let Some(meta) = parse_vector_manifest_metadata(&collection, json) else {
                 continue;
             };
             if let Some(existing) = collections.get_mut(&collection) {

@@ -37,7 +37,7 @@ async fn snapshot_and_wal_replay_no_loss() {
     let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     for i in 0..400u32 {
         let item = engine2.get_state(&format!("k:{i}")).unwrap();
-        assert_eq!(item.value["i"], i);
+        assert_eq!(item.value.get("i"), Some(&serde_json::json!(i)));
     }
 }
 
@@ -80,7 +80,7 @@ async fn state_survives_restart_without_wal() {
     let engine2 = Engine::new(config, CancellationToken::new()).unwrap();
     for i in 0..2000u32 {
         let item = engine2.get_state(&format!("big:{i}")).unwrap();
-        assert_eq!(item.value["i"], i);
+        assert_eq!(item.value.get("i"), Some(&serde_json::json!(i)));
     }
 }
 
@@ -119,7 +119,7 @@ async fn group_commit_flushes_pending_events_on_shutdown() {
     let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     for i in 0..8u32 {
         let item = reopened.get_state(&format!("pending:{i}")).unwrap();
-        assert_eq!(item.value["i"], i);
+        assert_eq!(item.value.get("i"), Some(&serde_json::json!(i)));
     }
 }
 
@@ -322,11 +322,11 @@ async fn truncated_wal_tail_does_not_drop_valid_prefix() {
 
     let reopened = Engine::new(config, CancellationToken::new()).unwrap();
     assert_eq!(
-        reopened.get_state("safe:1").unwrap().value,
-        serde_json::json!({"v":1})
+        reopened.get_state("safe:1").unwrap().value.as_json(),
+        Some(&serde_json::json!({"v":1}))
     );
     assert_eq!(
-        reopened.get_state("safe:2").unwrap().value,
-        serde_json::json!({"v":2})
+        reopened.get_state("safe:2").unwrap().value.as_json(),
+        Some(&serde_json::json!({"v":2}))
     );
 }

@@ -21,11 +21,11 @@ async fn test_engine_state_ops() {
         .put_state(key.clone(), value.clone(), None, None)
         .unwrap();
     assert_eq!(item.key, key);
-    assert_eq!(item.value, value);
+    assert_eq!(item.value.as_json(), Some(&value));
 
     // 2. Get
     let got = engine.get_state(&key).unwrap();
-    assert_eq!(got.value, value);
+    assert_eq!(got.value.as_json(), Some(&value));
 
     // 3. Delete
     let deleted = engine.delete_state(&key).unwrap();

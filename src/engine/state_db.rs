@@ -18,7 +18,9 @@ pub struct StateDb {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredValue {
-    value: serde_json::Value,
+    /// `StoredVal` deserializes a bare JSON value back to `Json`, so every
+    /// record written before the raw variant existed loads unchanged.
+    value: crate::engine::stored::StoredVal,
     revision: u64,
     expires_at_ms: Option<u64>,
 }
@@ -186,11 +188,16 @@ impl StateDb {
             .and_then(|v| v.as_u64())
             .unwrap_or(1);
         let expires_at_ms = ev.data.get("expires_at_ms").and_then(|v| v.as_u64());
+        // Decode through StoredVal so a raw payload replayed from the WAL lands
+        // in redb as bytes rather than as the marker object.
         let value = ev
             .data
             .get("value")
             .cloned()
-            .unwrap_or(serde_json::Value::Null);
+            .map(serde_json::from_value::<crate::engine::stored::StoredVal>)
+            .transpose()
+            .unwrap_or(None)
+            .unwrap_or_default();
 
         let mut wtx = self.db.begin_write()?;
         {
@@ -397,7 +404,7 @@ mod tests {
         assert_eq!(db2.applied_offset().unwrap(), 5);
         for i in 1..=5u64 {
             let item = db2.get_state(&format!("k{i}")).unwrap().unwrap();
-            assert_eq!(item.value, serde_json::json!(i));
+            assert_eq!(item.value.as_json(), Some(&serde_json::json!(i)));
         }
     }
 
@@ -411,8 +418,8 @@ mod tests {
         db.apply_state_updated(&ev(3, "k", 999)).unwrap();
         assert_eq!(db.applied_offset().unwrap(), 5);
         assert_eq!(
-            db.get_state("k").unwrap().unwrap().value,
-            serde_json::json!(5)
+            db.get_state("k").unwrap().unwrap().value.as_json(),
+            Some(&serde_json::json!(5))
         );
     }
 }

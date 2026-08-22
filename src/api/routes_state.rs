@@ -180,7 +180,14 @@ pub async fn get(
 
 #[derive(Debug, Deserialize)]
 pub struct PutBody {
-    pub value: serde_json::Value,
+    /// A JSON document, or a raw byte payload written as
+    /// `{"__luma_raw": "<base64>", "content_type": "..."}`.
+    ///
+    /// `StoredVal` decides which by looking for the marker key, so an ordinary
+    /// JSON value is unchanged and bytes round-trip symmetrically: a GET
+    /// returns the same marker form. `__luma_raw` is reserved at the top level
+    /// for exactly this reason.
+    pub value: crate::engine::stored::StoredVal,
     pub ttl_ms: Option<u64>,
     pub if_revision: Option<u64>,
 }
@@ -200,7 +207,8 @@ pub struct BatchPutBody {
 #[derive(Debug, Deserialize)]
 pub struct PutBodyWithKey {
     pub key: String,
-    pub value: serde_json::Value,
+    /// Same encoding as [`PutBody::value`].
+    pub value: crate::engine::stored::StoredVal,
     pub ttl_ms: Option<u64>,
     pub if_revision: Option<u64>,
 }

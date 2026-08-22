@@ -714,7 +714,9 @@ impl LumaDatabase {
                     .await
                     .ok()
                     .flatten()
-                    .map(|state| state.value);
+                    // Hydration returns JSON documents; a raw value has no
+                    // document form, so it hydrates as absent.
+                    .and_then(|state| state.value.into_json());
                 HydratedResult {
                     id: doc.id,
                     score: doc.score,

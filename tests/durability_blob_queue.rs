@@ -350,3 +350,82 @@ async fn unacked_message_becomes_visible_again() {
 
     app.stop().await;
 }
+
+// ─── F0.1: raw byte values in the KV store ───────────────────────────────────
+
+#[tokio::test]
+async fn raw_kv_value_roundtrips_and_survives_a_restart() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+    // Bytes that cannot appear in a JSON string: the case the Value-only store
+    // could not represent at all.
+    let payload: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0x80, 0x7F, 0x01];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+
+    {
+        let app = start_on(dir.path()).await;
+        let resp = client
+            .put(format!("{}/v1/state/binary-key", app.base))
+            .bearer_auth("test")
+            .json(&serde_json::json!({
+                "value": { "__luma_raw": encoded, "content_type": "application/octet-stream" }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A plain JSON value under a different key must be unaffected — the
+        // marker is what distinguishes them, nothing else.
+        let json_resp = client
+            .put(format!("{}/v1/state/json-key", app.base))
+            .bearer_auth("test")
+            .json(&serde_json::json!({ "value": { "content_type": "still a document" } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(json_resp.status(), StatusCode::OK);
+        app.stop().await;
+    }
+
+    // Restart: the bytes must come back through WAL replay / redb, not just
+    // from memory.
+    let app = start_on(dir.path()).await;
+    let got: serde_json::Value = client
+        .get(format!("{}/v1/state/binary-key", app.base))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        got["value"]["__luma_raw"].as_str(),
+        Some(encoded.as_str()),
+        "raw bytes must round-trip symmetrically after a restart: {got}"
+    );
+    assert_eq!(
+        got["value"]["content_type"].as_str(),
+        Some("application/octet-stream")
+    );
+
+    let json_got: serde_json::Value = client
+        .get(format!("{}/v1/state/json-key", app.base))
+        .bearer_auth("test")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        json_got["value"]["content_type"].as_str(),
+        Some("still a document"),
+        "a document that merely has a content_type field must stay a document"
+    );
+
+    app.stop().await;
+}
