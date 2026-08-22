@@ -237,7 +237,7 @@ extendido a los registros nuevos.
   `object_store` (S3/R2/GCS/MinIO con una API). Artefacto cifrado con la master
   key; `luma restore s3://…` directo; retención remota. Dependencia nueva →
   pasa por `deny.toml`.
-- `[ ]` **W1.4 — `luma backup --verify`.** Restaura a un temporal, corre
+- `[x]` **W1.4 — `luma backup --verify`.** Restaura a un temporal, corre
   checks, reporta. `backup_last_verified_ts` en métricas + regla Prometheus de
   ejemplo. Un backup no verificado no cuenta como backup.
 - `[ ]` **W2.1 — WAL shipping continuo** al bucket (estilo Litestream).
