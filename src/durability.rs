@@ -59,6 +59,46 @@ pub fn fsync_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Replace a file's contents **atomically but not durably**.
+///
+/// Temp file plus rename, so no reader ever sees a half-written record — but no
+/// fsync, so a crash may leave the previous contents. That is the right trade
+/// for exactly one kind of value: state whose loss is already a permitted
+/// outcome.
+///
+/// The case it exists for is a queue's visibility deadline. It is a *lease*: if
+/// a crash loses it, the message becomes visible again and is redelivered, which
+/// is the at-least-once contract the queue already offers. Paying two fsyncs per
+/// message to durably record a lease whose loss is allowed is pure cost — and it
+/// was measurable, not theoretical: `receive` on a few dozen messages did ~74
+/// fsyncs and intermittently took longer than the crash-recovery test's
+/// five-second timeout on a CI runner.
+///
+/// **Not for data.** A confirmed enqueue, a stored object, a WAL record: those
+/// use `write_atomic`. The question to ask is whether losing this write is a
+/// state the system already handles; if the answer needs a moment's thought, the
+/// answer is no.
+pub async fn replace_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination has no parent directory",
+        )
+    })?;
+    create_dir_all_durable(parent).await?;
+
+    let tmp = parent.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    let result = async {
+        tokio::fs::write(&tmp, bytes).await?;
+        tokio::fs::rename(&tmp, path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
 /// Create a directory and every missing ancestor, durably.
 ///
 /// `create_dir_all` is not enough, and the gap is not theoretical: step 4 of
@@ -171,6 +211,41 @@ async fn write_and_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_lease_replacement_is_atomic_and_leaves_no_temp_file() {
+        // Not durable, but a reader must never see a half-written record, and a
+        // failed or interrupted replacement must not litter the directory with
+        // `.tmp-*` files that the queue's own listing would then have to skip.
+        let root = tmp_dir("lease_replace");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("message.json");
+
+        write_atomic(&target, b"{\"visible_at\":1}").await.unwrap();
+        replace_atomic(&target, b"{\"visible_at\":2}")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"{\"visible_at\":2}");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_lease_replacement_creates_its_directory_too() {
+        // The first receive on a queue whose directory was never written to has
+        // to work, not fail on a missing parent.
+        let root = tmp_dir("lease_new_dir");
+        let target = root.join("queues").join("jobs").join("m.json");
+        replace_atomic(&target, b"{}").await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"{}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[tokio::test]
     async fn a_write_creates_every_missing_level_of_its_path() {

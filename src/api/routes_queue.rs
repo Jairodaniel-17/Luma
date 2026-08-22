@@ -261,6 +261,20 @@ async fn write_message_atomic(dir: &StdPath, msg: &StoredMessage) -> Result<(), 
     Ok(())
 }
 
+/// Rewrite a message to record a lease change, atomically but not durably.
+///
+/// See `durability::replace_atomic` for why the distinction matters and where
+/// the line is.
+async fn write_message_lease(dir: &StdPath, msg: &StoredMessage) -> Result<(), ApiError> {
+    let bytes = serde_json::to_vec(msg).map_err(|_| io_error("failed to serialize message"))?;
+    let final_path = dir.join(format!("{}.json", msg.id));
+    if let Err(e) = crate::durability::replace_atomic(&final_path, &bytes).await {
+        tracing::error!("queue lease update failed: {}", e);
+        return Err(io_error("failed to update message"));
+    }
+    Ok(())
+}
+
 /// POST /v1/queue/:queue — enqueue a message.
 pub async fn enqueue(
     State(state): State<AppState>,
@@ -368,8 +382,16 @@ pub async fn receive(
         }
         msg.visible_at = now + visibility * 1000;
         msg.attempts += 1;
-        // Rewrite atomically to reflect the in-flight state.
-        write_message_atomic(&dir, &msg).await?;
+        // Atomically, but **not** durably. The visibility deadline is a lease:
+        // if a crash loses it the message becomes visible again and is
+        // redelivered, which is the at-least-once contract this queue already
+        // offers. Two fsyncs per message to make a lease survive a crash buys
+        // nothing and costs real time — a few dozen messages meant ~74 fsyncs
+        // and intermittently outran the crash-recovery test's timeout.
+        //
+        // The enqueue above is the opposite case and keeps its full durable
+        // write: a producer that got an OK must not lose the message.
+        write_message_lease(&dir, &msg).await?;
         out.push(ReceivedMessage {
             id: msg.id,
             body: msg.body,
