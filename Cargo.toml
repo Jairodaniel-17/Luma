@@ -90,6 +90,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 tokio-test = "0.4"
 mockall = "0.13"
 assert_cmd = "2.0"
+rcgen = { version = "0.14.9", default-features = false, features = ["pem", "crypto", "ring"] }
 
 [[bench]]
 name = "vector_bench"

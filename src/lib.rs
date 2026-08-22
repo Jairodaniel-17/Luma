@@ -45,3 +45,26 @@ pub mod sqlite;
 pub mod vector;
 
 pub mod wal_ship;
+
+/// Install the rustls cryptography provider, once per process.
+///
+/// rustls 0.23 refuses to pick a provider when more than one is compiled in,
+/// and the refusal is a **panic** at the first handshake rather than an error at
+/// startup. Both `ring` and `aws-lc-rs` reach this build through different
+/// dependency paths, so leaving the choice implicit means TLS works or panics
+/// depending on which crates happen to be in the graph — including which *test*
+/// crates are.
+///
+/// `ring` is the pick: it needs no C toolchain, which is what makes the Windows
+/// build reproducible.
+///
+/// Called from every path that builds a TLS config. A second call is a no-op:
+/// `install_default` reports that someone else won the race, and the provider is
+/// what matters, not who installed it.
+pub fn install_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}

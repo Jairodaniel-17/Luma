@@ -251,6 +251,10 @@ async fn serve_tls(
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
+    // Same reason as the RESP listener: an ambiguous provider is a panic at the
+    // first handshake, not an error at startup.
+    luma::install_crypto_provider();
+
     // Load certificate chain (PEM)
     let cert_file = fs::File::open(cert_path)
         .map_err(|e| anyhow::anyhow!("cannot open TLS cert '{cert_path}': {e}"))?;

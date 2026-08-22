@@ -259,9 +259,15 @@ El hito visible: `redis-cli -p 6379` conversa con Luma.
   D2: evaluar el crate `redis-protocol` contra `deny.toml` primero; si no
   pasa, parser propio. Soportar *inline commands* (`PING\r\n`), porque
   redis-cli los usa. Pipelining. Fuzzing del parser sin panics.
-- `[~]` **F4.1 — límites** hechos (TLS pendiente) (adelantado, ver D-1): `resp_max_clients`,
-  `resp_idle_timeout_secs`, buffer máximo por conexión, backpressure en
-  suscriptores lentos. TLS reusando `rustls`, que ya es dependencia.
+- `[x]` **F4.1 - limites y TLS** (adelantado, ver D-1): `resp_max_clients`,
+  `resp_idle_timeout_secs`, buffer maximo por conexion, backpressure en
+  suscriptores lentos, y **TLS** reusando `rustls` (`resp_tls_enabled`, con
+  certificado propio o el de HTTP).
+
+  TLS dejo de ser higiene en cuanto `AUTH` empezo a llevar la api key de una
+  organizacion: en claro, cualquiera en el camino tiene una credencial que liga
+  la conexion a todo el keyspace de esa org. Encenderlo sin certificado
+  **impide arrancar** en vez de servir en claro por un fichero que falta.
 - `[x]` **F1.2 — AUTH multi-tenant.** `AUTH` mapea a las api keys/roles
   actuales; keyspace prefijado por `{org_id}\x1f`; `KEYS`/`SCAN` filtran por
   tenant. Dos orgs con la misma clave no se ven. Key revocada corta en el

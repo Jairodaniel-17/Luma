@@ -163,6 +163,20 @@ pub struct Config {
     pub hub_sql_filter_max_ids: usize,
     /// Path to TLS certificate (PEM). Both cert+key required to enable TLS.
     pub tls_cert_path: Option<String>,
+    /// Serve the RESP port over TLS.
+    ///
+    /// Off by default and explicit rather than inferred from a certificate
+    /// being present: turning on HTTPS should not silently change the wire
+    /// protocol of a different port and break every connected client. When this
+    /// is on and no certificate resolves, the server refuses to start — serving
+    /// plaintext because a file was missing is how credentials end up on the
+    /// wire.
+    pub resp_tls_enabled: bool,
+    /// Certificate for the RESP port. Falls back to `tls_cert_path`, which is
+    /// usually right; a separate one exists because the Redis port is often
+    /// published under a different hostname.
+    pub resp_tls_cert_path: Option<String>,
+    pub resp_tls_key_path: Option<String>,
     /// Path to TLS private key (PEM).
     pub tls_key_path: Option<String>,
     /// Rate limit: max requests per second per IP address (0 = disabled).
@@ -377,6 +391,9 @@ impl Default for Config {
             embedding_azure_api_version: "2024-02-01".to_string(),
             embedding_cohere_input_type: "search_document".to_string(),
             hub_sql_filter_max_ids: 50_000,
+            resp_tls_enabled: false,
+            resp_tls_cert_path: None,
+            resp_tls_key_path: None,
             tls_cert_path: None,
             tls_key_path: None,
             // Rate limiting on by default for brute-force protection; set to 0 to disable.
@@ -405,6 +422,33 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The certificate and key the RESP listener should use, if any.
+    ///
+    /// Resp-specific paths win; otherwise the shared HTTP pair is used. Returns
+    /// `None` when TLS is off, and `Some(Err(..))` when it is on but nothing
+    /// resolves — the caller is expected to refuse to start rather than fall
+    /// back to plaintext.
+    pub fn resp_tls_paths(&self) -> Option<Result<(String, String), String>> {
+        if !self.resp_tls_enabled {
+            return None;
+        }
+        let cert = self
+            .resp_tls_cert_path
+            .clone()
+            .or_else(|| self.tls_cert_path.clone());
+        let key = self
+            .resp_tls_key_path
+            .clone()
+            .or_else(|| self.tls_key_path.clone());
+        Some(match (cert, key) {
+            (Some(cert), Some(key)) => Ok((cert, key)),
+            _ => Err("resp_tls_enabled is on but no certificate resolves: set \
+                 resp_tls_cert_path and resp_tls_key_path, or tls_cert_path and \
+                 tls_key_path"
+                .to_string()),
+        })
+    }
+
     /// Load the instance configuration, honouring the documented precedence:
     /// **CLI flags > environment > `luma.toml` > built-in defaults**.
     ///
@@ -899,6 +943,11 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(50_000),
+            resp_tls_enabled: std::env::var("RESP_TLS_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            resp_tls_cert_path: std::env::var("RESP_TLS_CERT_PATH").ok(),
+            resp_tls_key_path: std::env::var("RESP_TLS_KEY_PATH").ok(),
             tls_cert_path: std::env::var("TLS_CERT_PATH").ok(),
             tls_key_path: std::env::var("TLS_KEY_PATH").ok(),
             rate_limit_rps: std::env::var("RATE_LIMIT_RPS")

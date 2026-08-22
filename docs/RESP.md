@@ -218,6 +218,29 @@ Escribir el arnés destapó de paso que la ruta de replay de la proyección redb
 no tenía rama para el registro de lote: cada movimiento se habría perdido en el
 primer arranque tras un corte.
 
+### TLS
+
+El puerto RESP habla texto plano por defecto, igual que Redis. Para cifrarlo:
+
+```toml
+resp_tls_enabled = true
+# Opcional: si no se ponen, se usan tls_cert_path / tls_key_path
+resp_tls_cert_path = "/etc/luma/resp.pem"
+resp_tls_key_path  = "/etc/luma/resp.key"
+```
+
+La clave debe ser PKCS#8 (`openssl pkcs8 -topk8 -nocrypt`).
+
+Es un interruptor explícito y no se deduce de que haya certificado: encender
+HTTPS no debe cambiar en silencio el protocolo de otro puerto y romper a todos
+los clientes conectados. Y con `resp_tls_enabled = true` sin certificado el
+servidor **no arranca** — servir en claro porque faltaba un fichero es como las
+credenciales acaban en la red mientras el operador cree que el puerto está
+cifrado.
+
+Sin TLS y con contraseña configurada, el arranque avisa: `AUTH` lleva la api
+key de la organización, y en claro la tiene cualquiera en el camino.
+
 ### Multi-tenancy
 
 `AUTH <api-key>` liga la conexión a la organización dueña de esa clave, y a

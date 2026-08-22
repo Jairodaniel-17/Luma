@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Live counters, exposed through `/v1/metrics` alongside the HTTP ones.
@@ -116,6 +116,10 @@ pub struct RespServer {
     /// Inbox depth per subscriber. Bounded so one subscriber that stops reading
     /// cannot grow a publisher's memory without limit.
     pub pubsub_inbox: usize,
+    /// TLS, when configured. Absent means the port speaks plaintext RESP, which
+    /// is what Redis does by default and what every client assumes unless told
+    /// otherwise.
+    pub tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 impl RespServer {
@@ -195,6 +199,52 @@ async fn enforce_revocation(server: &RespServer, session: &mut Session, seen_epo
     }
 }
 
+/// Build a TLS acceptor from a PEM certificate chain and a PKCS#8 key.
+///
+/// Deliberately strict about the key format, with a message that says how to
+/// convert: an RSA key in the old PEM form loads as an empty list and the
+/// failure otherwise reads as "no key in the file you are looking at".
+fn load_tls(cert_path: &str, key_path: &str) -> std::io::Result<tokio_rustls::TlsAcceptor> {
+    use rustls_pemfile::{certs, pkcs8_private_keys};
+    use std::io::BufReader;
+
+    // Before building a config: rustls panics at the first handshake if the
+    // provider is ambiguous, and a panic in an accept loop is a dead port.
+    crate::install_crypto_provider();
+
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| invalid(format!("cannot open RESP TLS cert '{cert_path}': {e}")))?;
+    let chain: Vec<_> = certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| invalid(format!("invalid RESP TLS cert '{cert_path}': {e}")))?;
+    if chain.is_empty() {
+        return Err(invalid(format!("no certificate found in '{cert_path}'")));
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| invalid(format!("cannot open RESP TLS key '{key_path}': {e}")))?;
+    let mut keys: Vec<_> = pkcs8_private_keys(&mut BufReader::new(key_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| invalid(format!("invalid RESP TLS key '{key_path}': {e}")))?;
+    if keys.is_empty() {
+        return Err(invalid(format!(
+            "no PKCS#8 private key in '{key_path}'. Convert with \
+             `openssl pkcs8 -topk8 -nocrypt`"
+        )));
+    }
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            chain,
+            rustls::pki_types::PrivateKeyDer::Pkcs8(keys.remove(0)),
+        )
+        .map_err(|e| invalid(format!("RESP TLS configuration rejected: {e}")))?;
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
 /// Start the listener. Returns immediately; the accept loop runs in a task.
 pub async fn spawn(
     config: &crate::config::Config,
@@ -206,6 +256,20 @@ pub async fn spawn(
     if config.resp_port == 0 {
         return Ok(None);
     }
+    // Resolve TLS before binding: refusing to start is the right answer to a
+    // missing certificate, and doing it after the port is open would leave a
+    // window in which the listener served plaintext.
+    let tls = match config.resp_tls_paths() {
+        None => None,
+        Some(Ok((cert, key))) => Some(load_tls(&cert, &key)?),
+        Some(Err(reason)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                reason,
+            ))
+        }
+    };
+
     let addr = std::net::SocketAddr::new(config.bind_addr, config.resp_port);
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?.port();
@@ -222,14 +286,25 @@ pub async fn spawn(
         notifier: Arc::new(crate::engine::notify::KeyNotifier::new()),
         pubsub: Arc::new(crate::resp::pubsub::PubSub::new()),
         pubsub_inbox: config.resp_pubsub_inbox.max(1),
+        tls,
     });
 
     tracing::info!(
         port = bound,
         max_clients = server.max_clients,
         auth = server.requires_auth(),
+        tls = server.tls.is_some(),
         "RESP listener started"
     );
+    if server.requires_auth() && server.tls.is_none() {
+        // `AUTH` carries an api key that binds the connection to an
+        // organization. In the clear, anyone on the path has it.
+        tracing::warn!(
+            "RESP listener has no TLS: AUTH credentials cross the network in \
+             plaintext. Set resp_tls_enabled unless the port is on a trusted \
+             network."
+        );
+    }
     if !server.requires_auth() {
         // Loud, because an unauthenticated Redis port is how a lot of data gets
         // stolen; the HTTP side warns the same way about a missing api key.
@@ -280,7 +355,23 @@ pub async fn spawn(
                     .metrics
                     .connections_total
                     .fetch_add(1, Ordering::Relaxed);
-                let outcome = serve_connection(&server, stream).await;
+                // Nagle batches small writes, which for a request/response
+                // protocol adds latency to every reply for no throughput gain.
+                // Set before the handshake, while the socket is still a socket.
+                let _ = stream.set_nodelay(true);
+                let outcome = match &server.tls {
+                    Some(acceptor) => match acceptor.accept(stream).await {
+                        Ok(tls_stream) => serve_connection(&server, tls_stream).await,
+                        // A failed handshake is a client problem — a plaintext
+                        // client, or a name it would not accept — and logging it
+                        // at debug keeps a scanner from filling the log.
+                        Err(e) => {
+                            tracing::debug!(%peer, "RESP TLS handshake failed: {e}");
+                            Ok(())
+                        }
+                    },
+                    None => serve_connection(&server, stream).await,
+                };
                 if let Err(e) = outcome {
                     tracing::debug!(%peer, "RESP connection ended: {e}");
                 }
@@ -301,7 +392,10 @@ pub async fn spawn(
 /// Deregisters any Pub/Sub subscription on the way out — every return path,
 /// including the error ones, which is why the body is wrapped rather than
 /// having a `drop_connection` call before each `return`.
-async fn serve_connection(server: &RespServer, stream: TcpStream) -> std::io::Result<()> {
+async fn serve_connection<S>(server: &RespServer, stream: S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut subscriber: Option<crate::resp::pubsub::Subscriber> = None;
     let result = serve_inner(server, stream, &mut subscriber).await;
     if let Some(sub) = subscriber {
@@ -310,15 +404,14 @@ async fn serve_connection(server: &RespServer, stream: TcpStream) -> std::io::Re
     result
 }
 
-async fn serve_inner(
+async fn serve_inner<S>(
     server: &RespServer,
-    mut stream: TcpStream,
+    mut stream: S,
     subscriber: &mut Option<crate::resp::pubsub::Subscriber>,
-) -> std::io::Result<()> {
-    // Nagle batches small writes, which for a request/response protocol means
-    // adding latency to every reply for no throughput gain.
-    let _ = stream.set_nodelay(true);
-
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut session = Session::new(server.requires_auth());
     // Revocation count this connection has already reconciled against. Starts
     // at the current value: a key revoked *before* this connection existed
@@ -514,10 +607,10 @@ async fn serve_inner(
     }
 }
 
-async fn reply_protocol_error(
-    stream: &mut TcpStream,
-    error: &ProtocolError,
-) -> std::io::Result<()> {
+async fn reply_protocol_error<S>(stream: &mut S, error: &ProtocolError) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
     let _ = stream
         .write_all(&Value::Error(error.to_string()).to_bytes())
         .await;
