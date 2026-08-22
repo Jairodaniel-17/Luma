@@ -375,8 +375,7 @@ alcance, no un bug.
 
 - `[~]` **F4.2 —** backup/restore de estructuras verificado; panel pendiente. las estructuras entran en `/v1/admin/backup` y restore; el
   panel muestra conexiones RESP por org y comandos/s.
-- `[~]` **F4.5 - harness permanente en CI** (fuzzing y nightly hechos; falta la
-  matriz crash-recovery por *tipo de registro* del WAL).
+- `[x]` **F4.5 - harness permanente en CI.**
 
   - **Fuzzing del parser con corpus versionado** (`tests/resp_fuzz.rs`): corre
     en cada push, determinista a proposito -- un fallo con semilla aleatoria no
@@ -391,8 +390,20 @@ alcance, no un bug.
     tambien de noche, porque un advisory se publica en el calendario de otros y
     una dependencia limpia al mergear puede estar vulnerable por la mañana sin
     un solo commit.
-  - Pendiente: cubrir la matriz por **tipo de registro** del WAL, no solo por
-    motor.
+  - **Matriz por tipo de registro del WAL** (`tests/wal_record_matrix.rs`): los
+    7 tipos, cada uno replicado intacto, roto a medias y con checksum
+    corrompido. Ahí es donde las respuestas de verdad difieren: cada tipo tiene
+    su propia rama de aplicación, y un tipo sin rama reproduce como nada. No es
+    hipotético — a `state_batch` le faltaba la rama en la ruta de redb cuando se
+    escribió.
+
+    La expectativa se declara **por caso** en vez de asumirse uniforme, porque
+    difiere de verdad: para los registros de KV el WAL es la única fuente de
+    verdad, así que un registro roto es como si no hubiera existido; para los de
+    vector no, porque el store escribe sus propios ficheros durables y una
+    mutación que ya llegó a disco no se deshace. El que se lee raro es
+    `vector_collection_dropped`: sin su registro, el `created` anterior
+    reproduce y la colección vuelve aunque su directorio se haya borrado.
 
   **Criterio para quitar el flag "experimental" del listener RESP: nightly
   verde 7 días seguidos.**

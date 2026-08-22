@@ -40,6 +40,10 @@ jobs:
       # The WAL record that makes RPOPLPUSH atomic, replayed torn and intact.
       # Cheap, but it guards the guarantee kombu's unacked queue is built on.
       - run: cargo test --test atomic_move --release --locked
+      # And the same questions asked per WAL record type, which is where the
+      # answers actually differ: each type has its own apply arm, and a type
+      # with no arm replays as nothing at all.
+      - run: cargo test --test wal_record_matrix --release --locked
 
   parser-fuzz:
     name: Parser fuzzing
