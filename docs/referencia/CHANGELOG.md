@@ -106,7 +106,7 @@
 - **SSE gap signaling**: explicit `gap` events when clients request offsets no longer retained.
 
 ### Documentation
-- `docs/NS_MEM.md` — full API reference for the memory layer.
+- `docs/integrar/NS_MEM.md` — full API reference for the memory layer.
 
 ---
 

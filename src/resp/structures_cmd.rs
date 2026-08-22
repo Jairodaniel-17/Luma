@@ -1246,7 +1246,7 @@ fn scan_options(args: &[Vec<u8>]) -> Result<(Option<Vec<u8>>, usize), Value> {
 /// `BTreeMap`/`BTreeSet` and therefore stable. That gives the guarantee clients
 /// actually rely on — an element present for the whole iteration is returned at
 /// least once — without pretending to be Redis's hash-bucket cursor. Recorded
-/// as a divergence in `docs/RESP.md`, same as the top-level `SCAN`.
+/// as a divergence in `docs/integrar/RESP.md`, same as the top-level `SCAN`.
 fn scan_page(
     structures: &Structures<'_>,
     session: &Session,

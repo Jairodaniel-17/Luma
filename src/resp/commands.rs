@@ -1659,7 +1659,7 @@ fn exec(
                 //
                 // A divergence, and a deliberate one: Redis *does* queue
                 // `SUBSCRIBE` and run it at `EXEC`, putting the connection into
-                // subscriber mode. Recorded in docs/RESP.md. The comment here
+                // subscriber mode. Recorded in docs/integrar/RESP.md. The comment here
                 // used to claim Redis refused it too, which the differential
                 // suite disproved -- an assumption stated as a fact about
                 // someone else's software.

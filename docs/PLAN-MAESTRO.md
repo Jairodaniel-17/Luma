@@ -347,7 +347,7 @@ ampliada a estructuras.
 
   El escenario de unacked se hizo **despues** de cerrar la ventana de
   atomicidad multiclave, que es lo que lo ponia en duda.
-- `[x]` **F4.3 — `docs/RESP.md`** (adelantado, ver D-2): tabla de comandos con
+- `[x]` **F4.3 — `docs/integrar/RESP.md`** (adelantado, ver D-2): tabla de comandos con
   notas de divergencia, guía "migrar de Redis a Luma en 5 minutos" para Celery,
   arq, redis-py e ioredis, y qué NO se soporta y por qué. README enlaza.
 
@@ -438,7 +438,7 @@ alcance, no un bug.
 
 - `[x]` **W2.3 - failover asistido.** Health-check para proxy
   (`GET /v1/health/primary`: 200 en un primario, 503 en una réplica), secuencia
-  de promoción en `docs/RUNBOOKS.md`, y **fencing por epoch** contra
+  de promoción en `docs/operar/RUNBOOKS.md`, y **fencing por epoch** contra
   split-brain. Honesto: no es HA automática — nada aquí elige nada.
 
   Un objeto pequeño en el prefijo remoto lleva un contador. `luma promote`
@@ -459,7 +459,7 @@ alcance, no un bug.
   sigue diciendo que se pare el primario antiguo primero: el fencing es la red,
   no el plan.
 - `[~]` **W3.2 - API S3-compatible** (las operaciones y SigV4, hechos; ver las
-  divergencias declaradas abajo y en `docs\S3.md`).
+  divergencias declaradas abajo y en `docs\integrar\S3.md`).
 
   `src\s3\`: `sigv4.rs` (firma por cabecera y presignada), `credentials.rs`,
   `xml.rs`, `routes.rs`. Escucha en `s3_port` propio, porque S3 se adueña de la
@@ -513,7 +513,7 @@ La decisión estratégica del producto: Luma **no** reemplaza Postgres, se
 conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
 
 - `[x]` **W4.1 - spike de replicación lógica.** Informe en
-  `docs\POSTGRES-CDC.md`; 7 pruebas contra un Postgres 16 real
+  `docs\integrar\POSTGRES-CDC.md`; 7 pruebas contra un Postgres 16 real
   (`tests\pgcdc_stream.rs`).
 
   **La decisión: subconjunto propio.** La elección real nunca fue «crate contra
@@ -622,7 +622,7 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
     los demás módulos llevan `#[forbid(unsafe_code)]`. Un bloque `unsafe`
     fuera de ahí es un error de compilación, no un comentario de revisión que
     alguien pueda pasar por alto. Inventariado con su justificación en
-    `docs/SECURITY.md`.
+    `docs/operar/SECURITY.md`.
   - `tests/unsafe_inventory.rs` tapa el hueco que el atributo deja: un
     `pub mod` nuevo sin marcar compila igual, y la protección dejaría de
     cubrir en silencio el código más reciente. Verificado que el guarda falla
@@ -640,10 +640,31 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
   **Sin verificar de verdad:** la publicación a GHCR y la firma solo se
   ejecutan al empujar un tag `v*`. La sintaxis está validada y los pasos son
   los estándar, pero nadie ha visto todavía este job pasar.
-- `[~]` **W5.5 - documentación de producto** (runbooks hechos; la
-  reorganización de carpetas y la prueba con una persona externa, pendientes).
+- `[~]` **W5.5 - documentación de producto** (runbooks y reorganización hechos;
+  la prueba con una persona externa, pendiente).
 
-  `docs/RUNBOOKS.md`: respaldo/restore, montar y seguir una réplica, promoción,
+  `docs\README.md` es el índice, y las carpetas son las cuatro que pedía el
+  plan: `empezar/`, `operar/`, `integrar/`, `referencia/`. Veinte documentos
+  movidos; los nombres no cambiaron, porque renombrar además de mover
+  multiplicaba la churn en treinta y pico ficheros que los referencian sin darle
+  nada al lector.
+
+  Se quedan en la raíz de `docs/` a propósito: `PLAN-MAESTRO.md`, `ROADMAP.md` y
+  los `SPEC-*.md`, que son planificación y no documentación de uso — y que entre
+  los tres suman 42 ficheros referenciándolos; y `openapi.yaml`, que lo lee un
+  test y la ruta `/docs`, así que moverlo por orden sería churn con un modo de
+  fallo real.
+
+  **La reorganización trae la comprobación que la hace repetible.** Mover
+  documentos rompe enlaces en silencio: el markdown sigue renderizando, el
+  enlace sigue pareciendo un enlace, y solo falla para quien ya había decidido
+  que necesitaba esa página. `tests\docs_links.rs` comprueba que cada enlace
+  relativo de `docs/` y de los dos README apunta a un fichero que existe, y que
+  el índice y las carpetas no se separan en ninguna de las dos direcciones —
+  una entrada que falta esconde una página, y una entrada obsoleta manda a
+  ninguna parte.
+
+  `docs/operar/RUNBOOKS.md`: respaldo/restore, montar y seguir una réplica, promoción,
   rotación de master key, upgrade, y una tabla de síntoma → dónde mirar. Cada
   comando ejecutado contra el binario real — un runbook con un flag inventado es
   peor que ninguno, porque se descubre en el peor momento.
@@ -747,4 +768,4 @@ Heredadas de `SPEC-producto.md`, marcadas ahí como `[DECISIÓN]`:
 | `StoredVal` (F0.1) rompe compatibilidad de datos | Registros nuevos etiquetados, los legados se leen como `Json`; el fixture dorado del Bloque 1 lo vigila en CI — por eso el Bloque 1 va **antes** del 2 |
 | Tests en lote (regla 2) retrasan la detección de fallos | Cada bloque acota el radio: si la puerta falla, el conjunto de commits sospechosos es un bloque, no el repo |
 | Aparcar benchmarks oculta regresiones de rendimiento | Declarado arriba de forma explícita; reactivar W5.4 antes de GA |
-| Confusión de identidad ("¿Luma es un Redis?") | RESP es **una interfaz** de la plataforma, no el producto. Fijado así en README y en `docs/RESP.md` |
+| Confusión de identidad ("¿Luma es un Redis?") | RESP es **una interfaz** de la plataforma, no el producto. Fijado así en README y en `docs/integrar/RESP.md` |

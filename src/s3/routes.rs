@@ -351,7 +351,7 @@ fn etag_of(bytes: &[u8]) -> String {
 ///
 /// **Not MD5.** S3's ETag for a single-part upload is the MD5 of the body, and
 /// some clients recompute it to verify a download. This is a different hash, so
-/// such a client will see a mismatch. Recorded here and in `docs/S3.md` rather
+/// such a client will see a mismatch. Recorded here and in `docs/integrar/S3.md` rather
 /// than left to be discovered: adding an MD5 dependency for a checksum that is
 /// cryptographically broken anyway was the trade, and it can be revisited if a
 /// client actually needs it.
@@ -669,7 +669,7 @@ fn tenant_context(caller: &Caller) -> crate::api::TenantContext {
         permissions: serde_json::json!({}),
         // Quotas travel on the api key record, which an S3 credential does not
         // have. Left empty here means unlimited *through this door*, which is a
-        // real gap and is recorded in docs/S3.md.
+        // real gap and is recorded in docs/integrar/S3.md.
         quotas: serde_json::json!({}),
     }
 }

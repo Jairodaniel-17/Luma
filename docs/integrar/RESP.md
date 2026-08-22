@@ -5,9 +5,9 @@ Luma habla RESP2 en un puerto propio, así que un cliente que hoy apunta a
 
 > **Estado: experimental.** Los comandos de esta página están implementados y
 > cubiertos por tests, pero **falta la suite diferencial contra un Redis 7
-> real**, que [`SPEC-resp.md`](SPEC-resp.md) define como la fuente de verdad de
+> real**, que [`SPEC-resp.md`](../SPEC-resp.md) define como la fuente de verdad de
 > la semántica. Hasta que exista y esté verde varios días seguidos (criterio
-> F4.5 del [plan maestro](PLAN-MAESTRO.md)), esto no debe considerarse
+> F4.5 del [plan maestro](../PLAN-MAESTRO.md)), esto no debe considerarse
 > equivalente a Redis en producción. La sección
 > [Cómo validar](#cómo-validar-esto-de-verdad) explica qué falta ejecutar.
 

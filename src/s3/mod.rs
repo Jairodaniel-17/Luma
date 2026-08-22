@@ -61,7 +61,7 @@ pub async fn spawn(
     tracing::info!(port = bound, "S3-compatible listener started");
     tracing::warn!(
         "the S3 API is experimental: multipart ETags are not MD5 and several \
-         subresources are refused rather than implemented. See docs/S3.md."
+         subresources are refused rather than implemented. See docs/integrar/S3.md."
     );
     Ok(Some(bound))
 }

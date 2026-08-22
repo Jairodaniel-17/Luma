@@ -222,7 +222,7 @@ store.add_texts(["...", "..."])
 docs = store.max_marginal_relevance_search("my question", k=4)
 ```
 
-Full Python SDK guide: [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md).
+Full Python SDK guide: [`docs/empezar/SDK_PYTHON.md`](docs/empezar/SDK_PYTHON.md).
 
 ---
 
@@ -255,7 +255,7 @@ Luma is not only a vector engine — it is a platform services layer. Every prim
 
 All primitives share the checksummed segmented WAL, snapshots, backups, encryption at rest and per-organization multi-tenant isolation.
 
-> **Product roadmap:** the hardening master plan — verified durability, replication/WAL shipping, S3-compatible API, PostgreSQL CDC connector, operability and GA criteria — lives in [`docs/SPEC-producto.md`](docs/SPEC-producto.md). The **Redis protocol (RESP) compatibility** track — letting Celery, arq, redis-py or ioredis point at Luma **without code changes** (`REDIS_URL=redis://luma:6379`) — has its own phased SPEC in [`docs/SPEC-resp.md`](docs/SPEC-resp.md), and is **not implemented yet**. What we protect and from whom: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+> **Product roadmap:** the hardening master plan — verified durability, replication/WAL shipping, S3-compatible API, PostgreSQL CDC connector, operability and GA criteria — lives in [`docs/SPEC-producto.md`](docs/SPEC-producto.md). The **Redis protocol (RESP) compatibility** track — letting Celery, arq, redis-py or ioredis point at Luma **without code changes** (`REDIS_URL=redis://luma:6379`) — has its own phased SPEC in [`docs/SPEC-resp.md`](docs/SPEC-resp.md), and is **not implemented yet**. What we protect and from whom: [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md).
 
 ---
 
@@ -281,7 +281,7 @@ Three headlines:
 
 > **How to read the recall column:** the dataset is uniformly random vectors with no cluster structure — an adversarial case for any ANN (even Qdrant tops out at 0.42). That column measures **the speed↔accuracy trade-off point each engine picks by default**, not the index's absolute quality. With real embeddings all recalls go up. Comparing recall across engines is only meaningful at equivalent latency.
 
-Full methodology, the `ef` curve, the HNSW calibration (3× throughput at identical recall), the ingestion parallelization (293 → 926 vec/s) and what still lags behind: **[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)**.
+Full methodology, the `ef` curve, the HNSW calibration (3× throughput at identical recall), the ingestion parallelization (293 → 926 vec/s) and what still lags behind: **[`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md)**.
 
 ---
 
@@ -351,7 +351,7 @@ Every collection/document/blob is bound to the organization that created it (*fi
 - **Encryption at rest** for sensitive fields with **ChaCha20-Poly1305** (AEAD), master key derived from `LUMA_MASTER_KEY`. Self-describing ciphertext `enc:v1:<b64(nonce||ct)>`.
 - **Security headers** on every response: strict `Content-Security-Policy` (no `unsafe-inline` for scripts; jsdelivr allowed for the Scalar docs), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` and **HSTS**.
 
-Vulnerability reporting policy: [`SECURITY.md`](SECURITY.md). Threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+Vulnerability reporting policy: [`SECURITY.md`](SECURITY.md). Threat model: [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md).
 
 ---
 
@@ -414,7 +414,7 @@ A complete memory layer for autonomous agents (`src/memory/`), built on the conv
 - `POST edges` · `GET edges/{memory_id}` · `POST edges/{edge_id}/delete`
 - `GET beliefs/{fact_key}/history` · `POST graph/centrality`
 
-Also: fact deduplication (cosine ≥ 0.95), opt-in exponential decay (`memory_decay_enabled`) and contradiction detection (a `Contradicts` edge when old↔new similarity < 0.55). LLM providers: `none`, `mock`, `openai`, `ollama`. See [`docs/NS_MEM.md`](docs/NS_MEM.md).
+Also: fact deduplication (cosine ≥ 0.95), opt-in exponential decay (`memory_decay_enabled`) and contradiction detection (a `Contradicts` edge when old↔new similarity < 0.55). LLM providers: `none`, `mock`, `openai`, `ollama`. See [`docs/integrar/NS_MEM.md`](docs/integrar/NS_MEM.md).
 
 ### Administration, auth and health
 
@@ -427,7 +427,9 @@ Also: fact deduplication (cosine ≥ 0.95), opt-in exponential decay (`memory_de
 - **Operations**: `POST /v1/admin/backup` (triggers a snapshot), `GET /v1/admin/audit` (filterable access log), `GET /v1/admin/stats`, `GET /v1/admin/audit-events` — all require the `admin` role.
 - **Hot configuration**: `GET`/`PUT /v1/config`, `POST /v1/config/embedding/probe` (verifies the embedding provider responds).
 
-Full reference: [`docs/API.md`](docs/API.md) and the OpenAPI spec at [`docs/openapi.yaml`](docs/openapi.yaml) (served at `/docs`).
+Full reference: [`docs/integrar/API.md`](docs/integrar/API.md) and the OpenAPI spec at [`docs/openapi.yaml`](docs/openapi.yaml) (served at `/docs`).
+
+**All the documentation, arranged by what you are trying to do — getting started, operating, integrating, reference — is in [`docs/README.md`](docs/README.md).**
 
 ---
 
@@ -471,7 +473,7 @@ Retry with exponential backoff + jitter: `EMBEDDING_RETRY_ATTEMPTS` (default 3),
 | Backups | `backup_enabled`, `backup_dir`, `backup_interval_secs`, `backup_retention` |
 | Operations | `rate_limit_rps` (0 = off), `rate_limit_burst`, `TLS_CERT_PATH`, `TLS_KEY_PATH`, `LIBSQL_URL` |
 
-It can be read and updated at runtime via `GET`/`PUT /v1/config`. Full detail: [`docs/CONFIG.md`](docs/CONFIG.md).
+It can be read and updated at runtime via `GET`/`PUT /v1/config`. Full detail: [`docs/operar/CONFIG.md`](docs/operar/CONFIG.md).
 
 ---
 
@@ -537,25 +539,25 @@ Documentation is currently written in Spanish.
 
 | Document | Contents |
 | :--- | :--- |
-| [`docs/API.md`](docs/API.md) | Endpoint reference |
+| [`docs/integrar/API.md`](docs/integrar/API.md) | Endpoint reference |
 | [`docs/openapi.yaml`](docs/openapi.yaml) | OpenAPI spec (served at `/docs`) |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Internal architecture |
-| [`docs/CONFIG.md`](docs/CONFIG.md) | Every configuration key |
-| [`docs/CLI.md`](docs/CLI.md) | Binary subcommands |
-| [`docs/DATA_MODELS.md`](docs/DATA_MODELS.md) | Data models and schemas |
-| [`docs/VECTOR_STORAGE.md`](docs/VECTOR_STORAGE.md) | Segments, mmap, quantization |
-| [`docs/RESP.md`](docs/RESP.md) | Redis protocol compatibility: commands, divergences, how to validate |
-| [`docs/NS_MEM.md`](docs/NS_MEM.md) | Agent memory (full API) |
-| [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) | Python SDK guide |
-| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Qdrant/Milvus comparison + internal benchmarks |
-| [`docs/BENCH.md`](docs/BENCH.md) | How to run the bench binary |
-| [`docs/FEATURES.md`](docs/FEATURES.md) | Feature inventory |
-| [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Security and threat model |
-| [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) | Production checklist |
+| [`docs/referencia/ARCHITECTURE.md`](docs/referencia/ARCHITECTURE.md) | Internal architecture |
+| [`docs/operar/CONFIG.md`](docs/operar/CONFIG.md) | Every configuration key |
+| [`docs/operar/CLI.md`](docs/operar/CLI.md) | Binary subcommands |
+| [`docs/referencia/DATA_MODELS.md`](docs/referencia/DATA_MODELS.md) | Data models and schemas |
+| [`docs/referencia/VECTOR_STORAGE.md`](docs/referencia/VECTOR_STORAGE.md) | Segments, mmap, quantization |
+| [`docs/integrar/RESP.md`](docs/integrar/RESP.md) | Redis protocol compatibility: commands, divergences, how to validate |
+| [`docs/integrar/NS_MEM.md`](docs/integrar/NS_MEM.md) | Agent memory (full API) |
+| [`docs/empezar/SDK_PYTHON.md`](docs/empezar/SDK_PYTHON.md) | Python SDK guide |
+| [`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md) | Qdrant/Milvus comparison + internal benchmarks |
+| [`docs/referencia/BENCH.md`](docs/referencia/BENCH.md) | How to run the bench binary |
+| [`docs/empezar/FEATURES.md`](docs/empezar/FEATURES.md) | Feature inventory |
+| [`docs/operar/SECURITY.md`](docs/operar/SECURITY.md) · [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md) | Security and threat model |
+| [`docs/operar/PROD_READINESS.md`](docs/operar/PROD_READINESS.md) | Production checklist |
 | [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md) | **Unified execution plan** (blocks, order, status) |
 | [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | Source SPECs (detail and acceptance criteria) |
-| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Version history |
-| [`docs/DEMO.md`](docs/DEMO.md) | Demo script |
+| [`docs/referencia/CHANGELOG.md`](docs/referencia/CHANGELOG.md) | Version history |
+| [`docs/empezar/DEMO.md`](docs/empezar/DEMO.md) | Demo script |
 
 ---
 

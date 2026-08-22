@@ -23,7 +23,7 @@
 //
 // `vector` is the exception because memory-mapped segment files and the SIMD
 // dot products genuinely need it — 16 sites across four files, inventoried with
-// their justifications in `docs/SECURITY.md`. Marking the exception explicitly
+// their justifications in `docs/operar/SECURITY.md`. Marking the exception explicitly
 // is the point: an `unsafe` block appearing anywhere else is a compile error,
 // not a review comment somebody might miss.
 //

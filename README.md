@@ -222,7 +222,7 @@ store.add_texts(["...", "..."])
 docs = store.max_marginal_relevance_search("mi pregunta", k=4)
 ```
 
-Guía completa del SDK Python: [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md).
+Guía completa del SDK Python: [`docs/empezar/SDK_PYTHON.md`](docs/empezar/SDK_PYTHON.md).
 
 ---
 
@@ -255,7 +255,7 @@ Luma no es solo un motor vectorial — es una capa de servicios de plataforma. C
 
 Todas las primitivas comparten WAL segmentado con checksums, snapshots, respaldos, cifrado en reposo y el aislamiento multi-tenant por organización.
 
-> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md), con el plan de ejecución en [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — está **implementado y experimental**: ver [`docs/RESP.md`](docs/RESP.md) para la matriz de comandos y las divergencias. Cómo operarlo: [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md). Qué protegemos y de quién: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md), con el plan de ejecución en [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — está **implementado y experimental**: ver [`docs/integrar/RESP.md`](docs/integrar/RESP.md) para la matriz de comandos y las divergencias. Cómo operarlo: [`docs/operar/RUNBOOKS.md`](docs/operar/RUNBOOKS.md). Qué protegemos y de quién: [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md).
 
 ---
 
@@ -281,7 +281,7 @@ Tres titulares:
 
 > **Cómo leer la columna de recall:** el dataset son vectores aleatorios uniformes, sin estructura de clusters — un caso adversarial para cualquier ANN (incluso Qdrant se queda en 0.42). Esa columna mide el **punto de equilibrio velocidad↔precisión que cada motor elige de fábrica**, no la calidad absoluta del índice. Con embeddings reales todos los recalls suben. Comparar recalls entre motores solo tiene sentido a latencia equivalente.
 
-Metodología completa, curva de `ef`, la calibración de HNSW (3× throughput al mismo recall), la paralelización de ingesta (293 → 926 vec/s) y lo que aún va por detrás: **[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)**.
+Metodología completa, curva de `ef`, la calibración de HNSW (3× throughput al mismo recall), la paralelización de ingesta (293 → 926 vec/s) y lo que aún va por detrás: **[`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md)**.
 
 ---
 
@@ -351,7 +351,7 @@ Cada colección/documento/blob queda asociado a la organización que la creó (*
 - **Cifrado en reposo** de campos sensibles con **ChaCha20-Poly1305** (AEAD), clave maestra derivada de `LUMA_MASTER_KEY`. Ciphertext auto-descriptivo `enc:v1:<b64(nonce||ct)>`.
 - **Cabeceras de seguridad** en todas las respuestas: `Content-Security-Policy` estricta (sin `unsafe-inline` para scripts; jsdelivr permitido para la doc Scalar), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` y **HSTS**.
 
-Política de reporte de vulnerabilidades: [`SECURITY.md`](SECURITY.md). Modelo de amenazas: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). Inventario de `unsafe` (16 sitios, todos en el motor vectorial; el resto del crate lo prohíbe en tiempo de compilación): [`docs/SECURITY.md`](docs/SECURITY.md).
+Política de reporte de vulnerabilidades: [`SECURITY.md`](SECURITY.md). Modelo de amenazas: [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md). Inventario de `unsafe` (16 sitios, todos en el motor vectorial; el resto del crate lo prohíbe en tiempo de compilación): [`docs/operar/SECURITY.md`](docs/operar/SECURITY.md).
 
 ---
 
@@ -414,7 +414,7 @@ Capa de memoria completa para agentes autónomos (`src/memory/`), construida sob
 - `POST edges` · `GET edges/{memory_id}` · `POST edges/{edge_id}/delete`
 - `GET beliefs/{fact_key}/history` · `POST graph/centrality`
 
-Además: deduplicación de facts (cosine ≥ 0.95), decay exponencial opt-in (`memory_decay_enabled`) y detección de contradicciones (arista `Contradicts` si la similitud viejo↔nuevo < 0.55). Proveedores LLM: `none`, `mock`, `openai`, `ollama`. Ver [`docs/NS_MEM.md`](docs/NS_MEM.md).
+Además: deduplicación de facts (cosine ≥ 0.95), decay exponencial opt-in (`memory_decay_enabled`) y detección de contradicciones (arista `Contradicts` si la similitud viejo↔nuevo < 0.55). Proveedores LLM: `none`, `mock`, `openai`, `ollama`. Ver [`docs/integrar/NS_MEM.md`](docs/integrar/NS_MEM.md).
 
 ### Administración, auth y salud
 
@@ -427,7 +427,11 @@ Además: deduplicación de facts (cosine ≥ 0.95), decay exponencial opt-in (`m
 - **Operación**: `POST /v1/admin/backup` (dispara snapshot), `GET /v1/admin/audit` (log de acceso filtrable), `GET /v1/admin/stats`, `GET /v1/admin/audit-events` — requieren rol `admin`.
 - **Configuración en caliente**: `GET`/`PUT /v1/config`, `POST /v1/config/embedding/probe` (verifica que el proveedor de embeddings responde).
 
-Referencia completa: [`docs/API.md`](docs/API.md) y la spec OpenAPI en [`docs/openapi.yaml`](docs/openapi.yaml) (servida en `/docs`).
+Referencia completa: [`docs/integrar/API.md`](docs/integrar/API.md) y la spec OpenAPI en [`docs/openapi.yaml`](docs/openapi.yaml) (servida en `/docs`).
+
+**Toda la documentación, ordenada por lo que estés intentando hacer —
+empezar, operar, integrar, referencia — está en
+[`docs/README.md`](docs/README.md).**
 
 ---
 
@@ -471,7 +475,7 @@ Retry con backoff exponencial + jitter: `EMBEDDING_RETRY_ATTEMPTS` (default 3), 
 | Respaldos | `backup_enabled`, `backup_dir`, `backup_interval_secs`, `backup_retention` |
 | Operación | `rate_limit_rps` (0 = off), `rate_limit_burst`, `TLS_CERT_PATH`, `TLS_KEY_PATH`, `LIBSQL_URL` |
 
-Se puede leer y actualizar en caliente vía `GET`/`PUT /v1/config`. Detalle completo: [`docs/CONFIG.md`](docs/CONFIG.md).
+Se puede leer y actualizar en caliente vía `GET`/`PUT /v1/config`. Detalle completo: [`docs/operar/CONFIG.md`](docs/operar/CONFIG.md).
 
 ---
 
@@ -525,7 +529,7 @@ Notas de honestidad:
 - El backend remoto **libSQL/Turso** solo se activa si `LIBSQL_URL` está definido; de lo contrario se usa el SQLite local.
 - La durabilidad depende de montar un volumen persistente para `data_dir` cuando se corre en contenedor.
 - La **comparativa contra Qdrant/Milvus** se hizo con scripts ad-hoc que **no están versionados** en el repo: las cifras son las observadas, pero hoy no se reejecutan con un comando del repositorio. Los benchmarks *internos* (`src/bin/bench.rs`) sí son reproducibles.
-- La **compatibilidad con el protocolo Redis (RESP)** está implementada y marcada **experimental**: 57/57 comandos de las fases 2 y 3 del SPEC, verificados byte a byte contra un Redis 7 real (330 comandos, 0 divergencias) y con Celery, kombu, arq y redis-py reales — incluido un worker Celery que consume, ejecuta y devuelve el resultado. Sigue siendo experimental hasta que el nightly esté verde 7 días seguidos, que es el criterio del plan. Divergencias conocidas y qué **no** está: [`docs/RESP.md`](docs/RESP.md).
+- La **compatibilidad con el protocolo Redis (RESP)** está implementada y marcada **experimental**: 57/57 comandos de las fases 2 y 3 del SPEC, verificados byte a byte contra un Redis 7 real (330 comandos, 0 divergencias) y con Celery, kombu, arq y redis-py reales — incluido un worker Celery que consume, ejecuta y devuelve el resultado. Sigue siendo experimental hasta que el nightly esté verde 7 días seguidos, que es el criterio del plan. Divergencias conocidas y qué **no** está: [`docs/integrar/RESP.md`](docs/integrar/RESP.md).
 
 ---
 
@@ -535,25 +539,25 @@ Notas de honestidad:
 
 | Documento | Contenido |
 | :--- | :--- |
-| [`docs/API.md`](docs/API.md) | Referencia de endpoints |
+| [`docs/integrar/API.md`](docs/integrar/API.md) | Referencia de endpoints |
 | [`docs/openapi.yaml`](docs/openapi.yaml) | Spec OpenAPI (servida en `/docs`) |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Arquitectura interna |
-| [`docs/CONFIG.md`](docs/CONFIG.md) | Todas las claves de configuración |
-| [`docs/CLI.md`](docs/CLI.md) | Subcomandos del binario |
-| [`docs/DATA_MODELS.md`](docs/DATA_MODELS.md) | Modelos de datos y esquemas |
-| [`docs/VECTOR_STORAGE.md`](docs/VECTOR_STORAGE.md) | Segmentos, mmap, cuantización |
-| [`docs/RESP.md`](docs/RESP.md) | Compatibilidad con el protocolo de Redis: comandos, divergencias y cómo validarla |
-| [`docs/NS_MEM.md`](docs/NS_MEM.md) | Memoria de agentes (API completa) |
-| [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) | Guía del SDK Python |
-| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Comparativa vs Qdrant/Milvus + benchmarks internos |
-| [`docs/BENCH.md`](docs/BENCH.md) | Cómo correr el binario de bench |
-| [`docs/FEATURES.md`](docs/FEATURES.md) | Inventario de funcionalidades |
-| [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Seguridad y modelo de amenazas |
-| [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) | Checklist de producción |
+| [`docs/referencia/ARCHITECTURE.md`](docs/referencia/ARCHITECTURE.md) | Arquitectura interna |
+| [`docs/operar/CONFIG.md`](docs/operar/CONFIG.md) | Todas las claves de configuración |
+| [`docs/operar/CLI.md`](docs/operar/CLI.md) | Subcomandos del binario |
+| [`docs/referencia/DATA_MODELS.md`](docs/referencia/DATA_MODELS.md) | Modelos de datos y esquemas |
+| [`docs/referencia/VECTOR_STORAGE.md`](docs/referencia/VECTOR_STORAGE.md) | Segmentos, mmap, cuantización |
+| [`docs/integrar/RESP.md`](docs/integrar/RESP.md) | Compatibilidad con el protocolo de Redis: comandos, divergencias y cómo validarla |
+| [`docs/integrar/NS_MEM.md`](docs/integrar/NS_MEM.md) | Memoria de agentes (API completa) |
+| [`docs/empezar/SDK_PYTHON.md`](docs/empezar/SDK_PYTHON.md) | Guía del SDK Python |
+| [`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md) | Comparativa vs Qdrant/Milvus + benchmarks internos |
+| [`docs/referencia/BENCH.md`](docs/referencia/BENCH.md) | Cómo correr el binario de bench |
+| [`docs/empezar/FEATURES.md`](docs/empezar/FEATURES.md) | Inventario de funcionalidades |
+| [`docs/operar/SECURITY.md`](docs/operar/SECURITY.md) · [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md) | Seguridad y modelo de amenazas |
+| [`docs/operar/PROD_READINESS.md`](docs/operar/PROD_READINESS.md) | Checklist de producción |
 | [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md) | **Plan de ejecución unificado** (bloques, orden, estado) |
 | [`docs/SPEC-producto.md`](docs/SPEC-producto.md) · [`docs/SPEC-resp.md`](docs/SPEC-resp.md) · [`docs/SPEC-roadmap.md`](docs/SPEC-roadmap.md) | SPEC de origen (detalle y criterios de aceptación) |
-| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Historial de versiones |
-| [`docs/DEMO.md`](docs/DEMO.md) | Guion de demo |
+| [`docs/referencia/CHANGELOG.md`](docs/referencia/CHANGELOG.md) | Historial de versiones |
+| [`docs/empezar/DEMO.md`](docs/empezar/DEMO.md) | Guion de demo |
 
 ---
 

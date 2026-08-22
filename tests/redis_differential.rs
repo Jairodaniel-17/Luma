@@ -30,7 +30,7 @@
 //! smooth over a malformed reply, which is one of the things this is looking
 //! for. Three comparisons are deliberately looser, each for a stated reason:
 //! unordered collections, error text beyond the leading token, and the cases
-//! `docs/RESP.md` records as accepted divergences.
+//! `docs/integrar/RESP.md` records as accepted divergences.
 
 use luma::config::Config;
 use luma::engine::Engine;
@@ -412,7 +412,7 @@ fn corpus() -> Vec<Case> {
         exact(&["SREM", "S", "a"]),
         exact(&["SREM", "S", "a"]),
         // SPOP/SRANDMEMBER pick at random in Redis and in stored order here —
-        // a divergence recorded in docs/RESP.md — so only the empty cases,
+        // a divergence recorded in docs/integrar/RESP.md — so only the empty cases,
         // where there is nothing to choose between, are comparable.
         exact(&["SPOP", "missing"]),
         exact(&["SPOP", "missing", "2"]),
@@ -625,7 +625,7 @@ fn corpus() -> Vec<Case> {
         // Redis queues it and `EXEC` runs it, which puts that connection into
         // subscriber mode while Luma's stays out — and from there every
         // subsequent command diverges for a reason already recorded in
-        // docs/RESP.md (Luma accepts the full command set while subscribed).
+        // docs/integrar/RESP.md (Luma accepts the full command set while subscribed).
         // Comparing it here would report one documented divergence as a dozen.
         // Luma's own behaviour is pinned in `resp::commands`.
         exact(&["PUBLISH", "nobody-listening", "x"]),

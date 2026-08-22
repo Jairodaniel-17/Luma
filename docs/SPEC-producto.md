@@ -99,7 +99,7 @@ Es el mismo harness que exige SPEC-resp F0.2 — se construye una vez.
 **Enfoque:** auditar `wal_sync_mode` (always/group) extremo a extremo; las
 colas escriben archivos JSON por mensaje — garantizar fsync del archivo y del
 directorio en enqueue confirmado; blob igual (write + rename atómico + fsync).
-**Aceptación:** tabla en `docs/PROD_READINESS.md`: primitiva → cuándo devuelve
+**Aceptación:** tabla en `docs/operar/PROD_READINESS.md`: primitiva → cuándo devuelve
 OK → qué garantiza en disco. Test de corte de energía simulado (dm-flakey o
 kill de contenedor) para colas y blob.
 
@@ -248,7 +248,7 @@ consumo/límite por primitiva.
 **Objetivo:** números de capacidad honestos por primitiva (no solo vector).
 **Enfoque:** harness de carga (goose o k6) por motor: KV ops/s, enqueue/dequeue
 sostenido 1 h, blob MB/s, SSE con 5k suscriptores; medir en el perfil de
-máquina objetivo (VM 2 vCPU/8 GB tipo OCI) y publicar en `docs/BENCHMARKS.md`
+máquina objetivo (VM 2 vCPU/8 GB tipo OCI) y publicar en `docs/referencia/BENCHMARKS.md`
 con la misma honestidad que el benchmark vectorial (incluye dónde pierde).
 **Aceptación:** tabla de capacidad por primitiva con la máquina especificada;
 regresión de rendimiento >15 % rompe el nightly.

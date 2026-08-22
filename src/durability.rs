@@ -7,7 +7,7 @@
 //! getting them right differs per platform, so the knowledge lives here once
 //! rather than in each caller.
 //!
-//! See `docs/PROD_READINESS.md` for what each primitive guarantees when it
+//! See `docs/operar/PROD_READINESS.md` for what each primitive guarantees when it
 //! returns OK.
 
 use std::io;

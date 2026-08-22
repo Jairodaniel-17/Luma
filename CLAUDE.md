@@ -53,7 +53,7 @@ The system has three API levels:
 - **procedural**: DAG-based procedures with typed edges and constraint evaluation → SQLite (`procedures`, `proc_nodes`, `proc_edges`, `proc_constraints`).
 - **working**: ephemeral session context → KV store with TTL.
 
-Consolidation pipeline: `ingest_event` → LLM (or local heuristic) extracts `FactCandidate` → persisted as `semantic` (`active` if confidence ≥ threshold, else `draft`). Automatically creates a `TriggeredBy` edge (episodic → semantic). LLM providers: `none`, `mock`, `openai`, `ollama`. See `docs/NS_MEM.md` for full API reference.
+Consolidation pipeline: `ingest_event` → LLM (or local heuristic) extracts `FactCandidate` → persisted as `semantic` (`active` if confidence ≥ threshold, else `draft`). Automatically creates a `TriggeredBy` edge (episodic → semantic). LLM providers: `none`, `mock`, `openai`, `ollama`. See `docs/integrar/NS_MEM.md` for full API reference.
 
 **`src/memory/graph.rs`** — `GraphService`: typed edge CRUD (`memory_edges` table), semantic walk BFS, simplified PageRank (15 iter, damping 0.85), belief versioning (`memory_history` table).
 
@@ -208,7 +208,7 @@ Capa empresarial **aditiva** sobre el core existente (API keys/RBAC/audit ya pre
 - Reviewed the PR1-PR8 series against code and tests, identified blocking issues in planner, batching, compaction, metrics, and release gates.
 - Hardened WAL replay with checksummed envelopes, corruption stop-at-tail semantics, and idempotent recovery paths for `state_db` plus vector replay.
 - Added range scans for KV (`start`/`end` end-exclusive), cached metrics rendering off the scrape path, and explicit SSE gap signaling when requested offsets are no longer retained.
-- Implemented NS-Mem (`src/memory/`): episodic/semantic/procedural/working memory layer with consolidation pipeline, LLM fact extraction, DAG procedure engine with constraint evaluation, and REST API at `/v1/memory/{namespace}/`. Full docs in `docs/NS_MEM.md`.
+- Implemented NS-Mem (`src/memory/`): episodic/semantic/procedural/working memory layer with consolidation pipeline, LLM fact extraction, DAG procedure engine with constraint evaluation, and REST API at `/v1/memory/{namespace}/`. Full docs in `docs/integrar/NS_MEM.md`.
 
 ## graphify
 

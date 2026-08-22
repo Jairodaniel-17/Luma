@@ -220,7 +220,7 @@ Una conexión en modo suscriptor solo acepta el subconjunto que Redis permite.
   corriendo contra Luma en CI.
 - `tests/resp/e2e_celery/`: tarea Celery round-trip + revoke + restore de
   unacked tras matar el worker.
-- Ambos con versiones fijadas y matriz documentada en `docs/RESP.md`.
+- Ambos con versiones fijadas y matriz documentada en `docs/integrar/RESP.md`.
 
 ---
 
@@ -240,7 +240,7 @@ muestra conexiones RESP activas por org y comandos/s.
 **Aceptación:** backup→restore→suite diferencial verde sobre datos restaurados.
 
 ### 4.3 `[ ]` Documentación y matriz de compatibilidad  · impacto ALTO · esfuerzo BAJO
-`docs/RESP.md`: comandos soportados (tabla completa con notas de divergencia),
+`docs/integrar/RESP.md`: comandos soportados (tabla completa con notas de divergencia),
 guía "migrar de Redis a Luma en 5 minutos" (Celery, arq, redis-py, ioredis),
 qué NO soporta y por qué. README enlaza la matriz.
 **Aceptación:** un dev externo configura Celery contra Luma solo con el doc.
@@ -249,7 +249,7 @@ qué NO soporta y por qué. README enlaza la matriz.
 `redis-benchmark` (SET/GET/LPUSH/ZADD, pipelining on/off) Luma vs Redis 7 en la
 misma máquina, mismo formato que los benchmarks vectoriales del README:
 tablas medidas, sin cifras vagas, publicando también donde Redis gana.
-**Aceptación:** sección en `docs/BENCHMARKS.md` + resumen en README.
+**Aceptación:** sección en `docs/referencia/BENCHMARKS.md` + resumen en README.
 
 ### 4.5 `[ ]` Pruebas de resiliencia continuas  · impacto ALTO · esfuerzo MEDIO
 Harness permanente en CI: crash-recovery matrix (kill -9 durante escritura de

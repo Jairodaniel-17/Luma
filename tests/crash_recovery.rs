@@ -1,7 +1,7 @@
 //! W1.1 — crash-recovery matrix.
 //!
 //! The claim this exists to *demonstrate* rather than assert: **a write Luma has
-//! confirmed to a caller survives a hard kill.** `docs/PROD_READINESS.md`
+//! confirmed to a caller survives a hard kill.** `docs/operar/PROD_READINESS.md`
 //! describes what each primitive syncs; this file proves it by killing the real
 //! server binary mid-write and checking what came back.
 //!

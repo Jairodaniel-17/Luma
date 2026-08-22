@@ -758,7 +758,7 @@ impl Structure {
     /// `SPOP count`: remove and return up to `count` members.
     ///
     /// Redis picks at random; this takes them in the set's stored order. See
-    /// `docs/RESP.md` — the divergence is deliberate and documented, because
+    /// `docs/integrar/RESP.md` — the divergence is deliberate and documented, because
     /// every real use of `SPOP` is "give me any member" and a deterministic
     /// answer is testable.
     pub fn spop(&mut self, count: usize) -> Result<Vec<Bytes>, StructureError> {

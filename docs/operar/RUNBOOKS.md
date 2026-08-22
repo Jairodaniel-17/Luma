@@ -23,7 +23,7 @@ momento.
 | Réplica de lectura | Verificada en tests; promoción manual |
 | Failover automático | **No existe.** W2.3 en el plan |
 | Fencing por epoch contra split-brain | Implementado. Ventana de un intervalo de envío, ver §3 |
-| Puerto RESP | Experimental. Ver `docs/RESP.md` |
+| Puerto RESP | Experimental. Ver `docs/integrar/RESP.md` |
 
 ---
 

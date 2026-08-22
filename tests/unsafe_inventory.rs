@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 const EXCEPTIONS: &[(&str, &str)] = &[(
     "vector",
     "memory-mapped segment files and the SIMD dot products; 16 sites across \
-     four files, inventoried in docs/SECURITY.md",
+     four files, inventoried in docs/operar/SECURITY.md",
 )];
 
 fn repo(relative: &str) -> PathBuf {
