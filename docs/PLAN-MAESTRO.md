@@ -108,7 +108,7 @@ frentes a la vez y no cerrar ninguno.
 | 2 | ✅ Cimientos del motor RESP | `v4.27.0` | F0.1 `StoredVal`, F0.2 estructuras, F0.3 notificadores | **XL** |
 | 3 | ✅ RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
 | 4 | ✅ Listener RESP + strings/keys | `v4.29.0` | F1.1–F1.4 + **F4.1** (ver D-1) | L |
-| 5 | Estructuras por RESP | `v4.30.0` | F2.1 listas, F2.2 hashes, F2.3 sets, F2.4 zsets | L |
+| 5 | ✅ Estructuras por RESP | `v4.30.0` | F2.1 listas, F2.2 hashes, F2.3 sets, F2.4 zsets | L |
 | 6 | **Celery y arq funcionando** | `v4.31.0` | F3.1 bloqueantes, F3.2 MULTI/WATCH, F3.3 Pub/Sub, F3.4 E2E + **F4.3** (ver D-2) | L |
 | 7 | Operar con vista | `v4.32.0` | W5.1 métricas/OTel, W2.2 réplica de lectura | L |
 | 8 | RESP endurecido | `v4.33.0` | F4.2 backup+panel, F4.5 nightly de resiliencia | M |
@@ -283,7 +283,7 @@ smoke de redis-py.
 Exponer por protocolo lo que el Bloque 2 ya implementó. Riesgo bajo de diseño,
 alto de detalle.
 
-- `[ ]` **F2.1 listas** · `[ ]` **F2.2 hashes** · `[ ]` **F2.3 sets** ·
+- `[x]` **F2.1 listas** · `[ ]` **F2.2 hashes** · `[ ]` **F2.3 sets** ·
   `[ ]` **F2.4 sorted sets** (los comandos exactos, en `SPEC-resp.md`).
 
 Las dos trampas que la aceptación tiene que cazar explícitamente: **nil vs

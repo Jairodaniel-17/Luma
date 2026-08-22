@@ -157,9 +157,17 @@ pub fn dispatch(
         "RANDOMKEY" => Dispatch::Reply(randomkey(engine, session)),
         "FLUSHDB" | "FLUSHALL" => Dispatch::Reply(flushdb(engine, session, allow_flush)),
 
-        other => Dispatch::Reply(err(format!(
-            "ERR unknown command '{other}', with args beginning with: "
-        ))),
+        other => {
+            // Structure commands live in their own module; they are tried
+            // before reporting an unknown command so the two sets stay
+            // independent without a second dispatch table to keep in sync.
+            match crate::resp::structures_cmd::dispatch(engine, session, other, rest) {
+                Some(reply) => Dispatch::Reply(reply),
+                None => Dispatch::Reply(err(format!(
+                    "ERR unknown command '{other}', with args beginning with: "
+                ))),
+            }
+        }
     }
 }
 

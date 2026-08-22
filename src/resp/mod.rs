@@ -11,3 +11,4 @@
 pub mod commands;
 pub mod listener;
 pub mod protocol;
+pub mod structures_cmd;
