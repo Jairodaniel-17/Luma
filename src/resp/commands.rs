@@ -365,6 +365,10 @@ pub fn dispatch(
     // A trait object rather than `impl Fn`: `exec` calls back into
     // dispatch, and a generic parameter would monomorphize `&&&&...` forever.
     authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
+    // The Pub/Sub broker, when the caller has one. Only `EXEC` needs it: a
+    // `PUBLISH` queued inside `MULTI` has to be delivered from here, because
+    // the connection loop never sees the queued commands.
+    pubsub: Option<&crate::resp::pubsub::PubSub>,
     allow_flush: bool,
 ) -> Dispatch {
     let Some(first) = args.first() else {
@@ -466,7 +470,7 @@ pub fn dispatch(
             session.queue_error = false;
             Value::ok()
         }),
-        "EXEC" => Dispatch::Reply(exec(engine, session, authenticate, allow_flush)),
+        "EXEC" => Dispatch::Reply(exec(engine, session, authenticate, pubsub, allow_flush)),
         "DISCARD" => Dispatch::Reply(discard(session)),
         "WATCH" => Dispatch::Reply(watch(engine, session, rest)),
         "UNWATCH" => {
@@ -1583,6 +1587,7 @@ fn exec(
     engine: &Engine,
     session: &mut Session,
     authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
+    pubsub: Option<&crate::resp::pubsub::PubSub>,
     allow_flush: bool,
 ) -> Value {
     let Some(queued) = session.queued.take() else {
@@ -1609,7 +1614,7 @@ fn exec(
 
     let mut replies = Vec::with_capacity(queued.len());
     for args in queued {
-        match dispatch(engine, session, &args, authenticate, allow_flush) {
+        match dispatch(engine, session, &args, authenticate, pubsub, allow_flush) {
             Dispatch::Reply(value) => replies.push(value),
             // QUIT is in TRANSACTION_CONTROL so it never reaches the queue;
             // treating it as a reply keeps this total without a panic.
@@ -1619,11 +1624,56 @@ fn exec(
                 // with a zero timeout, so it behaves as its non-blocking twin.
                 replies.push(Value::Array(None));
             }
-            // Pub/Sub needs the connection's inbox, which EXEC does not have.
-            // Redis likewise refuses subscribe commands inside a transaction.
-            Dispatch::PubSub(_) => replies.push(Value::Error(
-                "ERR SUBSCRIBE is not allowed in transactions".into(),
-            )),
+            // Redis allows `PUBLISH` and the `PUBSUB` queries inside a
+            // transaction and refuses only the subscribe family, which would
+            // change the connection's mode mid-transaction.
+            //
+            // Refusing `PUBLISH` here is what made a real Celery worker hang:
+            // its result backend writes the result with a pipelined
+            // `SETEX` + `PUBLISH`, redis-py wraps a pipeline in MULTI/EXEC, and
+            // the rejected PUBLISH meant the result was never stored. The task
+            // ran and the caller waited forever.
+            Dispatch::PubSub(command) => replies.push(match (command, pubsub) {
+                (PubSubCommand::Publish { channel, payload }, Some(broker)) => {
+                    let delivered = broker.publish(session.tenant.as_deref(), &channel, &payload);
+                    Value::Integer(delivered as i64)
+                }
+                (PubSubCommand::Channels(pattern), Some(broker)) => Value::Array(Some(
+                    broker
+                        .channels(session.tenant.as_deref(), pattern.as_deref())
+                        .into_iter()
+                        .map(Value::bulk)
+                        .collect(),
+                )),
+                (PubSubCommand::NumSub(channels), Some(broker)) => Value::Array(Some(
+                    channels
+                        .iter()
+                        .flat_map(|channel| {
+                            let count = broker.subscriber_count(session.tenant.as_deref(), channel);
+                            [Value::bulk(channel.clone()), Value::Integer(count as i64)]
+                        })
+                        .collect(),
+                )),
+                // Subscribing needs the connection's subscriber inbox, which
+                // `EXEC` does not have.
+                //
+                // A divergence, and a deliberate one: Redis *does* queue
+                // `SUBSCRIBE` and run it at `EXEC`, putting the connection into
+                // subscriber mode. Recorded in docs/RESP.md. The comment here
+                // used to claim Redis refused it too, which the differential
+                // suite disproved -- an assumption stated as a fact about
+                // someone else's software.
+                (
+                    PubSubCommand::Subscribe(_)
+                    | PubSubCommand::PSubscribe(_)
+                    | PubSubCommand::Unsubscribe(_)
+                    | PubSubCommand::PUnsubscribe(_),
+                    _,
+                ) => Value::Error("ERR SUBSCRIBE is not allowed in transactions".into()),
+                // No broker: only reachable from a caller that has none, which
+                // in practice is a unit test.
+                (_, None) => Value::Error("ERR Pub/Sub is unavailable on this connection".into()),
+            }),
         }
     }
     Value::Array(Some(replies))
@@ -1764,6 +1814,12 @@ fn is_unknown_command(name: &str) -> bool {
         "ZRANGE",
         "ZRANGEBYSCORE",
         "ZRANK",
+        "PUBLISH",
+        "SUBSCRIBE",
+        "PSUBSCRIBE",
+        "UNSUBSCRIBE",
+        "PUNSUBSCRIBE",
+        "PUBSUB",
         "ZREVRANGE",
         "LPUSHX",
         "RPUSHX",
@@ -1818,7 +1874,7 @@ mod tests {
 
     fn run(engine: &Engine, session: &mut Session, argv: &[&str]) -> Value {
         let args: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
-        match dispatch(engine, session, &args, &allow_all, true) {
+        match dispatch(engine, session, &args, &allow_all, None, true) {
             Dispatch::Reply(value) => value,
             Dispatch::Quit => Value::Simple("QUIT".into()),
             // The test helper is synchronous; a blocking command is reported
@@ -1939,7 +1995,7 @@ mod tests {
         let (e, _d) = engine();
         let mut s = Session::new(true);
         let args = vec![b"AUTH".to_vec(), b"wrong".to_vec()];
-        let reply = match dispatch(&e, &mut s, &args, &|_, _| None, true) {
+        let reply = match dispatch(&e, &mut s, &args, &|_, _| None, None, true) {
             Dispatch::Reply(v) => v,
             Dispatch::Quit => panic!(),
             Dispatch::Block { .. } => panic!("unexpected block"),
@@ -1993,7 +2049,7 @@ mod tests {
             b"bin".to_vec(),
             vec![0x80, 0x04, 0x00, 0xFF],
         ];
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, true) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, None, true) else {
             panic!()
         };
         assert_eq!(reply, Value::ok());
@@ -2238,7 +2294,7 @@ mod tests {
         let mut s = Session::new(false);
         let args = vec![b"QUIT".to_vec()];
         assert!(matches!(
-            dispatch(&e, &mut s, &args, &allow_all, true),
+            dispatch(&e, &mut s, &args, &allow_all, None, true),
             Dispatch::Quit
         ));
     }
@@ -2427,13 +2483,13 @@ mod tests {
         run(&e, &mut s, &["SET", "k", "v"]);
 
         let args = vec![b"FLUSHDB".to_vec()];
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, false) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, None, false) else {
             panic!()
         };
         assert!(matches!(reply, Value::Error(m) if m.contains("disabled")));
         assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::bulk("v"));
 
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, true) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, None, true) else {
             panic!()
         };
         assert_eq!(reply, Value::ok());
@@ -2451,7 +2507,7 @@ mod tests {
         run(&e, &mut globex, &["SET", "k", "globex"]);
 
         let args = vec![b"FLUSHDB".to_vec()];
-        let _ = dispatch(&e, &mut acme, &args, &allow_all, true);
+        let _ = dispatch(&e, &mut acme, &args, &allow_all, None, true);
 
         assert_eq!(run(&e, &mut acme, &["GET", "k"]), Value::nil());
         assert_eq!(
@@ -2802,7 +2858,7 @@ mod tests {
             .iter()
             .map(|a| a.as_bytes().to_vec())
             .collect();
-        match dispatch(&e, &mut s, &args, &allow_all, true) {
+        match dispatch(&e, &mut s, &args, &allow_all, None, true) {
             Dispatch::Block {
                 keys,
                 timeout,
@@ -2823,7 +2879,7 @@ mod tests {
             .iter()
             .map(|a| a.as_bytes().to_vec())
             .collect();
-        match dispatch(&e, &mut s, &args, &allow_all, true) {
+        match dispatch(&e, &mut s, &args, &allow_all, None, true) {
             Dispatch::Block { timeout, kind, .. } => {
                 assert_eq!(timeout, Some(std::time::Duration::from_millis(250)));
                 assert!(
@@ -2907,6 +2963,79 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&body).contains("db0:keys=1"),
             "globex must see only its own key"
+        );
+    }
+
+    #[test]
+    fn publish_inside_multi_is_executed_not_refused() {
+        // redis-py wraps every pipeline in MULTI/EXEC, and Celery's result
+        // backend writes its result with a pipelined SETEX + PUBLISH. Refusing
+        // the PUBLISH made a real worker execute the task and then hang forever
+        // waiting for a result that was never stored, because the whole
+        // transaction failed.
+        use crate::resp::pubsub::PubSub;
+        let (e, _d, mut s) = open();
+        let broker = PubSub::new();
+        let subscriber = broker.register(16);
+        broker.subscribe(subscriber.id, None, b"celery-task-meta-x");
+
+        for argv in [
+            vec!["MULTI"],
+            vec!["SETEX", "celery-task-meta-x", "60", "payload"],
+            vec!["PUBLISH", "celery-task-meta-x", "payload"],
+        ] {
+            let args: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
+            let _ = dispatch(&e, &mut s, &args, &allow_all, Some(&broker), true);
+        }
+        let args = vec![b"EXEC".to_vec()];
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, Some(&broker), true)
+        else {
+            panic!("EXEC must reply");
+        };
+        match reply {
+            Value::Array(Some(items)) => {
+                assert_eq!(items.len(), 2, "one reply per queued command: {items:?}");
+                assert_eq!(items[0], Value::ok(), "the SETEX must have run");
+                assert_eq!(
+                    items[1],
+                    Value::Integer(1),
+                    "the PUBLISH must have run and reached the subscriber"
+                );
+            }
+            other => panic!("expected an array of replies, got {other:?}"),
+        }
+        // And the value really is stored, which is what the caller reads.
+        let args: Vec<Vec<u8>> = ["GET", "celery-task-meta-x"]
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect();
+        let Dispatch::Reply(value) = dispatch(&e, &mut s, &args, &allow_all, Some(&broker), true)
+        else {
+            panic!("GET must reply");
+        };
+        assert_eq!(value, Value::bulk("payload"));
+    }
+
+    #[test]
+    fn subscribe_inside_multi_is_refused_and_says_so() {
+        // A divergence from Redis, which queues it and enters subscriber mode at
+        // EXEC. Refusing is not silent: the client gets an error rather than a
+        // connection that quietly did not subscribe.
+        let (e, _d, mut s) = open();
+        for argv in [vec!["MULTI"], vec!["SUBSCRIBE", "ch"]] {
+            let args: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
+            let _ = dispatch(&e, &mut s, &args, &allow_all, None, true);
+        }
+        let args = vec![b"EXEC".to_vec()];
+        let Dispatch::Reply(Value::Array(Some(items))) =
+            dispatch(&e, &mut s, &args, &allow_all, None, true)
+        else {
+            panic!("EXEC must reply with an array");
+        };
+        assert!(
+            matches!(&items[0], Value::Error(m) if m.contains("not allowed in transactions")),
+            "got {:?}",
+            items[0]
         );
     }
 }

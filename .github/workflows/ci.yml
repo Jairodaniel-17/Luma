@@ -113,9 +113,66 @@ jobs:
         # The test asserts the variable is set, so a service that failed to
         # start fails the job instead of skipping silently.
         run: cargo test --test redis_differential --locked -- --ignored
+  client-e2e:
+    name: Celery / arq / redis-py E2E
+    runs-on: ubuntu-latest
+    # The adoption milestone of docs/PLAN-MAESTRO.md (F3.4). Everything else
+    # verifies RESP against tests we wrote, which encode our understanding of
+    # Redis; this runs the libraries a user would actually install. Its first
+    # run found that a PUBLISH queued inside MULTI was rejected, which made a
+    # real Celery worker execute a task and then hang forever.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the real clients
+        run: pip install redis celery arq
+      - name: Build Luma
+        run: cargo build --release --locked
+      - name: Start Luma with the RESP listener
+        run: |
+          mkdir -p e2e-data
+          cat > luma.toml <<'EOF'
+          port = 18080
+          bind_addr = "127.0.0.1"
+          data_dir = "e2e-data"
+          resp_port = 16380
+          resp_allow_flush = true
+          embedding_provider = "mock"
+          EOF
+          # No password: the harness sends the same commands to both peers,
+          # and an AUTH that only one of them needs is not the same command.
+          LUMA_API_KEY= LUMA_ALLOW_INSECURE=1 LUMA_MASTER_KEY=ci-e2e-key \
+            ./target/release/luma serve > luma.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/16380) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo 'the RESP port never opened'; cat luma.log; exit 1
+      - name: Run the client suite
+        run: |
+          python tests/e2e/clients.py \
+            --redis redis://127.0.0.1:16379/0 \
+            --luma redis://127.0.0.1:16380/0
+      - name: Server log on failure
+        if: failure()
+        run: cat luma.log
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential]
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e]
     runs-on: ubuntu-latest
     if: always()
     steps:

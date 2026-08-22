@@ -385,6 +385,7 @@ async fn serve_inner(
                         &mut session,
                         &args,
                         &|_user, _given| resolved.clone(),
+                        Some(server.pubsub.as_ref()),
                         server.allow_flush,
                     );
 

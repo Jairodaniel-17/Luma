@@ -592,6 +592,52 @@ fn corpus() -> Vec<Case> {
         token(&["GETDEL", "lst"]),
     ]);
 
+    // ── transactions ────────────────────────────────────────────────────────
+    //
+    // This whole group was missing, and its absence let a real bug through: a
+    // `PUBLISH` queued inside `MULTI` was rejected as an unknown command, which
+    // is exactly what a redis-py pipeline sends. Celery's result backend writes
+    // its result with a pipelined `SETEX` + `PUBLISH`, so a real worker executed
+    // the task and then hung forever waiting for a result that was never stored.
+    c.extend([
+        exact(&["FLUSHALL"]),
+        exact(&["MULTI"]),
+        exact(&["SET", "tx", "1"]),
+        exact(&["INCR", "tx"]),
+        exact(&["EXEC"]),
+        exact(&["GET", "tx"]),
+        // A transaction that queues nothing still runs.
+        exact(&["MULTI"]),
+        exact(&["EXEC"]),
+        exact(&["MULTI"]),
+        exact(&["SET", "tx", "9"]),
+        exact(&["DISCARD"]),
+        exact(&["GET", "tx"]),
+        token(&["EXEC"]),
+        token(&["DISCARD"]),
+        // The shape redis-py's pipeline sends, and the one Celery depends on.
+        exact(&["MULTI"]),
+        exact(&["SETEX", "celery-task-meta-x", "60", "payload"]),
+        exact(&["PUBLISH", "celery-task-meta-x", "payload"]),
+        exact(&["EXEC"]),
+        exact(&["GET", "celery-task-meta-x"]),
+        // `SUBSCRIBE` inside `MULTI` is deliberately *not* in this corpus.
+        // Redis queues it and `EXEC` runs it, which puts that connection into
+        // subscriber mode while Luma's stays out — and from there every
+        // subsequent command diverges for a reason already recorded in
+        // docs/RESP.md (Luma accepts the full command set while subscribed).
+        // Comparing it here would report one documented divergence as a dozen.
+        // Luma's own behaviour is pinned in `resp::commands`.
+        exact(&["PUBLISH", "nobody-listening", "x"]),
+        // WATCH aborts the transaction when the key moved underneath it.
+        exact(&["SET", "guarded", "1"]),
+        exact(&["WATCH", "guarded"]),
+        exact(&["MULTI"]),
+        exact(&["GET", "guarded"]),
+        exact(&["EXEC"]),
+        exact(&["UNWATCH"]),
+    ]);
+
     // ── arity and syntax, which Redis reports *before* a type conflict ──────
     c.extend([
         token(&["GET"]),

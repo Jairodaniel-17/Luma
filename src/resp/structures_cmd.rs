@@ -1593,6 +1593,7 @@ mod tests {
             session,
             &args,
             &|_, _| Some(Default::default()),
+            None,
             true,
         ) {
             Dispatch::Reply(value) => value,
@@ -1945,9 +1946,14 @@ mod tests {
         let (e, _d, mut s) = open();
         let payload = vec![0x80u8, 0x04, 0x00, 0xFF];
         let args = vec![b"RPUSH".to_vec(), b"q".to_vec(), payload.clone()];
-        let Dispatch::Reply(_) =
-            command_dispatch(&e, &mut s, &args, &|_, _| Some(Default::default()), true)
-        else {
+        let Dispatch::Reply(_) = command_dispatch(
+            &e,
+            &mut s,
+            &args,
+            &|_, _| Some(Default::default()),
+            None,
+            true,
+        ) else {
             panic!()
         };
         let Value::Array(Some(items)) = run(&e, &mut s, &["LRANGE", "q", "0", "-1"]) else {

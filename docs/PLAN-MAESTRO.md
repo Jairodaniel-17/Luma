@@ -325,9 +325,22 @@ ampliada a estructuras.
 - `[x]` **F3.3 — Pub/Sub** sobre el `EventBus` existente, canal interno
   `resp:{org}:{canal}`. `PUBLISH` devuelve receptores **del tenant**, no
   globales.
-- `[ ]` **F3.4 — E2E de los clientes objetivo.** `tests/resp/e2e_arq/` y
-  `tests/resp/e2e_celery/` con versiones fijadas, en CI. Celery incluye revoke
-  y restore de unacked tras matar el worker.
+- `[~]` **F3.4 - E2E de los clientes objetivo** (hecho salvo el escenario de
+  revoke/restore de unacked). `tests/e2e/clients.py` corre redis-py, kombu,
+  Celery y arq reales contra Luma y contra un Redis 7 de control, con un
+  **worker Celery de verdad** que consume, ejecuta y devuelve el resultado.
+  Job `client-e2e` en CI.
+
+  Encontro en su primera ejecucion que `PUBLISH` dentro de `MULTI` se
+  rechazaba como comando desconocido: redis-py envuelve todo pipeline en
+  MULTI/EXEC y el backend de resultados de Celery escribe con `SETEX` +
+  `PUBLISH`, asi que el worker ejecutaba la tarea y el llamante esperaba para
+  siempre. Ni los tests unitarios ni el corpus diferencial cubrian una
+  transaccion.
+
+  Pendiente: matar el worker a media tarea y comprobar que la cola de unacked
+  se restaura. Es el escenario que la no-atomicidad de `BRPOPLPUSH` pone en
+  duda, asi que conviene hacerlo **despues** de cerrar esa ventana.
 - `[x]` **F4.3 — `docs/RESP.md`** (adelantado, ver D-2): tabla de comandos con
   notas de divergencia, guía "migrar de Redis a Luma en 5 minutos" para Celery,
   arq, redis-py e ioredis, y qué NO se soporta y por qué. README enlaza.

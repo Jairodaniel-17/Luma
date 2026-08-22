@@ -151,6 +151,37 @@ Ahora es un solo keyspace con un tipo por clave, igual que Redis. El
 almacenamiento sigue usando dos ranuras — eso es detalle de implementación;
 dos keyspaces era otra base de datos.
 
+### Clientes reales verificados
+
+`tests/e2e/clients.py` corre las librerías que un usuario instalaría —
+**redis-py, kombu, Celery y arq** — contra Luma y contra un Redis 7 de control.
+Incluye un **worker Celery de verdad** que consume la tarea, la ejecuta y
+devuelve el resultado al llamante; no basta con que el broker acepte el
+mensaje.
+
+```bash
+pip install redis celery arq
+python tests/e2e/clients.py \
+  --redis redis://127.0.0.1:16379/0 \
+  --luma  redis://127.0.0.1:16380/0
+```
+
+Su primera ejecución encontró que **`PUBLISH` dentro de `MULTI` se rechazaba**
+como comando desconocido. redis-py envuelve todo pipeline en `MULTI`/`EXEC` y
+el backend de resultados de Celery escribe el resultado con un `SETEX` +
+`PUBLISH` en pipeline: el worker consumía la tarea, la ejecutaba, y el llamante
+esperaba para siempre un resultado que nunca se guardó. Ni los tests unitarios
+ni el corpus diferencial cubrían una transacción, así que nada lo cazó. Ahora
+el corpus tiene transacciones.
+
+#### `SUBSCRIBE` dentro de `MULTI`
+
+Redis lo encola y lo ejecuta en `EXEC`, dejando la conexión en modo suscriptor.
+Luma lo **rechaza** con un error: suscribirse necesita el buzón del suscriptor,
+que `EXEC` no tiene. Es un error explícito, no una conexión que calladamente no
+se suscribió. `PUBLISH`, `PUBSUB CHANNELS` y `PUBSUB NUMSUB` sí funcionan
+dentro de una transacción, que es lo que los clientes usan.
+
 ### Divergencias de los comandos añadidos
 
 | Comando | Redis | Luma | Por qué |
