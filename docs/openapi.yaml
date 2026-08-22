@@ -3867,6 +3867,128 @@ paths:
         '403':
           description: Admin role required
 
+  /v1/admin/s3-credentials:
+    post:
+      tags:
+      - Admin
+      security:
+      - bearerAuth: []
+      summary: Mint an S3 access key for an organization
+      description: 'The secret is in the response and nowhere else. What is stored
+        is its encrypted form and no endpoint returns it again.
+
+        These are not api keys and their blast radius differs. SigV4 sends a
+        signature derived from the secret, so the server has to re-derive the same
+        key — which means holding the secret in recoverable form. Api keys are
+        stored as a SHA-256 hash and would be useless here. Rotate accordingly.
+
+        A platform-scoped caller has no organization of its own and must name one
+        in `org_id`; an org-scoped caller may omit it, and must match if it sends
+        it.
+
+        '
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                org_id:
+                  type: string
+                  description: Required for a platform caller.
+      responses:
+        '201':
+          description: Credential minted; the secret is shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_key_id:
+                    type: string
+                  secret_access_key:
+                    type: string
+                  org_id:
+                    type: string
+                  note:
+                    type: string
+        '400':
+          description: A platform caller did not name an organization
+        '403':
+          description: Admin role required, or the named org is not the caller's
+    get:
+      tags:
+      - Admin
+      security:
+      - bearerAuth: []
+      summary: List an organization's S3 access keys
+      description: >
+        Ids and dates, never secrets: a listing that returned them would turn one
+        read-only leak into a full compromise.
+      parameters:
+      - name: org_id
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The organization's access keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credentials:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        access_key_id:
+                          type: string
+                        created_at_ms:
+                          type: integer
+                          format: int64
+        '403':
+          description: Admin role required
+
+  /v1/admin/s3-credentials/{access_key_id}:
+    delete:
+      tags:
+      - Admin
+      security:
+      - bearerAuth: []
+      summary: Revoke an S3 access key
+      description: >
+        Scoped to the caller's organization: revoking a key that belongs to
+        another org reports 404, the same as one that never existed.
+      parameters:
+      - name: access_key_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: org_id
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked:
+                    type: string
+        '403':
+          description: Admin role required
+        '404':
+          description: No such credential for this organization
+
   /v1/admin/resp:
     get:
       tags:

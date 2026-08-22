@@ -67,6 +67,8 @@ pub mod replica;
 
 #[forbid(unsafe_code)]
 pub mod router;
+#[forbid(unsafe_code)]
+pub mod s3;
 /// Search primitives shared across the vector and hybrid query paths.
 #[forbid(unsafe_code)]
 pub mod search;

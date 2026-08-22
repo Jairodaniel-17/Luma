@@ -119,7 +119,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // Allocated before the router so `/v1/metrics` can render the RESP counters
     // from the same instance the listener increments.
     let resp_metrics = std::sync::Arc::new(luma::resp::listener::RespMetrics::default());
-    let app = luma::api::router(luma::api::RouterDeps {
+    let (app, state) = luma::api::router_and_state(luma::api::RouterDeps {
         engine: engine.clone(),
         config: config.clone(),
         sqlite,
@@ -144,6 +144,15 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // Redis-protocol listener. Off unless `resp_port` is set: an engine that
     // starts listening on 6379 on upgrade is a surprise, and on a shared host a
     // conflict with the real Redis.
+    // S3-compatible listener. Off unless `s3_port` is set, for the same reason
+    // the RESP port is: a server that starts answering on a new port after an
+    // upgrade is a surprise, and on a shared host it is a conflict.
+    match luma::s3::spawn(&config, state.clone(), shutdown_token.clone()).await {
+        Ok(Some(port)) => tracing::info!(port, "S3 listener bound"),
+        Ok(None) => {}
+        Err(e) => tracing::error!("S3 listener failed to start: {e}"),
+    }
+
     match luma::resp::listener::spawn(
         &config,
         engine.clone(),

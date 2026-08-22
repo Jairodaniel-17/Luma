@@ -198,7 +198,17 @@ pub struct RouterDeps {
     pub rbac: Option<Arc<rbac::RbacService>>,
 }
 
+/// Build the router, discarding the state.
+///
+/// Kept as the ordinary entry point because almost every caller only wants the
+/// router. The S3 listener is the exception: it serves a different port from the
+/// same state, so it needs the state itself.
 pub fn router(deps: RouterDeps) -> Router<()> {
+    router_and_state(deps).0
+}
+
+/// Build the router *and* hand back the state it was built from.
+pub fn router_and_state(deps: RouterDeps) -> (Router<()>, AppState) {
     let RouterDeps {
         engine,
         config,
@@ -485,6 +495,14 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/v1/admin/backup", post(routes_admin::backup))
         .route("/v1/admin/audit", get(routes_admin::get_audit_log))
         .route("/v1/admin/resp", get(routes_admin::resp_activity))
+        .route(
+            "/v1/admin/s3-credentials",
+            get(routes_admin::list_s3_credentials).post(routes_admin::create_s3_credential),
+        )
+        .route(
+            "/v1/admin/s3-credentials/:access_key_id",
+            delete(routes_admin::revoke_s3_credential),
+        )
         .route("/search", post(routes_search::search))
         .route("/search/ingest", post(routes_search::ingest))
         // SPA fallback: serves embedded admin panel assets + index.html for any
@@ -525,17 +543,19 @@ pub fn router(deps: RouterDeps) -> Router<()> {
                 .finish()
                 .expect("invalid rate limit configuration"),
         );
-        app.layer(GovernorLayer {
-            config: governor_conf,
-        })
-        // ponytail: PeerIpKeyExtractor returns 500 (UnableToExtractKey) when no
-        // ConnectInfo<SocketAddr> extension is present. Guarantee one so rate
-        // limiting never crashes requests even if the server is served without
-        // `into_make_service_with_connect_info` (library embedders, tests). Real
-        // per-IP limiting still applies once ConnectInfo is wired — see server.rs.
-        .layer(axum::middleware::from_fn(ensure_connect_info))
+        let app = app
+            .layer(GovernorLayer {
+                config: governor_conf,
+            })
+            // ponytail: PeerIpKeyExtractor returns 500 (UnableToExtractKey) when no
+            // ConnectInfo<SocketAddr> extension is present. Guarantee one so rate
+            // limiting never crashes requests even if the server is served without
+            // `into_make_service_with_connect_info` (library embedders, tests). Real
+            // per-IP limiting still applies once ConnectInfo is wired — see server.rs.
+            .layer(axum::middleware::from_fn(ensure_connect_info));
+        (app, state)
     } else {
-        app
+        (app, state)
     }
 }
 

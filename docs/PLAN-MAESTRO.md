@@ -458,10 +458,34 @@ alcance, no un bug.
   consenso — backlog con criterio de entrada explícito. Por eso el runbook
   sigue diciendo que se pare el primario antiguo primero: el fencing es la red,
   no el plan.
-- `[ ]` **W3.2 — API S3-compatible** sobre el blob store: `PUT/GET/HEAD/DELETE
-  Object`, `ListObjectsV2`, buckets, multipart, presigned URLs, **SigV4**. XML
-  idéntico al de S3. Entra **por spike con criterio de salida**: validar contra
-  la suite mint de MinIO recortada. SigV4 es la parte con esquinas oscuras.
+- `[~]` **W3.2 - API S3-compatible** (las operaciones y SigV4, hechos; ver las
+  divergencias declaradas abajo y en `docs\S3.md`).
+
+  `src\s3\`: `sigv4.rs` (firma por cabecera y presignada), `credentials.rs`,
+  `xml.rs`, `routes.rs`. Escucha en `s3_port` propio, porque S3 se adueña de la
+  raíz del espacio de rutas y compartiéndola una de las dos APIs taparía a la
+  otra. Los objetos se guardan donde el blob store nativo los guarda, así que
+  hay una sola cuota y una sola ruta de respaldo.
+
+  **Criterio de salida, cambiado y por qué.** El plan decía la suite mint de
+  MinIO. Mint prueba contra una matriz que incluye versionado, lifecycle y
+  object lock, que esta API rechaza a propósito: habría producido una lista
+  larga de fallos esperados y una señal verde/rojo que nadie leería. Se validó
+  contra **boto3 real** (`tests\e2e\s3_client.py`, 12/12), que es el cliente
+  que un usuario alcanza. Más los vectores publicados de AWS para SigV4 y
+  37 tests unitarios.
+
+  Lo que encontró el cliente real y ningún test propio habría encontrado:
+  boto3 presigna con **SigV2** por defecto. La firma estaba bien; lo que faltaba
+  era decirlo — ahora esa forma concreta se reconoce y el error la nombra, en vez
+  de un «se requiere firma» que manda a revisar credenciales correctas.
+
+  **Divergencias declaradas, no ocultas:** el ETag no es MD5; las firmas por
+  chunk de un cuerpo *streaming* se aceptan sin verificar (la petición queda
+  autenticada, el cuerpo no); no hay acceso anónimo; y **las cuotas no aplican
+  por esta puerta** — los bytes se contabilizan, pero el rechazo por límite vive
+  en el registro de la api key, que una credencial S3 no tiene. Sin probar:
+  cargas de tamaño real y escritura concurrente sobre la misma clave.
 - `[~]` **W3.3 - OpenAPI sin deriva** (la superficie de rutas está fijada; los
   esquemas siguen escritos a mano).
 

@@ -252,6 +252,13 @@ pub struct Config {
     /// primary.
     #[serde(default = "default_replica_poll_interval_secs")]
     pub replica_poll_interval_secs: u64,
+    /// Port for the S3-compatible API. 0 disables it.
+    ///
+    /// Its own port because S3 owns the root of the path space: `GET /` is
+    /// ListBuckets and `GET /{bucket}/{key}` is any object, so it cannot share a
+    /// router with `/v1/...` without one shadowing the other.
+    #[serde(default)]
+    pub s3_port: u16,
     /// OTLP endpoint for trace export, e.g. `http://collector:4317`.
     ///
     /// Absent means no export. There is deliberately no default: guessing
@@ -435,6 +442,7 @@ impl Default for Config {
             backup_remote_endpoint: String::new(),
             backup_remote_region: String::new(),
             backup_remote_allow_http: false,
+            s3_port: 0,
             otel_endpoint: None,
             wal_ship_interval_secs: 0,
             replica_poll_interval_secs: default_replica_poll_interval_secs(),
@@ -1031,6 +1039,10 @@ impl Config {
                 .unwrap_or(0),
             // The standard variable name, so a collector's own documentation
             // works without translating it into ours.
+            s3_port: std::env::var("S3_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             otel_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
             resp_port: std::env::var("RESP_PORT")
                 .ok()

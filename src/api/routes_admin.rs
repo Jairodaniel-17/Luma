@@ -123,3 +123,136 @@ pub async fn resp_activity(
                   once it authenticates",
     })))
 }
+
+/// Everything the S3 credential endpoints need.
+fn s3_credentials(state: &AppState) -> Result<crate::s3::credentials::S3Credentials, ApiError> {
+    let sqlite = state.sqlite.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "S3 credentials need SQLite",
+        )
+    })?;
+    Ok(crate::s3::credentials::S3Credentials::new(
+        std::sync::Arc::new(sqlite),
+    ))
+}
+
+/// The organization these credentials belong to.
+///
+/// An org-scoped caller gets their own; a platform caller has none of their own
+/// and must name one. Never defaulted: a credential with no owner would produce
+/// objects that belong to nobody and therefore count against nobody's quota,
+/// which is the one thing this whole layer exists to prevent.
+fn owning_org(ctx: &TenantContext, requested: Option<&str>) -> Result<String, ApiError> {
+    if let Some(org) = ctx.tenant_id.clone() {
+        // An org-scoped caller cannot mint for somebody else, whatever they ask
+        // for. Ignoring the field silently would be worse than refusing.
+        if let Some(requested) = requested {
+            if requested != org {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    "cannot mint credentials for another organization",
+                ));
+            }
+        }
+        return Ok(org);
+    }
+    requested.map(str::to_string).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "this caller is not scoped to an organization: pass {\"org_id\": \"…\"}",
+        )
+    })
+}
+
+#[derive(Deserialize, Default)]
+pub struct S3CredentialRequest {
+    /// Required for a platform caller, optional (and must match) otherwise.
+    pub org_id: Option<String>,
+}
+
+/// `POST /v1/admin/s3-credentials` — mint an access key for this organization.
+///
+/// The secret is in the response and **nowhere else**: what is stored is its
+/// encrypted form, and there is no endpoint that returns it again. Same contract
+/// as every other object store, and the reason is the same — a secret that can be
+/// re-read is a secret that leaks twice.
+pub async fn create_s3_credential(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    body: Option<Json<S3CredentialRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_role(&ctx, "admin")?;
+    let requested = body.and_then(|Json(b)| b.org_id);
+    let org = owning_org(&ctx, requested.as_deref())?;
+    let minted = s3_credentials(&state)?
+        .create(&org)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "access_key_id": minted.access_key_id,
+            "secret_access_key": minted.secret_access_key,
+            "org_id": minted.org_id,
+            "note": "the secret is shown once and is not recoverable; store it now",
+        })),
+    ))
+}
+
+/// `GET /v1/admin/s3-credentials` — list this organization's access keys.
+///
+/// Ids and dates, never secrets: a listing endpoint that returned them would
+/// turn one read-only leak into a full compromise.
+pub async fn list_s3_credentials(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    Query(query): Query<S3CredentialRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_role(&ctx, "admin")?;
+    let org = owning_org(&ctx, query.org_id.as_deref())?;
+    let listed = s3_credentials(&state)?
+        .list(&org)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "credentials": listed
+            .into_iter()
+            .map(|(id, created)| serde_json::json!({
+                "access_key_id": id,
+                "created_at_ms": created,
+            }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// `DELETE /v1/admin/s3-credentials/{access_key_id}` — revoke one.
+pub async fn revoke_s3_credential(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    axum::extract::Path(access_key_id): axum::extract::Path<String>,
+    Query(query): Query<S3CredentialRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_role(&ctx, "admin")?;
+    let org = owning_org(&ctx, query.org_id.as_deref())?;
+    let removed = s3_credentials(&state)?
+        .revoke(&access_key_id, &org)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+
+    if !removed {
+        // 404 rather than 204: revoking something that was never there is a
+        // fact the caller wants, not a success to be reported.
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such S3 credential for this organization",
+        ));
+    }
+    Ok(Json(serde_json::json!({ "revoked": access_key_id })))
+}

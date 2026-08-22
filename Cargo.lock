@@ -2076,6 +2076,7 @@ dependencies = [
  "docx-rs",
  "futures-util",
  "hex",
+ "hmac",
  "hnsw_rs",
  "hyper",
  "hyper-util",
