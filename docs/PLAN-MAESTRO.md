@@ -109,9 +109,9 @@ frentes a la vez y no cerrar ninguno.
 | 3 | ✅ RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
 | 4 | ✅ Listener RESP + strings/keys | `v4.29.0` | F1.1–F1.4 + **F4.1** (ver D-1) | L |
 | 5 | ✅ Estructuras por RESP | `v4.30.0` | F2.1 listas, F2.2 hashes, F2.3 sets, F2.4 zsets | L |
-| 6 | **Celery y arq funcionando** | `v4.31.0` | F3.1 bloqueantes, F3.2 MULTI/WATCH, F3.3 Pub/Sub, F3.4 E2E + **F4.3** (ver D-2) | L |
-| 7 | Operar con vista | `v4.32.0` | W5.1 métricas/OTel, W2.2 réplica de lectura | L |
-| 8 | RESP endurecido | `v4.33.0` | F4.2 backup+panel, F4.5 nightly de resiliencia | M |
+| 6 | ✅ **Celery y arq funcionando** | `v4.31.0` | F3.1 bloqueantes, F3.2 MULTI/WATCH, F3.3 Pub/Sub, F3.4 E2E + **F4.3** (ver D-2) | L |
+| 7 | ✅ Operar con vista | `v4.32.0` | W5.1 métricas/OTel, W2.2 réplica de lectura | L |
+| 8 | ✅ RESP endurecido | `v4.33.0` | F4.2 backup+panel, F4.5 nightly de resiliencia | M |
 | 9 | Adopción por protocolo | `v4.34.0` | W2.3 failover asistido, W3.2 S3, W3.3 OpenAPI generado | **XL** |
 | 10 | ✅ Conector Postgres | `v4.35.0` | W4.1 spike, W4.2 `luma connect postgres`, W4.3 federada | **XL** |
 | 11 | **GA** | `v4.36.0` → `1.0` | W5.2 cuotas, W5.3 supply chain, W5.5 docs de producto, W5.6 criterio GA | L |
