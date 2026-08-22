@@ -215,8 +215,8 @@ def celery_worker_roundtrip(url):
     try:
         sys.path.insert(0, HERE)
         os.environ['BROKER_URL'] = url
-        for module in ('celery_app',):
-            sys.modules.pop(module, None)
+        # Same reason as in the unacked check: the module caches its broker.
+        sys.modules.pop('celery_app', None)
         from celery_app import add
 
         time.sleep(6)
@@ -234,6 +234,70 @@ def celery_worker_roundtrip(url):
         except subprocess.TimeoutExpired:
             worker.kill()
 
+
+
+def celery_unacked_survives_a_killed_worker(url):
+    """Kill a worker mid-task; the message must still be recoverable.
+
+    kombu's reliable delivery moves a message out of the queue list into an
+    `unacked` hash and acks it only once the task finishes. Kill the worker in
+    between and the message must be in one of the two places. What must never
+    happen is that it is in neither.
+
+    This is the scenario the non-atomic move put in doubt, which is why it
+    belongs after that window was closed rather than before.
+    """
+    import redis
+    r = redis.from_url(url)
+    r.flushdb()
+    env = dict(os.environ, BROKER_URL=url, PYTHONPATH=HERE)
+    worker = subprocess.Popen(
+        [sys.executable, '-m', 'celery', '-A', 'celery_app', 'worker',
+         '--pool=solo', '--loglevel=warning', '--without-gossip',
+         '--without-mingle', '--without-heartbeat'],
+        cwd=HERE, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        sys.path.insert(0, HERE)
+        os.environ['BROKER_URL'] = url
+        # Drop the cached module: it is bound to whichever broker was configured
+        # when it was first imported, and this harness runs every check against
+        # two of them. Without this the producer talks to the previous target
+        # while the worker talks to this one, and the message goes nowhere.
+        sys.modules.pop('celery_app', None)
+        from celery_app import app
+
+        time.sleep(6)
+        if worker.poll() is not None:
+            raise AssertionError(
+                'the worker exited early: %s' % worker.stdout.read()[-2000:])
+
+        app.send_task('luma_e2e.slow', args=(30,))
+
+        # Wait until the worker has taken it out of the queue and into unacked.
+        deadline = time.time() + 15
+        while time.time() < deadline and r.hlen('unacked') < 1:
+            time.sleep(0.2)
+        assert r.hlen('unacked') >= 1, \
+            'the worker never moved the message into unacked'
+
+        # No ack, no requeue, no cleanup.
+        worker.kill()
+        worker.wait(timeout=10)
+        time.sleep(1)
+
+        in_unacked = r.hlen('unacked')
+        on_queue = r.llen('celery')
+        assert in_unacked + on_queue >= 1, (
+            'the message is in neither unacked nor the queue: it was lost')
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+        try:
+            worker.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        r.flushdb()
 
 # ── arq: asyncio, and a different command mix ───────────────────────────────
 def arq_enqueue(url):
@@ -262,6 +326,7 @@ CHECKS = [
     ('redis-py SCAN/HSCAN', redis_py_scan),
     ('kombu roundtrip', kombu_roundtrip),
     ('celery worker roundtrip', celery_worker_roundtrip),
+    ('celery unacked survives a kill', celery_unacked_survives_a_killed_worker),
     ('arq enqueue', arq_enqueue),
 ]
 

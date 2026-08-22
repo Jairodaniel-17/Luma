@@ -325,11 +325,12 @@ ampliada a estructuras.
 - `[x]` **F3.3 — Pub/Sub** sobre el `EventBus` existente, canal interno
   `resp:{org}:{canal}`. `PUBLISH` devuelve receptores **del tenant**, no
   globales.
-- `[~]` **F3.4 - E2E de los clientes objetivo** (hecho salvo el escenario de
-  revoke/restore de unacked). `tests/e2e/clients.py` corre redis-py, kombu,
-  Celery y arq reales contra Luma y contra un Redis 7 de control, con un
-  **worker Celery de verdad** que consume, ejecuta y devuelve el resultado.
-  Job `client-e2e` en CI.
+- `[x]` **F3.4 - E2E de los clientes objetivo.** `tests/e2e/clients.py` corre
+  redis-py, kombu, Celery y arq reales contra Luma y contra un Redis 7 de
+  control, con un **worker Celery de verdad** que consume, ejecuta y devuelve
+  el resultado, y con el escenario de **matar el worker a media tarea**: el
+  mensaje sigue en `unacked` o de vuelta en la cola, nunca en ninguno de los
+  dos. Job `client-e2e` en CI.
 
   Encontro en su primera ejecucion que `PUBLISH` dentro de `MULTI` se
   rechazaba como comando desconocido: redis-py envuelve todo pipeline en
@@ -338,9 +339,8 @@ ampliada a estructuras.
   siempre. Ni los tests unitarios ni el corpus diferencial cubrian una
   transaccion.
 
-  Pendiente: matar el worker a media tarea y comprobar que la cola de unacked
-  se restaura. Es el escenario que la no-atomicidad de `BRPOPLPUSH` pone en
-  duda, asi que conviene hacerlo **despues** de cerrar esa ventana.
+  El escenario de unacked se hizo **despues** de cerrar la ventana de
+  atomicidad multiclave, que es lo que lo ponia en duda.
 - `[x]` **F4.3 — `docs/RESP.md`** (adelantado, ver D-2): tabla de comandos con
   notas de divergencia, guía "migrar de Redis a Luma en 5 minutos" para Celery,
   arq, redis-py e ioredis, y qué NO se soporta y por qué. README enlaza.
