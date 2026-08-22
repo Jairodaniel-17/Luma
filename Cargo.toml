@@ -86,6 +86,7 @@ tokio-postgres = { version = "0.7", default-features = false, features = ["runti
 bytes = "1"
 webpki-roots = "1"
 postgres-protocol = "0.6"
+sha1 = "0.10"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = [

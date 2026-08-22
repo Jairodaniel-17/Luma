@@ -27,8 +27,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install stable
-        uses: dtolnay/rust-toolchain@stable
+      # Pinned, unlike every other job here, and that is the point. `-D warnings`
+      # on a floating `stable` means each Rust release can turn this red without
+      # anybody touching the code — which is exactly what happened: a new stable
+      # added `chunks_exact_to_as_chunks` and put nine pre-existing lines in
+      # error. A lint gate that fires on a calendar is not a gate, it is an
+      # outage on a schedule.
+      #
+      # Bumping this is a deliberate one-line change, and the new lints get
+      # fixed in that commit instead of blocking whatever unrelated work was in
+      # flight.
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.93
         with:
           components: clippy
       - name: Run clippy

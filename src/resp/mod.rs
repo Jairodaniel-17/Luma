@@ -12,4 +12,5 @@ pub mod commands;
 pub mod listener;
 pub mod protocol;
 pub mod pubsub;
+pub mod scripts;
 pub mod structures_cmd;

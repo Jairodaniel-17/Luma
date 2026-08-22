@@ -266,8 +266,7 @@ impl PgConnection {
             // tokio-postgres rejects this key outright.
             params.push(("replication", "database"));
         }
-        frontend::startup_message(params.into_iter(), &mut buf)
-            .context("encoding the startup message")?;
+        frontend::startup_message(params, &mut buf).context("encoding the startup message")?;
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
 

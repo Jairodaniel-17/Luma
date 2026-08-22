@@ -346,7 +346,7 @@ impl Connector {
             for row in batch {
                 let values: Vec<(String, Value)> = names
                     .iter()
-                    .zip(row.into_iter())
+                    .zip(row)
                     .map(|(n, v)| {
                         (
                             n.clone(),

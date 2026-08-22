@@ -22,6 +22,7 @@
 use crate::engine::stored::StoredVal;
 use crate::engine::Engine;
 use crate::resp::protocol::Value;
+use crate::resp::scripts;
 
 /// Per-connection state.
 pub struct Session {
@@ -450,6 +451,13 @@ pub fn dispatch(
         "MGET" => Dispatch::Reply(mget(engine, session, rest)),
         "MSET" => Dispatch::Reply(mset(engine, session, rest)),
 
+        // ── scripting ────────────────────────────────────────────────────────
+        // Three known scripts, not a Lua interpreter. `resp::scripts` carries
+        // why, and what it costs.
+        "SCRIPT" => Dispatch::Reply(script_command(rest)),
+        "EVAL" => Dispatch::Reply(eval(engine, session, rest, false)),
+        "EVALSHA" => Dispatch::Reply(eval(engine, session, rest, true)),
+
         // ── keys ─────────────────────────────────────────────────────────────
         "DEL" | "UNLINK" => Dispatch::Reply(del(engine, session, rest)),
         "EXISTS" => Dispatch::Reply(exists(engine, session, rest)),
@@ -844,6 +852,150 @@ fn set(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     match engine.put_state(key, StoredVal::raw(args[1].clone(), None), ttl_ms, None) {
         Ok(_) => Value::ok(),
         Err(e) => err(format!("ERR {e}")),
+    }
+}
+
+/// `SCRIPT LOAD|EXISTS|FLUSH`.
+///
+/// Only the subset a locking client uses. `SCRIPT LOAD` is the second half of
+/// redis-py's fallback: it sends `EVALSHA`, gets `NOSCRIPT`, loads, and retries.
+fn script_command(args: &[Vec<u8>]) -> Value {
+    let Some(sub) = args.first().map(|a| command_name(a)) else {
+        return err("ERR wrong number of arguments for 'script' command");
+    };
+    match sub.as_str() {
+        "LOAD" => match args.get(1) {
+            Some(body) => match scripts::register(body) {
+                Some(sha) => Value::Bulk(Some(sha.into_bytes())),
+                // Refused rather than accepted-and-forgotten. A client that
+                // gets a digest back believes the script will run, and finds
+                // out otherwise at the moment it matters.
+                None => err(
+                    "ERR this build runs three known lock scripts natively and has no Lua \
+                     interpreter; see docs/integrar/RESP.md",
+                ),
+            },
+            None => err("ERR wrong number of arguments for 'script|load' command"),
+        },
+        // Answers per digest, in order, as Redis does.
+        "EXISTS" => Value::Array(Some(
+            args[1..]
+                .iter()
+                .map(|sha| {
+                    let held = scripts::lookup(&String::from_utf8_lossy(sha));
+                    Value::Integer(i64::from(held.is_some()))
+                })
+                .collect(),
+        )),
+        // Nothing to flush that a client can grow: only recognised scripts are
+        // ever held, and they are the same three every time.
+        "FLUSH" => Value::ok(),
+        other => err(&format!(
+            "ERR Unknown SCRIPT subcommand or wrong number of arguments for '{other}'"
+        )),
+    }
+}
+
+/// `EVAL script numkeys key... arg...` and `EVALSHA sha numkeys key... arg...`.
+fn eval(engine: &Engine, session: &Session, args: &[Vec<u8>], by_digest: bool) -> Value {
+    let verb = if by_digest { "evalsha" } else { "eval" };
+    if args.len() < 2 {
+        return err(&format!(
+            "ERR wrong number of arguments for '{verb}' command"
+        ));
+    }
+    let Ok(numkeys) = String::from_utf8_lossy(&args[1]).parse::<i64>() else {
+        return err("ERR value is not an integer or out of range");
+    };
+    if numkeys < 0 {
+        return err("ERR Number of keys can't be negative");
+    }
+    let numkeys = numkeys as usize;
+    let rest = &args[2..];
+    if rest.len() < numkeys {
+        return err("ERR Number of keys can't be greater than number of args");
+    }
+    let (keys, argv) = rest.split_at(numkeys);
+
+    let known = if by_digest {
+        match scripts::lookup(&String::from_utf8_lossy(&args[0])) {
+            Some(known) => known,
+            // The prefix matters: redis-py matches on NOSCRIPT to decide
+            // whether to fall back to SCRIPT LOAD.
+            None => return scripts::no_script(),
+        }
+    } else {
+        match scripts::register(&args[0]) {
+            Some(sha) => match scripts::lookup(&sha) {
+                Some(known) => known,
+                None => return scripts::no_script(),
+            },
+            None => {
+                return err(
+                    "ERR this build runs three known lock scripts natively and has no Lua \
+                     interpreter; see docs/integrar/RESP.md",
+                )
+            }
+        }
+    };
+
+    let plan = match scripts::plan(known, keys, argv) {
+        Ok(plan) => plan,
+        Err(reply) => return reply,
+    };
+    run_script(engine, session, &plan)
+}
+
+/// Run a planned script through the ordinary command helpers.
+///
+/// Through `get`/`del`/`ttl`/`expire` rather than reaching into the engine:
+/// those already scope the key to the caller's organization and handle TTL the
+/// way every other command does. A second implementation here is how the two
+/// would drift, and a lock that disagrees with `GET` about which key it holds
+/// is the worst possible place for that.
+fn run_script(engine: &Engine, session: &Session, plan: &scripts::Plan) -> Value {
+    let key = vec![plan.key.clone()];
+
+    // Every one of the three is a compare-and-act on the token: if the lock is
+    // gone or somebody else holds it, the answer is 0 and nothing is touched.
+    let held = match get(engine, session, &key) {
+        Value::Bulk(Some(bytes)) => bytes,
+        _ => return Value::Integer(0),
+    };
+    if held != plan.token {
+        return Value::Integer(0);
+    }
+
+    match plan.known {
+        scripts::Known::Release => {
+            let _ = del(engine, session, &key);
+            Value::Integer(1)
+        }
+        scripts::Known::Reacquire => set_millis(engine, session, &plan.key, plan.millis),
+        scripts::Known::Extend => {
+            // `pttl` answers -2 for a missing key and -1 for one with no ttl.
+            // The script refuses both, and so must this: extending a lock that
+            // never expires, or one that is already gone, means holding
+            // something nobody else can see.
+            let remaining = match ttl(engine, session, &key, 1) {
+                Value::Integer(ms) if ms >= 0 => ms,
+                _ => return Value::Integer(0),
+            };
+            let millis = if plan.replace_ttl {
+                plan.millis
+            } else {
+                plan.millis.saturating_add(remaining)
+            };
+            set_millis(engine, session, &plan.key, millis)
+        }
+    }
+}
+
+fn set_millis(engine: &Engine, session: &Session, key: &[u8], millis: i64) -> Value {
+    let args = vec![key.to_vec(), millis.to_string().into_bytes()];
+    match expire(engine, session, &args, 1) {
+        Value::Integer(1) => Value::Integer(1),
+        _ => Value::Integer(0),
     }
 }
 
@@ -1748,6 +1900,9 @@ fn is_unknown_command(name: &str) -> bool {
         "CLIENT",
         "COMMAND",
         "RESET",
+        "SCRIPT",
+        "EVAL",
+        "EVALSHA",
         "SET",
         "GET",
         "GETDEL",
@@ -1895,6 +2050,200 @@ mod tests {
     fn open() -> (Engine, tempfile::TempDir, Session) {
         let (engine, dir) = engine();
         (engine, dir, Session::new(false))
+    }
+
+    // ── scripting ────────────────────────────────────────────────────────────
+
+    /// redis-py's release script, verbatim.
+    const RELEASE_SCRIPT: &str = "
+        local token = redis.call('get', KEYS[1])
+        if not token or token ~= ARGV[1] then
+            return 0
+        end
+        redis.call('del', KEYS[1])
+        return 1
+    ";
+
+    #[test]
+    fn a_lock_is_released_only_by_whoever_holds_it() {
+        // The whole reason EVALSHA exists here: kombu's Mutex takes a lock with
+        // SET NX PX and releases it with this script. Releasing somebody else's
+        // lock is the failure that lets two workers run the same job.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "lock", "mine", "PX", "10000"]);
+
+        let sha = match run(&e, &mut s, &["SCRIPT", "LOAD", RELEASE_SCRIPT]) {
+            Value::Bulk(Some(bytes)) => String::from_utf8(bytes).unwrap(),
+            other => panic!("SCRIPT LOAD must return a digest, got {other:?}"),
+        };
+
+        // Somebody else's token: refused, and the lock survives.
+        assert_eq!(
+            run(&e, &mut s, &["EVALSHA", &sha, "1", "lock", "theirs"]),
+            Value::Integer(0)
+        );
+        assert!(matches!(
+            run(&e, &mut s, &["GET", "lock"]),
+            Value::Bulk(Some(_))
+        ));
+
+        // The holder's token: released.
+        assert_eq!(
+            run(&e, &mut s, &["EVALSHA", &sha, "1", "lock", "mine"]),
+            Value::Integer(1)
+        );
+        assert_eq!(run(&e, &mut s, &["GET", "lock"]), Value::nil());
+    }
+
+    #[test]
+    fn an_unknown_digest_answers_noscript_so_the_client_can_recover() {
+        // redis-py sends EVALSHA before ever loading, and falls back to SCRIPT
+        // LOAD when it sees this prefix. `unknown command 'EVALSHA'` is what it
+        // used to get, and that killed the worker.
+        let (e, _d, mut s) = open();
+        let reply = run(
+            &e,
+            &mut s,
+            &["EVALSHA", "0000000000000000000000000000000000000000", "0"],
+        );
+        let Value::Error(text) = reply else {
+            panic!("expected an error");
+        };
+        assert!(text.starts_with("NOSCRIPT "), "{text}");
+    }
+
+    #[test]
+    fn eval_runs_a_known_script_without_loading_it_first() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "lock", "tok", "PX", "10000"]);
+        assert_eq!(
+            run(&e, &mut s, &["EVAL", RELEASE_SCRIPT, "1", "lock", "tok"]),
+            Value::Integer(1)
+        );
+    }
+
+    #[test]
+    fn an_arbitrary_script_is_refused_and_says_why() {
+        // No interpreter, so the only honest answer is no. Accepting it and
+        // returning something plausible would run the wrong operation on the
+        // client's keys.
+        let (e, _d, mut s) = open();
+        let Value::Error(text) = run(&e, &mut s, &["EVAL", "return redis.call('flushall')", "0"])
+        else {
+            panic!("expected an error");
+        };
+        assert!(text.contains("Lua"), "{text}");
+    }
+
+    #[test]
+    fn extend_adds_to_the_remaining_ttl_or_replaces_it() {
+        const EXTEND_SCRIPT: &str = "
+            local token = redis.call('get', KEYS[1])
+            if not token or token ~= ARGV[1] then
+                return 0
+            end
+            local expiration = redis.call('pttl', KEYS[1])
+            if not expiration then
+                expiration = 0
+            end
+            if expiration < 0 then
+                return 0
+            end
+
+            local newttl = ARGV[2]
+            if ARGV[3] == \"0\" then
+                newttl = ARGV[2] + expiration
+            end
+            redis.call('pexpire', KEYS[1], newttl)
+            return 1
+        ";
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "lock", "tok", "PX", "10000"]);
+        let sha = match run(&e, &mut s, &["SCRIPT", "LOAD", EXTEND_SCRIPT]) {
+            Value::Bulk(Some(b)) => String::from_utf8(b).unwrap(),
+            other => panic!("expected a digest, got {other:?}"),
+        };
+
+        // "0" adds to what is left: roughly 10s + 10s.
+        assert_eq!(
+            run(
+                &e,
+                &mut s,
+                &["EVALSHA", &sha, "1", "lock", "tok", "10000", "0"]
+            ),
+            Value::Integer(1)
+        );
+        let Value::Integer(after_add) = run(&e, &mut s, &["PTTL", "lock"]) else {
+            panic!("a ttl");
+        };
+        assert!(after_add > 15_000, "expected ~20s, got {after_add}ms");
+
+        // "1" replaces it.
+        assert_eq!(
+            run(
+                &e,
+                &mut s,
+                &["EVALSHA", &sha, "1", "lock", "tok", "5000", "1"]
+            ),
+            Value::Integer(1)
+        );
+        let Value::Integer(after_replace) = run(&e, &mut s, &["PTTL", "lock"]) else {
+            panic!("a ttl");
+        };
+        assert!(
+            after_replace <= 5_000,
+            "expected ~5s, got {after_replace}ms"
+        );
+    }
+
+    #[test]
+    fn script_exists_reports_per_digest() {
+        let (e, _d, mut s) = open();
+        let Value::Bulk(Some(bytes)) = run(&e, &mut s, &["SCRIPT", "LOAD", RELEASE_SCRIPT]) else {
+            panic!("a digest");
+        };
+        let sha = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            run(
+                &e,
+                &mut s,
+                &[
+                    "SCRIPT",
+                    "EXISTS",
+                    &sha,
+                    "0000000000000000000000000000000000000000"
+                ]
+            ),
+            Value::Array(Some(vec![Value::Integer(1), Value::Integer(0)]))
+        );
+    }
+
+    #[test]
+    fn a_lock_on_one_org_is_invisible_to_another() {
+        // The script runs through the same helpers as GET and DEL, so it
+        // inherits the tenant scoping. If it reached into the engine directly,
+        // one organization could release another's lock.
+        let (e, _d, mut acme) = open();
+        acme.tenant = Some("acme".to_string());
+        let mut globex = Session::new(false);
+        globex.tenant = Some("globex".to_string());
+
+        run(&e, &mut acme, &["SET", "lock", "tok", "PX", "10000"]);
+        let Value::Bulk(Some(bytes)) = run(&e, &mut acme, &["SCRIPT", "LOAD", RELEASE_SCRIPT])
+        else {
+            panic!("a digest");
+        };
+        let sha = String::from_utf8(bytes).unwrap();
+
+        // Same key name, same token, different organization: nothing to release.
+        assert_eq!(
+            run(&e, &mut globex, &["EVALSHA", &sha, "1", "lock", "tok"]),
+            Value::Integer(0)
+        );
+        assert!(matches!(
+            run(&e, &mut acme, &["GET", "lock"]),
+            Value::Bulk(Some(_))
+        ));
     }
 
     // ── connection ───────────────────────────────────────────────────────────
