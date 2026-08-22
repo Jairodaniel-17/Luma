@@ -336,7 +336,7 @@ alcance, no un bug.
 
 ### Bloque 8 — RESP endurecido · `v4.33.0`
 
-- `[ ]` **F4.2 —** las estructuras entran en `/v1/admin/backup` y restore; el
+- `[~]` **F4.2 —** backup/restore de estructuras verificado; panel pendiente. las estructuras entran en `/v1/admin/backup` y restore; el
   panel muestra conexiones RESP por org y comandos/s.
 - `[ ]` **F4.5 —** harness permanente en CI: matriz crash-recovery por tipo de
   registro WAL, fuzzing del parser con corpus versionado, suite diferencial

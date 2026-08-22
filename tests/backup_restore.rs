@@ -118,7 +118,13 @@ fn backup_covers_vectors_blobs_and_queues() {
         dest.join("queues/jobs/m1.json").exists(),
         "queued messages must be in the backup"
     );
-    assert!(dest.join("state.redb").exists());
+    // Deliberately absent: redb is a projection of the WAL, it is open and
+    // mapped by the running engine, and copying it live is either a hard
+    // failure (Windows) or a torn read (Linux). The restore rebuilds it.
+    assert!(
+        !dest.join("state.redb").exists(),
+        "a live redb must not be copied into the backup"
+    );
 
     let manifest = luma::backup::read_manifest(&dest).unwrap();
     assert_eq!(manifest.wal_segments, 2);
@@ -158,7 +164,8 @@ fn restore_brings_back_every_primitive() {
     );
     assert!(data.join("queues/jobs/m1.json").exists());
     assert!(data.join("events-000002.log").exists());
-    assert!(data.join("state.redb").exists());
+    // Not restored either — it is rebuilt from the WAL on next start.
+    assert!(data.join("events-000002.log").exists());
 }
 
 #[test]
@@ -229,4 +236,96 @@ fn verify_catches_a_missing_wal_segment() {
     std::fs::remove_file(dest.join("events-000001.log")).unwrap();
     let err = luma::backup::verify(&dest).unwrap_err().to_string();
     assert!(err.contains("WAL segment count mismatch"), "got: {err}");
+}
+
+// ─── F4.2: structures must survive a backup/restore cycle ────────────────────
+
+#[test]
+fn structures_survive_backup_and_restore() {
+    // Structures are stored as values in the KV under a `struct:` prefix, so in
+    // principle they ride along in the WAL and snapshot that the backup already
+    // copies. "In principle" is exactly the kind of claim that turns out to be
+    // false, so this proves it end to end rather than reasoning about it.
+    use luma::engine::structures::{Structure, Structures};
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let config = luma::config::Config {
+        data_dir: Some(data.to_string_lossy().to_string()),
+        sqlite_enabled: false,
+        backup_dir: dir.path().join("backups").to_string_lossy().to_string(),
+        backup_retention: 3,
+        ..luma::config::Config::default()
+    };
+
+    // The token must be cancelled before the data dir can be removed: the
+    // engine's background tasks hold redb open, and on Windows an open mapping
+    // makes the directory undeletable rather than merely stale.
+    let token = tokio_util::sync::CancellationToken::new();
+    let dest = {
+        let engine = luma::engine::Engine::new(config.clone(), token.clone()).unwrap();
+        let structures = Structures::new(&engine);
+
+        structures
+            .mutate("jobs", Structure::empty_list, |s| {
+                s.rpush(vec![b"first".to_vec(), vec![0x80, 0xFF]])
+            })
+            .unwrap();
+        structures
+            .mutate("unacked", Structure::empty_hash, |s| {
+                s.hset(vec![(b"task-1".to_vec(), b"payload".to_vec())])
+            })
+            .unwrap();
+        structures
+            .mutate("due", Structure::empty_zset, |s| {
+                s.as_zset_mut()?.add(b"job-a".to_vec(), 1.5).map(|_| ())
+            })
+            .unwrap();
+
+        // Force a snapshot so the backup has something beyond the WAL to carry.
+        let _ = engine.force_snapshot();
+        let dest = luma::backup::run_backup(&config).unwrap();
+        token.cancel();
+        drop(engine);
+        dest
+    };
+    luma::backup::verify(&dest).expect("the backup must verify");
+
+    // Destroy the live data, the situation a restore exists for. Retried
+    // briefly because the previous engine may still be releasing its handles.
+    for attempt in 0..50 {
+        match std::fs::remove_dir_all(&data) {
+            Ok(()) => break,
+            Err(e) if attempt == 49 => panic!("data dir never became removable: {e}"),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    luma::backup::restore(&config, dest.to_str().unwrap()).unwrap();
+
+    let engine =
+        luma::engine::Engine::new(config, tokio_util::sync::CancellationToken::new()).unwrap();
+    let structures = Structures::new(&engine);
+
+    let (list, _) = structures.load("jobs").unwrap().expect("list must survive");
+    assert_eq!(
+        list.lrange(0, -1).unwrap(),
+        vec![b"first".to_vec(), vec![0x80, 0xFF]],
+        "a binary list member must come back byte for byte"
+    );
+
+    let (hash, _) = structures
+        .load("unacked")
+        .unwrap()
+        .expect("hash must survive");
+    assert_eq!(
+        hash.as_hash().unwrap().get(&b"task-1".to_vec()),
+        Some(&b"payload".to_vec())
+    );
+
+    let (zset, _) = structures.load("due").unwrap().expect("zset must survive");
+    assert_eq!(
+        zset.as_zset().unwrap().score(b"job-a"),
+        Some(1.5),
+        "a float score must survive the JSON round trip exactly"
+    );
 }

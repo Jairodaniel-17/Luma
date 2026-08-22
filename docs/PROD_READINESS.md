@@ -63,10 +63,20 @@ su journaling de metadatos y no en un flush que hagamos nosotros.
 | SQLite | `VACUUM INTO` — copia consistente sin parar el actor |
 | `snapshot.json` | copia directa |
 | Segmentos del WAL | todos los `events-*.log` presentes |
-| `state.redb` | copia directa. Es reconstruible desde el WAL, pero copiarlo hace que un restore arranque servido en vez de replayando |
+| `state.redb` | **no se copia** — ver abajo |
 | `vectors/` | árbol completo: manifest, runs y mmaps |
 | `blobs/` | árbol completo |
 | `queues/` | árbol completo |
+| Estructuras (listas, hashes, sets, zsets) | van dentro del WAL y el snapshot: se guardan bajo el prefijo `struct:` del KV. Hay test de round-trip completo |
+
+> **Por qué redb no se copia.** Es una proyección del WAL: el restore lo
+> reconstruye. Una versión anterior sí lo copiaba, para que el restore arrancara
+> servido en vez de replayando, y estaba mal por partida doble: el fichero está
+> abierto y mapeado por el engine en marcha, así que en Windows la copia falla
+> con violación de compartición —rompiendo `luma backup` entero— y en Linux
+> funciona produciendo una lectura rota. Un redb roto es peor que ninguno: el
+> restore arrancaría desde estado derivado corrupto en lugar de reconstruirlo
+> limpio.
 
 Cada backup lleva un `manifest.json` con la versión que lo escribió y los
 conteos de cada cosa. Sin él un restore es adivinar: no se distingue un backup

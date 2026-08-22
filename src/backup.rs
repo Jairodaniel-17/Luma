@@ -160,13 +160,19 @@ pub fn run_backup(config: &Config) -> Result<PathBuf> {
             manifest.snapshot = true;
         }
 
-        // The redb projection is rebuildable from the WAL, but copying it means
-        // a restore starts served instead of replaying from the last snapshot.
-        let state_db = data.join("state.redb");
-        if state_db.exists() {
-            fs::copy(&state_db, dest.join("state.redb"))?;
-            manifest.state_db = true;
-        }
+        // `state.redb` is deliberately NOT copied.
+        //
+        // It is a projection of the WAL: a restore replays and rebuilds it. An
+        // earlier version of this function copied it to make restores start
+        // served rather than replaying — which was wrong twice over. The file is
+        // open and memory-mapped by the running engine, so on Windows the copy
+        // fails outright with a sharing violation (breaking `luma backup`
+        // entirely), and on Linux it succeeds while producing a torn read. A
+        // torn redb is worse than no redb: the restore would begin from corrupt
+        // derived state instead of rebuilding it cleanly from the WAL.
+        //
+        // `manifest.state_db` stays in the struct so backups written before this
+        // change still verify.
 
         if let Ok(entries) = fs::read_dir(data) {
             for entry in entries.flatten() {
@@ -349,6 +355,8 @@ pub fn restore(config: &Config, backup_path: &str) -> Result<()> {
         if src_snap.exists() {
             fs::copy(&src_snap, data.join("snapshot.json"))?;
         }
+        // Only present in backups taken before redb stopped being copied. New
+        // ones rebuild it from the WAL, which is the safer path anyway.
         let src_state_db = src.join("state.redb");
         if src_state_db.exists() {
             fs::copy(&src_state_db, data.join("state.redb"))?;
