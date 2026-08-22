@@ -2764,6 +2764,35 @@ paths:
                 $ref: '#/components/schemas/CreateVectorCollectionResponse'
         '409':
           description: Collection already exists
+    delete:
+      tags:
+      - Vector Operations
+      security:
+      - bearerAuth: []
+      summary: Drop a collection and everything in it
+      description: 'Irreversible. Removes the manifest, the vector file and any
+        DiskANN graph built for it. A collection that does not exist is a 404 rather
+        than a silent success, so a typo does not read as a completed delete.
+
+        '
+      parameters:
+      - name: collection
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Dropped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '404':
+          description: No such collection
   /v1/vector/{collection}/add:
     post:
       tags:
@@ -3810,6 +3839,63 @@ paths:
         '403':
           description: Admin role required
 
+  /v1/admin/resp:
+    get:
+      tags:
+      - Administration
+      security:
+      - bearerAuth: []
+      summary: RESP activity, broken down by organization
+      description: 'Cumulative counters plus the server clock, not a rate. A rate
+        needs a window, and a window chosen by the server is a number whose meaning
+        the caller cannot see. Poll twice and divide; what you get is exactly what
+        happened between the two samples.
+
+        Per-organization connection counts do not sum to the total: a connection is
+        counted globally when accepted and attributed to an org only once it
+        authenticates.
+
+        Returns 503 when the RESP listener is disabled, rather than zeroes that would
+        read as "nobody is using it".
+
+        '
+      responses:
+        '200':
+          description: Activity snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sampled_at_ms:
+                    type: integer
+                    format: int64
+                  totals:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                      format: int64
+                  orgs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        org:
+                          type: string
+                        connections_open:
+                          type: integer
+                        connections_total:
+                          type: integer
+                        commands_total:
+                          type: integer
+                        errors_total:
+                          type: integer
+                  note:
+                    type: string
+        '403':
+          description: Admin role required
+        '503':
+          description: The RESP listener is not running
   /v1/admin/audit:
     get:
       tags:
@@ -4817,7 +4903,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DomainOrgListResponse'
-    post:
+    put:
       tags:
       - Access Control
       security:

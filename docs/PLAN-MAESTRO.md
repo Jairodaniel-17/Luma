@@ -443,9 +443,26 @@ alcance, no un bug.
   Object`, `ListObjectsV2`, buckets, multipart, presigned URLs, **SigV4**. XML
   idéntico al de S3. Entra **por spike con criterio de salida**: validar contra
   la suite mint de MinIO recortada. SigV4 es la parte con esquinas oscuras.
-- `[ ]` **W3.3 — OpenAPI generado desde el código**, CI falla si difiere del
-  commiteado; SDKs regenerables. Elimina la clase de problema que M4.1 tapa a
-  mano en el Bloque 0.
+- `[~]` **W3.3 - OpenAPI sin deriva** (la superficie de rutas está fijada; los
+  esquemas siguen escritos a mano).
+
+  `tests/openapi_drift.rs` compara las rutas que el router declara contra las
+  que el spec documenta, en las dos direcciones. Su primera ejecución encontró:
+
+  - `PUT /v1/auth/domain-orgs` documentado como `POST`. Un cliente siguiendo la
+    documentación recibía un 405 y no tenía por dónde tirar.
+  - `DELETE /v1/vector/{collection}` — una operación real, sin documentar.
+  - `GET /v1/admin/resp` — añadido días antes y nunca escrito.
+
+  **Lo que NO es:** el plan pedía el spec *generado* desde el código. Esto no lo
+  es: los esquemas de petición y respuesta siguen a mano y nadie los compara con
+  nada. La generación completa (anotaciones utoipa en ~100 handlers) es un
+  cambio grande y mecánico y **no está hecho**; este guarda es lo que hace de
+  sustituto, y decirlo es mejor que dejar que la casilla insinúe más de lo que
+  cubre.
+
+  Las 5 rutas que no son API (el panel y el visor de docs) están en una lista de
+  exclusión explícita, con un test que impide que algo bajo `/v1/` entre en ella.
 
 ### Bloque 10 — Conector Postgres · `v4.35.0`
 
