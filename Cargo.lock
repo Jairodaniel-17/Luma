@@ -2148,6 +2148,7 @@ dependencies = [
  "image",
  "indexmap",
  "lru",
+ "md-5 0.10.6",
  "memmap2",
  "mime_guess",
  "mockall",

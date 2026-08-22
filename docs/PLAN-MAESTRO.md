@@ -500,12 +500,29 @@ alcance, no un bug.
   era decirlo — ahora esa forma concreta se reconoce y el error la nombra, en vez
   de un «se requiere firma» que manda a revisar credenciales correctas.
 
-  **Divergencias declaradas, no ocultas:** el ETag no es MD5; las firmas por
-  chunk de un cuerpo *streaming* se aceptan sin verificar (la petición queda
-  autenticada, el cuerpo no); no hay acceso anónimo; y **las cuotas no aplican
-  por esta puerta** — los bytes se contabilizan, pero el rechazo por límite vive
-  en el registro de la api key, que una credencial S3 no tiene. Sin probar:
-  cargas de tamaño real y escritura concurrente sobre la misma clave.
+  **Dos de los huecos declarados, cerrados.**
+
+  *ETag.* Ya es el MD5 del cuerpo para una subida simple, y para multipart la
+  forma compuesta de S3: MD5 de los digests binarios de las partes, guion, número
+  de partes. El razonamiento original —no añadir una dependencia de un hash roto
+  para un checksum— no se sostenía: `md-5` ya estaba en el árbol, así que no
+  costaba nada, y aquí MD5 no es una primitiva de seguridad sino un formato de
+  cable. Verificado contra boto3, que recalcula los dos.
+
+  *Cuotas.* Ya aplican por esta puerta. Una credencial S3 no tiene registro de
+  api key, así que la cuota se resuelve desde las claves de su organización —
+  donde el límite ya vivía, porque `max_blob_bytes` es un tope de la
+  organización guardado por clave. Se toma la más amplia, que es lo que ya hacía
+  la puerta nativa.
+
+  Al cerrar eso salió un agujero que nadie había declarado: **`UploadPart` no
+  tenía ningún guard de cuota**, así que subir los mismos bytes por partes se
+  saltaba el límite que `PutObject` sí comprobaba. Ahora se cobra por parte.
+
+  **Lo que sigue abierto y dicho en voz alta:** las firmas por chunk de un cuerpo
+  *streaming* se aceptan sin verificar (la petición queda autenticada, el cuerpo
+  no) y no hay acceso anónimo, que es deliberado. Sin probar: cargas de tamaño
+  real y escritura concurrente sobre la misma clave.
 - `[~]` **W3.3 - OpenAPI sin deriva** (la superficie de rutas está fijada; los
   esquemas siguen escritos a mano).
 

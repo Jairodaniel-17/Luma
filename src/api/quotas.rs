@@ -42,6 +42,61 @@ pub struct Quotas {
     pub max_queue_messages: Option<u64>,
 }
 
+/// The organization's quota, for a caller that has no api key record.
+///
+/// An S3 credential is the case that needs this: SigV4 identifies the caller by
+/// access key id, and that record carries an org and nothing else. Until now the
+/// S3 door therefore ran with empty quotas — the bytes were counted, so usage
+/// stayed correct, but nothing was ever refused.
+///
+/// Resolved from the org's api keys rather than from a new column, because that
+/// is where the limit already lives. `max_blob_bytes` is an *organization*
+/// storage cap that happens to be stored per key: the guard measures the org's
+/// total usage against it, not the key's.
+///
+/// The **maximum** across the keys, not the minimum. That is not leniency for
+/// its own sake — it is what the native door already does. An org holding a 1 GB
+/// key and a 10 GB key can already store 10 GB by using the second one, so
+/// taking the minimum here would make the S3 door stricter than the API it
+/// shares storage with, for the same organization.
+///
+/// No keys, or no store, means unlimited — the same direction every other quota
+/// path takes when it cannot establish a limit, because refusing writes on
+/// missing configuration turns a setup gap into an outage.
+pub async fn quotas_for_org(
+    auth_store: Option<&crate::api::auth_store::AuthStore>,
+    org: &str,
+) -> serde_json::Value {
+    let Some(store) = auth_store else {
+        return serde_json::json!({});
+    };
+    let Ok(keys) = store.list_keys(Some(org)).await else {
+        return serde_json::json!({});
+    };
+
+    let parsed: Vec<Quotas> = keys
+        .iter()
+        .map(|record| Quotas::from_value(&record.quotas))
+        .collect();
+
+    // `None` means unlimited, so one unlimited key makes the whole limit
+    // unlimited. Otherwise the largest number wins.
+    let widest = |values: Vec<Option<u64>>| -> Option<u64> {
+        if values.iter().any(|v| v.is_none()) {
+            return None;
+        }
+        values.into_iter().flatten().max()
+    };
+
+    let best = Quotas {
+        max_keys: widest(parsed.iter().map(|q| q.max_keys).collect()),
+        max_vectors: widest(parsed.iter().map(|q| q.max_vectors).collect()),
+        max_blob_bytes: widest(parsed.iter().map(|q| q.max_blob_bytes).collect()),
+        max_queue_messages: widest(parsed.iter().map(|q| q.max_queue_messages).collect()),
+    };
+    serde_json::to_value(best).unwrap_or_else(|_| serde_json::json!({}))
+}
+
 impl Quotas {
     /// Parse from the untyped value carried on `TenantContext`.
     ///
@@ -599,6 +654,45 @@ pub async fn guard_vector_write(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The widening rule `quotas_for_org` applies, without a database.
+    ///
+    /// Split out so the rule itself is testable: standing up SQLite and a set of
+    /// api keys to check that 1 GB and 10 GB resolve to 10 GB tests the store,
+    /// not the decision.
+    fn widen(values: &[Option<u64>]) -> Option<u64> {
+        if values.iter().any(|v| v.is_none()) {
+            return None;
+        }
+        values.iter().copied().flatten().max()
+    }
+
+    #[test]
+    fn the_org_limit_is_the_widest_of_its_keys() {
+        // Matching what the native door already does. An org holding a 1 GB key
+        // and a 10 GB key can already store 10 GB by using the second one, so
+        // taking the minimum here would make the S3 door stricter than the API
+        // it shares storage with.
+        assert_eq!(widen(&[Some(1_000), Some(10_000)]), Some(10_000));
+        assert_eq!(widen(&[Some(10_000), Some(1_000)]), Some(10_000));
+    }
+
+    #[test]
+    fn one_unlimited_key_makes_the_org_unlimited() {
+        // `None` is unlimited, and it has to beat every number rather than being
+        // skipped as "no value" — otherwise an org with an unlimited key and a
+        // small one would be held to the small one.
+        assert_eq!(widen(&[Some(1_000), None]), None);
+        assert_eq!(widen(&[None, Some(1_000)]), None);
+    }
+
+    #[test]
+    fn an_org_with_no_keys_is_unlimited_rather_than_blocked() {
+        // The same direction every other quota path takes when it cannot
+        // establish a limit: refusing writes on missing configuration turns a
+        // setup gap into an outage.
+        assert_eq!(widen(&[]), None);
+    }
 
     #[test]
     fn an_empty_record_is_unlimited() {

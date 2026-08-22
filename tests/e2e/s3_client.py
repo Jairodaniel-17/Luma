@@ -211,6 +211,50 @@ def an_aborted_multipart_upload_leaves_nothing(s3):
 
 
 @check
+def the_etag_is_the_md5_of_the_body(s3):
+    """A client that verifies a download recomputes this."""
+    import hashlib
+    body = b'the quick brown fox'
+    put = s3.put_object(Bucket='luma-e2e', Key='etag.txt', Body=body)
+    expected = hashlib.md5(body).hexdigest()
+    assert put['ETag'].strip('"') == expected, (put['ETag'], expected)
+
+    head = s3.head_object(Bucket='luma-e2e', Key='etag.txt')
+    assert head['ETag'].strip('"') == expected, head['ETag']
+    s3.delete_object(Bucket='luma-e2e', Key='etag.txt')
+
+
+@check
+def a_multipart_etag_has_the_dash_and_part_count(s3):
+    """S3's multipart ETag is md5(concat(part digests)) + "-" + count.
+
+    The dash is load-bearing: it is how a client knows not to compare the ETag
+    against the MD5 of the bytes it received.
+    """
+    import hashlib
+    key = 'etag-multi.bin'
+    created = s3.create_multipart_upload(Bucket='luma-e2e', Key=key)
+    upload_id = created['UploadId']
+    chunks = [b'A' * 100, b'B' * 100]
+    parts = []
+    for number, chunk in enumerate(chunks, start=1):
+        result = s3.upload_part(
+            Bucket='luma-e2e', Key=key, UploadId=upload_id,
+            PartNumber=number, Body=chunk)
+        assert result['ETag'].strip('"') == hashlib.md5(chunk).hexdigest()
+        parts.append({'PartNumber': number, 'ETag': result['ETag']})
+
+    done = s3.complete_multipart_upload(
+        Bucket='luma-e2e', Key=key, UploadId=upload_id,
+        MultipartUpload={'Parts': parts})
+
+    digests = b''.join(hashlib.md5(c).digest() for c in chunks)
+    expected = '%s-%d' % (hashlib.md5(digests).hexdigest(), len(chunks))
+    assert done['ETag'].strip('"') == expected, (done['ETag'], expected)
+    s3.delete_object(Bucket='luma-e2e', Key=key)
+
+
+@check
 def a_wrong_secret_is_refused(s3):
     """The signature has to actually be checked."""
     from botocore.exceptions import ClientError

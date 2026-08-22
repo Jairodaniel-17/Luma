@@ -343,24 +343,41 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// The ETag of a single-part upload: the MD5 of the body, hex, as S3 defines it.
+///
+/// It used to be the first 16 bytes of a SHA-256, on the reasoning that adding a
+/// dependency on a cryptographically broken hash for a checksum was not worth
+/// it. Two things were wrong with that. `md-5` was already in the dependency
+/// tree, so the dependency cost nothing; and MD5 here is not a security
+/// primitive but a wire format — a client that recomputes the ETag to verify a
+/// download is checking for corruption, and it either matches or the download
+/// looks corrupt.
 fn etag_of(bytes: &[u8]) -> String {
-    format!("{:x}", md5_like(bytes))
+    hex_lower(&md5_digest(bytes))
 }
 
-/// A content hash for the ETag.
+fn md5_digest(bytes: &[u8]) -> [u8; 16] {
+    use md5::{Digest, Md5};
+    Md5::digest(bytes).into()
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The ETag of a completed multipart upload.
 ///
-/// **Not MD5.** S3's ETag for a single-part upload is the MD5 of the body, and
-/// some clients recompute it to verify a download. This is a different hash, so
-/// such a client will see a mismatch. Recorded here and in `docs/integrar/S3.md` rather
-/// than left to be discovered: adding an MD5 dependency for a checksum that is
-/// cryptographically broken anyway was the trade, and it can be revisited if a
-/// client actually needs it.
-fn md5_like(bytes: &[u8]) -> u128 {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(bytes);
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&digest[..16]);
-    u128::from_be_bytes(out)
+/// Not the MD5 of the assembled object, which is what a naive implementation
+/// produces and what no S3 client expects. S3's form is the MD5 of the
+/// *concatenated binary digests of the parts*, then a dash and the part count —
+/// so a client can tell a multipart object from a single-part one by the dash
+/// alone, and knows not to compare it against the MD5 of what it downloaded.
+fn multipart_etag(part_bodies: &[Vec<u8>]) -> String {
+    let mut digests = Vec::with_capacity(part_bodies.len() * 16);
+    for body in part_bodies {
+        digests.extend_from_slice(&md5_digest(body));
+    }
+    format!("{}-{}", hex_lower(&md5_digest(&digests)), part_bodies.len())
 }
 
 // ── handlers ─────────────────────────────────────────────────────────────────
@@ -610,14 +627,14 @@ pub async fn object_put(
 
     // Multipart part upload arrives on the same path with these parameters.
     if let (Some(upload_id), Some(part)) = (params.get("uploadId"), params.get("partNumber")) {
-        return upload_part(&state, &bucket, &key, upload_id, part, &body).await;
+        return upload_part(&state, &caller, &bucket, &key, upload_id, part, &body).await;
     }
 
     let path = object_path(&state, &bucket, &key)?;
     let replacing = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     // The same quota the native API enforces, because it is the same storage.
-    let ctx = tenant_context(&caller);
+    let ctx = enforcing_context(&state, &caller).await;
     crate::api::quotas::guard_blob_write(
         crate::api::quotas::BlobQuotaStore {
             sqlite: state.sqlite.as_ref(),
@@ -660,6 +677,10 @@ pub async fn object_put(
     Ok((StatusCode::OK, [("ETag", format!("\"{etag}\""))]).into_response())
 }
 
+/// A context for accounting: who the bytes belong to, no limits attached.
+///
+/// Enough for `record_blob_delta`, which only needs the organization. Anything
+/// that has to *refuse* a write wants `enforcing_context` instead.
 fn tenant_context(caller: &Caller) -> crate::api::TenantContext {
     crate::api::TenantContext {
         tenant_id: Some(caller.org_id.clone()),
@@ -667,11 +688,22 @@ fn tenant_context(caller: &Caller) -> crate::api::TenantContext {
         role: "member".to_string(),
         platform_admin: false,
         permissions: serde_json::json!({}),
-        // Quotas travel on the api key record, which an S3 credential does not
-        // have. Left empty here means unlimited *through this door*, which is a
-        // real gap and is recorded in docs/integrar/S3.md.
         quotas: serde_json::json!({}),
     }
+}
+
+/// The same, with the organization's real quota resolved.
+///
+/// SigV4 identifies a caller by access key id, and that record carries an org
+/// and nothing else — so this door used to run with empty quotas: the bytes were
+/// counted, keeping usage correct, but nothing was ever refused. The limit is
+/// read from the org's api keys, where it already lives; see
+/// `quotas::quotas_for_org` for why the widest one is the right choice.
+async fn enforcing_context(state: &AppState, caller: &Caller) -> crate::api::TenantContext {
+    let mut ctx = tenant_context(caller);
+    ctx.quotas =
+        crate::api::quotas::quotas_for_org(state.auth_store.as_deref(), &caller.org_id).await;
+    ctx
 }
 
 pub async fn object_get(
@@ -831,6 +863,7 @@ pub async fn object_post(
 
 async fn upload_part(
     state: &AppState,
+    caller: &Caller,
     _bucket: &str,
     _key: &str,
     upload_id: &str,
@@ -852,6 +885,33 @@ async fn upload_part(
             "The specified multipart upload does not exist.",
         ));
     }
+    // Multipart had no quota guard at all, which made it the way around the
+    // one `PutObject` enforces: upload the same bytes in parts and nothing
+    // counted them. Charged per part, because the parts are what is on disk —
+    // `complete` only concatenates what a guard already admitted.
+    let ctx = enforcing_context(state, caller).await;
+    let replacing = std::fs::metadata(directory.join(format!("{number:05}")))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    crate::api::quotas::guard_blob_write(
+        crate::api::quotas::BlobQuotaStore {
+            sqlite: state.sqlite.as_ref(),
+            accounts: state.accounts.as_deref(),
+            blobs_root: &blobs_root(state),
+        },
+        &ctx,
+        body.len() as u64,
+        replacing,
+    )
+    .await
+    .map_err(|_| {
+        S3Error::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "QuotaExceeded",
+            "the organization is out of object storage",
+        )
+    })?;
+
     // Zero-padded so the parts sort in numeric order on disk, which is the order
     // they have to be concatenated in.
     let path = directory.join(format!("{number:05}"));
@@ -902,6 +962,10 @@ async fn complete_multipart(
         wanted
     };
 
+    // Parts kept separately as well as concatenated: the multipart ETag is the
+    // MD5 of the parts' digests, not of the assembled object, so the boundaries
+    // are part of the answer.
+    let mut part_bodies: Vec<Vec<u8>> = Vec::with_capacity(numbers.len());
     let mut assembled = Vec::new();
     for number in &numbers {
         let part = directory.join(format!("{number:05}"));
@@ -913,6 +977,7 @@ async fn complete_multipart(
             )
         })?;
         assembled.extend_from_slice(&bytes);
+        part_bodies.push(bytes);
     }
 
     let path = object_path(state, bucket, key)?;
@@ -938,7 +1003,7 @@ async fn complete_multipart(
     )
     .await;
 
-    let etag = etag_of(&assembled);
+    let etag = multipart_etag(&part_bodies);
     Ok(xml_response(
         StatusCode::OK,
         xml::complete_multipart(&format!("/{bucket}/{key}"), bucket, key, &etag),
@@ -948,6 +1013,45 @@ async fn complete_multipart(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_etag_is_the_md5_s3_clients_expect() {
+        // Known answers, so a wrong hash cannot pass by agreeing with itself.
+        // A client that recomputes the ETag to check a download is looking for
+        // exactly these bytes.
+        assert_eq!(etag_of(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(etag_of(b"hello world"), "5eb63bbbe01eeed093cb22bb8f5acdc3");
+    }
+
+    #[test]
+    fn a_multipart_etag_is_the_digest_of_digests_with_a_part_count() {
+        // Not the MD5 of the assembled object, which is what a naive
+        // implementation produces and what no client expects. The dash and the
+        // count are how a client knows not to compare it against the MD5 of
+        // what it downloaded.
+        let parts = vec![b"aaaa".to_vec(), b"bbbb".to_vec()];
+        let etag = multipart_etag(&parts);
+        assert!(etag.ends_with("-2"), "{etag}");
+
+        let mut digests = Vec::new();
+        digests.extend_from_slice(&md5_digest(b"aaaa"));
+        digests.extend_from_slice(&md5_digest(b"bbbb"));
+        assert_eq!(etag, format!("{}-2", hex_lower(&md5_digest(&digests))));
+
+        // And it is not the MD5 of the concatenation, which is the mistake.
+        assert_ne!(etag, etag_of(b"aaaabbbb"));
+    }
+
+    #[test]
+    fn the_part_boundaries_change_a_multipart_etag() {
+        // Same bytes, different split: S3 gives different ETags, because the
+        // digest is taken over the parts. Collapsing them would make the ETag
+        // claim the object was uploaded differently than it was.
+        let one = multipart_etag(&[b"aaaabbbb".to_vec()]);
+        let two = multipart_etag(&[b"aaaa".to_vec(), b"bbbb".to_vec()]);
+        assert_ne!(one, two);
+        assert!(one.ends_with("-1"));
+    }
 
     #[test]
     fn a_traversing_bucket_name_is_refused() {
