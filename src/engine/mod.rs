@@ -5,6 +5,7 @@ mod events;
 pub mod hub;
 pub mod meta;
 pub mod metrics;
+pub mod notify;
 pub mod parser;
 mod persist;
 mod state;
