@@ -233,7 +233,7 @@ extendido a los registros nuevos.
 
 ### Bloque 3 — RPO prometible · `v4.28.0`
 
-- `[ ]` **W1.3 — backup remoto** a destino S3-compatible con el crate
+- `[x]` **W1.3 — backup remoto** a destino S3-compatible con el crate
   `object_store` (S3/R2/GCS/MinIO con una API). Artefacto cifrado con la master
   key; `luma restore s3://…` directo; retención remota. Dependencia nueva →
   pasa por `deny.toml`.
