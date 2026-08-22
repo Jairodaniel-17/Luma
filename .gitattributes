@@ -1,3 +1,11 @@
+# The compiled admin panel is a build artefact compared byte for byte by CI
+# ("the committed bundle must match the source"). Line-ending conversion makes
+# that comparison depend on which machine last ran `npm run build`: committed
+# from Windows the blob carries CRLF, and the Linux runner's vite writes LF, so
+# every line differs and the check reports a stale bundle that is in fact
+# identical. `-text` stores exactly what the build produced, on any platform.
+ui/dist/** -text
+
 # The golden data_dir fixture is a byte-for-byte recording of on-disk formats.
 # Line-ending normalization would rewrite the WAL segment and break its
 # per-record checksums, so the whole tree is exempt from any text conversion —

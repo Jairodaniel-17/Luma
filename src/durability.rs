@@ -59,6 +59,56 @@ pub fn fsync_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Create a directory and every missing ancestor, durably.
+///
+/// `create_dir_all` is not enough, and the gap is not theoretical: step 4 of
+/// `write_atomic` fsyncs the file's own directory, which makes the file's entry
+/// durable *in that directory*. It says nothing about whether that directory's
+/// own entry reached the disk. If `create_dir_all` just made three levels —
+/// `queues/`, `queues/t_acme/`, `queues/t_acme/jobs/` — a crash can take all
+/// three, and every message inside them, while the enqueue has already returned
+/// OK to the producer.
+///
+/// It hid on Windows and showed on Linux, which is the usual shape for this
+/// class of bug: NTFS journals directory metadata aggressively enough that the
+/// entries were there anyway.
+///
+/// So each newly created level is fsynced **in its parent**, top down. Levels
+/// that already existed are left alone — their entries are already durable, and
+/// fsyncing the whole chain on every write would be a syscall per level per
+/// message.
+pub async fn create_dir_all_durable(dir: &Path) -> io::Result<()> {
+    // Nothing to do for a directory that is already there, which is the common
+    // case: this runs on the write path of every queued message.
+    if tokio::fs::metadata(dir).await.is_ok() {
+        return Ok(());
+    }
+
+    // Top down, so a parent always exists before its child is created.
+    let mut ancestors: Vec<&Path> = dir.ancestors().collect();
+    ancestors.reverse();
+
+    for level in ancestors {
+        if tokio::fs::metadata(level).await.is_ok() {
+            continue;
+        }
+        match tokio::fs::create_dir(level).await {
+            Ok(()) => {}
+            // Another task created it between the check and the call. Its
+            // creator is responsible for the fsync.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+        let Some(parent) = level.parent().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        tokio::task::spawn_blocking(move || fsync_dir(&parent))
+            .await
+            .map_err(|e| io::Error::other(format!("fsync_dir task failed: {e}")))??;
+    }
+    Ok(())
+}
+
 /// Write `bytes` to `path` atomically **and durably**.
 ///
 /// The sequence, and why each step is there:
@@ -82,7 +132,7 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
             "destination has no parent directory",
         )
     })?;
-    tokio::fs::create_dir_all(parent).await?;
+    create_dir_all_durable(parent).await?;
 
     let tmp = parent.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
     match write_and_commit(&tmp, path, parent, bytes).await {
@@ -121,6 +171,43 @@ async fn write_and_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_write_creates_every_missing_level_of_its_path() {
+        // Three levels at once is exactly the queue case: `queues/t_acme/jobs/`
+        // did not exist, and the enqueue that made it returned OK to the
+        // producer. Whether each level's entry is durable is what a crash
+        // decides; this at least fixes that the whole chain is created and
+        // written through, which is what regressed the moment `create_dir_all`
+        // was doing it in one unchecked call.
+        let root = tmp_dir("deep_chain");
+        let nested = root.join("queues").join("t_acme").join("jobs");
+        let target = nested.join("message.json");
+
+        write_atomic(&target, b"{}").await.expect("write");
+
+        assert!(nested.is_dir(), "every level must exist");
+        assert_eq!(std::fs::read(&target).unwrap(), b"{}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn creating_a_directory_that_already_exists_is_not_an_error() {
+        // The common case on the write path: this runs for every queued
+        // message, and all but the first find the directory already there.
+        let root = tmp_dir("existing_chain");
+        std::fs::create_dir_all(root.join("a").join("b")).unwrap();
+
+        create_dir_all_durable(&root.join("a").join("b"))
+            .await
+            .expect("an existing directory is fine");
+        // And a partially existing chain: `a/b` is there, `a/b/c` is not.
+        create_dir_all_durable(&root.join("a").join("b").join("c"))
+            .await
+            .expect("a partial chain is fine");
+        assert!(root.join("a").join("b").join("c").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn tmp_dir(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();

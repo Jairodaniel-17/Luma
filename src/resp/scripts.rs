@@ -135,22 +135,6 @@ pub fn no_script() -> Value {
     Value::Error("NOSCRIPT No matching script. Please use EVAL.".to_string())
 }
 
-/// What a script asked us to do, expressed in ordinary commands.
-///
-/// Returned rather than executed here so this module stays free of the engine:
-/// the caller runs them with the same helpers that serve `GET` and `PEXPIRE`,
-/// which is what keeps the two from drifting.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Step {
-    /// Read the key and compare with the token. Everything here is a
-    /// compare-and-act, so this always comes first.
-    Get(Vec<u8>),
-    Del(Vec<u8>),
-    /// Remaining ttl in milliseconds.
-    PttlMillis(Vec<u8>),
-    PexpireMillis(Vec<u8>, i64),
-}
-
 /// One script's plan, given its keys and arguments.
 ///
 /// `Err` carries the reply to send: an argument mistake is the client's, and
