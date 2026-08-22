@@ -1,0 +1,7 @@
+# The golden data_dir fixture is a byte-for-byte recording of on-disk formats.
+# Line-ending normalization would rewrite the WAL segment and break its
+# per-record checksums, so the whole tree is exempt from any text conversion —
+# `-text` is what makes that guarantee, and `binary` also keeps diffs quiet.
+tests/fixtures/golden_data_dir/** -text -diff
+# Except its README, which is prose and should behave like every other doc.
+tests/fixtures/golden_data_dir/README.md text
