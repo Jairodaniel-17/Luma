@@ -478,8 +478,8 @@ alcance, no un bug.
   consenso — backlog con criterio de entrada explícito. Por eso el runbook
   sigue diciendo que se pare el primario antiguo primero: el fencing es la red,
   no el plan.
-- `[~]` **W3.2 - API S3-compatible** (las operaciones y SigV4, hechos; ver las
-  divergencias declaradas abajo y en `docs\integrar\S3.md`).
+- `[~]` **W3.2 - API S3-compatible.** Todo hecho salvo el acceso anónimo, que se
+  descarta a propósito. Divergencias y huecos, abajo y en `docs\integrar\S3.md`.
 
   `src\s3\`: `sigv4.rs` (firma por cabecera y presignada), `credentials.rs`,
   `xml.rs`, `routes.rs`. Escucha en `s3_port` propio, porque S3 se adueña de la
@@ -541,8 +541,9 @@ alcance, no un bug.
 
   **Lo que sigue abierto, y es deliberado:** no hay acceso anonimo. Sin probar:
   cargas de tamano real y escritura concurrente sobre la misma clave.
-- `[~]` **W3.3 - OpenAPI sin deriva** (la superficie de rutas está fijada; los
-  esquemas siguen escritos a mano).
+- `[~]` **W3.3 - OpenAPI sin deriva.** Rutas y esquemas con guardas. La generación
+  desde el código queda descartada a propósito; los esquemas siguen escritos a
+  mano y las guardas los comprueban.
 
   `tests/openapi_drift.rs` compara las rutas que el router declara contra las
   que el spec documenta, en las dos direcciones. Su primera ejecución encontró:
