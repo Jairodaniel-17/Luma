@@ -84,6 +84,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // The RESP listener needs the same key store, so `AUTH <api-key>` binds a
+    // connection to the org that owns the key instead of only accepting the
+    // instance-wide password.
+    let auth_store_for_resp = auth_store.clone();
+
     let rbac = if let Some(svc) = &sqlite {
         let r = Arc::new(luma::api::rbac::RbacService::new(Arc::new(svc.clone())));
         r.init().await?;
@@ -119,7 +124,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         config: config.clone(),
         sqlite,
         search_engine,
-        auth_store,
+        auth_store: auth_store.clone(),
         embeddings,
         resp_metrics: config
             .resp_port
@@ -143,6 +148,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         &config,
         engine.clone(),
         std::sync::Arc::clone(&resp_metrics),
+        auth_store_for_resp,
         shutdown_token.clone(),
     )
     .await

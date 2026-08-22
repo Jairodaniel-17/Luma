@@ -20,11 +20,46 @@ pub struct ApiKeyRecord {
 #[derive(Clone)]
 pub struct AuthStore {
     sqlite: Arc<SqliteService>,
+    /// Bumped on every revocation.
+    ///
+    /// Long-lived connections (a RESP client authenticates once and then sends
+    /// commands for hours) need revocation to take effect without asking the
+    /// database on every command. Comparing a cached number against this one is
+    /// an atomic load; only a move triggers a real check. Shared through the
+    /// `Clone`, so every holder of the store sees the same count.
+    revocations: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AuthStore {
     pub fn new(sqlite: Arc<SqliteService>) -> Self {
-        Self { sqlite }
+        Self {
+            sqlite,
+            revocations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// How many revocations this process has performed.
+    ///
+    /// Deliberately a count and not a timestamp: it only has to *change*, and a
+    /// counter cannot go backwards the way a clock can.
+    pub fn revocation_epoch(&self) -> u64 {
+        self.revocations.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether a key id still exists.
+    ///
+    /// Revocation deletes the row, so existence is the whole test. Used to
+    /// re-check a credential a connection resolved earlier, without keeping the
+    /// secret itself in memory for the connection's lifetime.
+    pub async fn key_is_live(&self, id: &str) -> anyhow::Result<bool> {
+        let rows = self
+            .sqlite
+            .query(
+                "SELECT 1 FROM sys_api_keys WHERE id = ? LIMIT 1".to_string(),
+                vec![serde_json::json!(id)],
+            )
+            .await?;
+        Ok(!rows.is_empty())
     }
 
     pub async fn init(&self) -> anyhow::Result<()> {
@@ -215,6 +250,12 @@ impl AuthStore {
             ),
         };
         let affected = self.sqlite.execute(sql, params).await?;
+        if affected > 0 {
+            // After the delete, so nobody can observe the bump and then still
+            // validate the key.
+            self.revocations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(affected > 0)
     }
 

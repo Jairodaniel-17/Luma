@@ -266,6 +266,12 @@ El hito visible: `redis-cli -p 6379` conversa con Luma.
   actuales; keyspace prefijado por `{org_id}\x1f`; `KEYS`/`SCAN` filtran por
   tenant. Dos orgs con la misma clave no se ven. Key revocada corta en el
   siguiente comando.
+  **Corrección de contabilidad (Bloque 8):** esto estuvo marcado `[x]` sin
+  estarlo. El plumbing existía en la capa de comandos y sus tests lo ejercitaban
+  poniendo `session.tenant` a mano, pero el listener autenticaba solo contra la
+  clave estática y devolvía `tenant: None` — toda conexión RESP compartía un
+  keyspace plano y la api key de una org no servía por el protocolo. Cerrado de
+  verdad al abrir el Bloque 8, con 9 tests sobre socket real.
 - `[x]` **F1.3 — comandos de strings/keys** El set completo del SPEC
   (`GET SET SETEX … SCAN RENAME`), con `FLUSHDB` solo bajo
   `resp_allow_flush = true`. **La suite diferencial contra Redis 7 real en
@@ -283,8 +289,20 @@ smoke de redis-py.
 Exponer por protocolo lo que el Bloque 2 ya implementó. Riesgo bajo de diseño,
 alto de detalle.
 
-- `[x]` **F2.1 listas** · `[ ]` **F2.2 hashes** · `[ ]` **F2.3 sets** ·
-  `[ ]` **F2.4 sorted sets** (los comandos exactos, en `SPEC-resp.md`).
+Cobertura **medida** contra las listas de comandos de `SPEC-resp.md`, no
+estimada (33/57 comandos):
+
+- `[~]` **F2.1 listas** — 9/14. Faltan `LINDEX LSET LTRIM RPOPLPUSH LMOVE`.
+- `[~]` **F2.2 hashes** — 10/12. Faltan `HSETNX HSCAN`.
+- `[~]` **F2.3 sets** — 5/8. Faltan `SPOP SRANDMEMBER SSCAN`.
+- `[~]` **F2.4 sorted sets** — 7/17. Faltan `ZMSCORE ZCOUNT ZINCRBY
+  ZREVRANGEBYSCORE ZREMRANGEBYSCORE ZREMRANGEBYRANK ZREVRANK ZPOPMIN ZPOPMAX
+  ZSCAN`, más los flags de `ZADD` (`NX XX GT LT CH INCR`) y las opciones de
+  `ZRANGE` (`REV BYSCORE BYLEX LIMIT WITHSCORES`).
+
+F2.1 estuvo marcado `[x]` con 9/14 comandos. El recuento de arriba sale de
+comparar los literales implementados contra el SPEC, que es la única forma de
+que esta casilla no vuelva a mentir.
 
 Las dos trampas que la aceptación tiene que cazar explícitamente: **nil vs
 array vacío** y **`-WRONGTYPE` cruzando tipos**. Ahí es donde los clientes
@@ -327,7 +345,7 @@ alcance, no un bug.
   histogramas por endpoint y por motor, OTLP opt-in (`otel_endpoint`) y un
   dashboard Grafana commiteado + docker-compose de demo que lo levante sin
   editar nada.
-- `[ ]` **W2.2 — réplica de lectura caliente.** El replay ya existe (arrancar
+- `[x]` **W2.2 — réplica de lectura caliente.** El replay ya existe (arrancar
   *es* replay); convertirlo en replay continuo con offset expuesto. Alcance
   **congelado**: solo lecturas, promoción manual (`luma promote`), sin failover
   automático. El riesgo declarado del SPEC es que este ítem se convierta en un

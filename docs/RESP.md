@@ -126,10 +126,27 @@ afecta, es mejor saberlo antes de migrar que descubrirlo en producción.
 
 ### Multi-tenancy
 
-Si la conexión se autentica contra una organización, **todas** sus claves y
-canales llevan ese prefijo de forma transparente. Dos organizaciones usando
-`celery` no se ven. Con la clave estática actual la conexión no está ligada a
-ninguna organización y opera sobre el keyspace sin prefijo.
+`AUTH <api-key>` liga la conexión a la organización dueña de esa clave, y a
+partir de ahí **todas** sus claves y canales llevan ese prefijo de forma
+transparente: dos organizaciones usando `celery` no se ven. La respuesta nombra
+siempre la clave que el cliente envió, nunca la forma interna — `BLPOP jobs`
+contesta `jobs`, que es lo que kombu compara.
+
+La clave estática de la instancia (`api_key` / `LUMA_API_KEY`) sigue siendo
+válida y es la credencial **de plataforma**: no está ligada a ninguna
+organización y opera sobre el keyspace sin prefijo, igual que hace por HTTP.
+
+El separador entre organización y clave es el **separador de unidad ASCII**
+(`0x1f`), no `:`. Con `:` la organización `a` guardando `b:c` y la organización
+`a:b` guardando `c` producen la misma clave física — una lee el dato de la otra.
+Un carácter de control no puede aparecer en un id de organización, así que la
+división no es ambigua. Los canales de Pub/Sub ya usaban este separador.
+
+**Revocación.** Una clave revocada deja de servir en el **comando siguiente**,
+no al reconectar: la conexión permanece abierta y recibe `NOAUTH`, que es lo que
+le dice al cliente que vuelva a autenticarse en vez de parecer un fallo de red.
+El coste en régimen normal es una lectura atómica por comando; solo se consulta
+la base de datos después de que alguien haya revocado algo de verdad.
 
 ---
 

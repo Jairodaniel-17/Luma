@@ -16,7 +16,7 @@
 //! it is a port conflict with the actual Redis.
 
 use crate::engine::Engine;
-use crate::resp::commands::{dispatch, Dispatch, Session};
+use crate::resp::commands::{dispatch, AuthBinding, Dispatch, Session};
 use crate::resp::protocol::{Decoder, ProtocolError, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -87,8 +87,18 @@ impl RespMetrics {
 pub struct RespServer {
     pub engine: Engine,
     pub metrics: Arc<RespMetrics>,
-    /// Static password, or empty for no authentication.
+    /// Static instance password, or empty for no authentication.
+    ///
+    /// It authenticates to the *unprefixed* keyspace, matching what the same
+    /// key does over HTTP: it is the platform credential, not an org's. Org
+    /// scoping comes from an api key, below.
     pub password: String,
+    /// Api keys, so `AUTH` can bind a connection to the org that owns the key.
+    ///
+    /// Optional because the listener has to work in tests and in a build with
+    /// no accounts layer initialised; without it only the static password is
+    /// accepted and every connection is platform-wide.
+    pub auth_store: Option<Arc<crate::api::auth_store::AuthStore>>,
     pub max_clients: usize,
     pub idle_timeout: Duration,
     /// Hard cap on a single connection's read buffer. A peer that never
@@ -112,6 +122,77 @@ impl RespServer {
     fn requires_auth(&self) -> bool {
         !self.password.is_empty()
     }
+
+    /// Resolve an `AUTH` credential.
+    ///
+    /// The static instance password wins first and binds no tenant. Otherwise
+    /// the secret is looked up as an api key and the connection is bound to
+    /// that key's org, which is what makes the `{org}<US>{key}` prefixing real
+    /// rather than a code path nothing reaches.
+    ///
+    /// The username is accepted and ignored. Clients send `default` when only a
+    /// password is set, and redis-py sends whatever username it was configured
+    /// with; rejecting a mismatch would fail connections over a name that means
+    /// nothing here.
+    async fn resolve(&self, password: &str) -> Option<AuthBinding> {
+        if !self.password.is_empty() && password == self.password {
+            return Some(AuthBinding::default());
+        }
+        let store = self.auth_store.as_ref()?;
+        match store.validate_key(password).await {
+            Ok(Some(record)) => Some(AuthBinding {
+                tenant: record.tenant_id,
+                key_id: Some(record.id),
+            }),
+            Ok(None) => None,
+            // A database error is not a valid credential. Failing open here
+            // would turn a transient SQLite fault into an authentication
+            // bypass.
+            Err(e) => {
+                tracing::warn!("RESP auth lookup failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Current revocation count, or 0 with no store.
+    fn revocation_epoch(&self) -> u64 {
+        self.auth_store
+            .as_ref()
+            .map(|s| s.revocation_epoch())
+            .unwrap_or(0)
+    }
+}
+
+/// Drop the session's credential if the api key behind it was revoked.
+///
+/// The plan's acceptance criterion is that a revoked key stops working on the
+/// *next* command, which rules out caching the answer for the connection's
+/// lifetime. Asking the database every command would put a SQLite round-trip in
+/// front of every `GET`, so the epoch is the fast path: an atomic load, and a
+/// real query only after somebody actually revoked something.
+async fn enforce_revocation(server: &RespServer, session: &mut Session, seen_epoch: &mut u64) {
+    let Some(key_id) = session.key_id.clone() else {
+        return;
+    };
+    let current = server.revocation_epoch();
+    if current == *seen_epoch {
+        return;
+    }
+    let Some(store) = server.auth_store.as_ref() else {
+        return;
+    };
+    match store.key_is_live(&key_id).await {
+        Ok(true) => *seen_epoch = current,
+        Ok(false) => {
+            tracing::info!(key_id = %key_id, "RESP connection deauthenticated: api key revoked");
+            session.deauthenticate();
+        }
+        // Leave the epoch behind on error so the next command retries. Assuming
+        // the key is dead would cut live connections on a transient fault;
+        // assuming it is alive would keep a revoked one working indefinitely.
+        Err(e) => tracing::warn!("RESP revocation check failed: {e}"),
+    }
 }
 
 /// Start the listener. Returns immediately; the accept loop runs in a task.
@@ -119,6 +200,7 @@ pub async fn spawn(
     config: &crate::config::Config,
     engine: Engine,
     metrics: Arc<RespMetrics>,
+    auth_store: Option<Arc<crate::api::auth_store::AuthStore>>,
     shutdown: CancellationToken,
 ) -> std::io::Result<Option<u16>> {
     if config.resp_port == 0 {
@@ -132,6 +214,7 @@ pub async fn spawn(
         engine,
         metrics,
         password: config.api_key.clone(),
+        auth_store,
         max_clients: config.resp_max_clients.max(1),
         idle_timeout: Duration::from_secs(config.resp_idle_timeout_secs.max(1)),
         max_buffer_bytes: config.resp_max_buffer_bytes.max(1024),
@@ -237,6 +320,10 @@ async fn serve_inner(
     let _ = stream.set_nodelay(true);
 
     let mut session = Session::new(server.requires_auth());
+    // Revocation count this connection has already reconciled against. Starts
+    // at the current value: a key revoked *before* this connection existed
+    // cannot have authenticated it.
+    let mut seen_epoch = server.revocation_epoch();
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 16 * 1024];
 
@@ -264,8 +351,31 @@ async fn serve_inner(
                         .commands_total
                         .fetch_add(1, Ordering::Relaxed);
 
+                    // Before anything else: a key revoked since the last
+                    // command must not serve this one.
+                    enforce_revocation(server, &mut session, &mut seen_epoch).await;
+
                     let was_authenticated = session.authenticated;
-                    let password = server.password.clone();
+                    // `AUTH` is resolved here, not inside dispatch: looking a
+                    // secret up in the api-key store is async and dispatch is
+                    // synchronous on purpose. The epoch is read *before* the
+                    // lookup so a revocation racing this auth is caught on the
+                    // next command rather than skipped.
+                    let resolved = if args[0].eq_ignore_ascii_case(b"auth") {
+                        let epoch_before = server.revocation_epoch();
+                        let binding = match crate::resp::commands::auth_credential(&args[1..]) {
+                            Some((_user, password)) => server.resolve(&password).await,
+                            // Wrong arity: let dispatch produce the arity error
+                            // rather than reporting a bad password.
+                            None => None,
+                        };
+                        if binding.is_some() {
+                            seen_epoch = epoch_before;
+                        }
+                        binding
+                    } else {
+                        None
+                    };
                     // A push has to wake a parked reader; the keys are
                     // captured before dispatch and notified after, so the
                     // element is already there when the waiter re-checks.
@@ -274,11 +384,7 @@ async fn serve_inner(
                         &server.engine,
                         &mut session,
                         &args,
-                        &|_user, given| {
-                            // Static password for now; the api-key/role mapping of
-                            // D3 arrives with the accounts wiring.
-                            (given == password).then_some(None)
-                        },
+                        &|_user, _given| resolved.clone(),
                         server.allow_flush,
                     );
 
@@ -296,7 +402,14 @@ async fn serve_inner(
                                 stream.write_all(&out).await?;
                                 out.clear();
                             }
-                            let value = blocking_pop(server, &keys, timeout, left).await;
+                            let value = blocking_pop(
+                                server,
+                                &keys,
+                                session.tenant.as_deref(),
+                                timeout,
+                                left,
+                            )
+                            .await;
                             value.encode(&mut out);
                         }
                         Dispatch::PubSub(command) => {
@@ -425,7 +538,7 @@ fn pushed_list_keys(session: &Session, args: &[Vec<u8>]) -> Vec<String> {
 fn scope_key(session: &Session, key: &[u8]) -> String {
     let key = String::from_utf8_lossy(key);
     match &session.tenant {
-        Some(tenant) => format!("{tenant}:{key}"),
+        Some(tenant) => format!("{tenant}{}{key}", super::commands::TENANT_SEP),
         None => key.to_string(),
     }
 }
@@ -438,6 +551,7 @@ fn scope_key(session: &Session, key: &[u8]) -> String {
 async fn blocking_pop(
     server: &RespServer,
     keys: &[String],
+    tenant: Option<&str>,
     timeout: Option<Duration>,
     left: bool,
 ) -> Value {
@@ -465,7 +579,7 @@ async fn blocking_pop(
                         // Redis replies with [key, element] so a multi-key
                         // waiter knows which queue it was served from.
                         return Value::Array(Some(vec![
-                            Value::bulk(unscope(server, key)),
+                            Value::bulk(crate::resp::commands::unscope_key(tenant, key)),
                             Value::bulk(bytes),
                         ]));
                     }
@@ -491,17 +605,6 @@ async fn blocking_pop(
         if waiter.wait(remaining).await.is_none() && deadline.is_some() {
             return Value::Array(None);
         }
-    }
-}
-
-/// Strip the tenant prefix so the reply names the key the client used.
-fn unscope(server: &RespServer, key: &str) -> String {
-    let _ = server;
-    match key.split_once(':') {
-        // Only the first segment is a tenant prefix; a key with its own colons
-        // keeps them.
-        Some((_, rest)) if key.starts_with(rest) => key.to_string(),
-        _ => key.to_string(),
     }
 }
 

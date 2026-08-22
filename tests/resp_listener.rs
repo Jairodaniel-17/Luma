@@ -45,10 +45,16 @@ async fn start(mut tune: impl FnMut(&mut Config)) -> Server {
     let shutdown = CancellationToken::new();
     let engine = Engine::new(config.clone(), shutdown.clone()).unwrap();
     let metrics = Arc::new(RespMetrics::default());
-    let port = spawn(&config, engine, Arc::clone(&metrics), shutdown.clone())
-        .await
-        .unwrap()
-        .expect("listener must bind");
+    let port = spawn(
+        &config,
+        engine,
+        Arc::clone(&metrics),
+        None,
+        shutdown.clone(),
+    )
+    .await
+    .unwrap()
+    .expect("listener must bind");
 
     Server {
         port,
@@ -297,6 +303,7 @@ async fn a_disabled_listener_binds_nothing() {
         &config,
         engine,
         Arc::new(RespMetrics::default()),
+        None,
         shutdown.clone(),
     )
     .await
@@ -626,4 +633,345 @@ async fn a_subscribed_connection_still_answers_commands() {
     exchange(&mut client, b"*2\r\n$9\r\nSUBSCRIBE\r\n$1\r\nc\r\n").await;
     assert_eq!(text(&exchange(&mut client, b"PING\r\n").await), "+PONG\r\n");
     server.shutdown.cancel();
+}
+
+// ─── F1.2: AUTH binds a connection to the org that owns the api key ──────────
+//
+// Until this was wired the listener only ever accepted the instance-wide
+// password and left `tenant` unset, so every RESP client shared one flat
+// keyspace and an org's api key did not work over the protocol at all. The
+// prefixing code existed and nothing reached it. These tests exist so that
+// cannot happen again silently.
+
+/// A server with a real api-key store behind it.
+///
+/// `AuthStore` needs SQLite, so this cannot use the plain `start` helper. The
+/// keys are created through the store's own API rather than by inserting rows,
+/// so the test exercises the same hashing the server does.
+struct AuthServer {
+    inner: Server,
+    store: Arc<luma::api::auth_store::AuthStore>,
+}
+
+async fn start_with_keys(instance_password: &str) -> AuthServer {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config {
+        data_dir: Some(dir.path().to_str().unwrap().to_string()),
+        resp_port: 0,
+        api_key: instance_password.to_string(),
+        ..Config::default()
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    config.resp_port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let sqlite = Arc::new(
+        luma::sqlite::SqliteService::new(dir.path().join("keys.db")).expect("sqlite must open"),
+    );
+    let store = Arc::new(luma::api::auth_store::AuthStore::new(sqlite));
+    store.init().await.unwrap();
+
+    let shutdown = CancellationToken::new();
+    let engine = Engine::new(config.clone(), shutdown.clone()).unwrap();
+    let metrics = Arc::new(RespMetrics::default());
+    let port = spawn(
+        &config,
+        engine,
+        Arc::clone(&metrics),
+        Some(Arc::clone(&store)),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap()
+    .expect("listener must bind");
+
+    AuthServer {
+        inner: Server {
+            port,
+            metrics,
+            shutdown,
+            _dir: dir,
+        },
+        store,
+    }
+}
+
+/// Mint a key for an org and return the plaintext secret plus its row id.
+async fn key_for(server: &AuthServer, org: &str) -> (String, String) {
+    let plain = server.store.generate_api_key();
+    let id = server
+        .store
+        .create_key(
+            org,
+            Some(org),
+            "user",
+            &plain,
+            serde_json::json!({}),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("key creation must succeed");
+    (plain, id)
+}
+
+#[tokio::test]
+async fn an_api_key_authenticates_over_resp() {
+    // The whole point: a credential minted for an org works on the Redis port,
+    // not just over HTTP.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (secret, _) = key_for(&server, "acme").await;
+    let mut client = connect(&server.inner).await;
+
+    // Unauthenticated commands are refused first, so a pass cannot be mistaken
+    // for the server not requiring auth at all.
+    let reply = exchange(&mut client, b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n").await;
+    assert!(
+        text(&reply).starts_with("-NOAUTH"),
+        "expected NOAUTH before AUTH, got {:?}",
+        text(&reply)
+    );
+
+    let reply = exchange(&mut client, &auth_frame(&secret)).await;
+    assert_eq!(text(&reply), "+OK\r\n");
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn two_orgs_with_their_own_keys_cannot_see_each_other() {
+    // The acceptance criterion from the SPEC. Both write the same key name and
+    // must read back their own value.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (acme, _) = key_for(&server, "acme").await;
+    let (globex, _) = key_for(&server, "globex").await;
+
+    let mut a = connect(&server.inner).await;
+    assert_eq!(text(&exchange(&mut a, &auth_frame(&acme)).await), "+OK\r\n");
+    assert_eq!(
+        text(&exchange(&mut a, b"*3\r\n$3\r\nSET\r\n$5\r\nshare\r\n$4\r\nmine\r\n").await),
+        "+OK\r\n"
+    );
+
+    let mut g = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut g, &auth_frame(&globex)).await),
+        "+OK\r\n"
+    );
+    // A nil, not acme's value: the same key name in another org is a different
+    // key.
+    assert_eq!(
+        text(&exchange(&mut g, b"*2\r\n$3\r\nGET\r\n$5\r\nshare\r\n").await),
+        "$-1\r\n",
+        "globex must not read acme's value"
+    );
+    assert_eq!(
+        text(&exchange(&mut g, b"*3\r\n$3\r\nSET\r\n$5\r\nshare\r\n$5\r\ntheir\r\n").await),
+        "+OK\r\n"
+    );
+    // And acme's value survived globex writing the same name.
+    assert_eq!(
+        text(&exchange(&mut a, b"*2\r\n$3\r\nGET\r\n$5\r\nshare\r\n").await),
+        "$4\r\nmine\r\n",
+        "acme's value must not have been overwritten by globex"
+    );
+
+    // KEYS must not leak the neighbour either, and must name the key the client
+    // used rather than the internal prefixed form.
+    let listed = text(&exchange(&mut g, b"*2\r\n$4\r\nKEYS\r\n$1\r\n*\r\n").await);
+    assert!(
+        listed.contains("share") && !listed.contains("acme"),
+        "KEYS leaked another org or the internal prefix: {listed:?}"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn the_instance_password_stays_platform_wide() {
+    // The static key is the platform credential, exactly as over HTTP: it sees
+    // the unprefixed keyspace. Losing this would break every existing RESP
+    // deployment on upgrade.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let mut client = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut client, &auth_frame("instance-secret-key-long")).await),
+        "+OK\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut client, b"*3\r\n$3\r\nSET\r\n$4\r\nflat\r\n$1\r\n1\r\n").await),
+        "+OK\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut client, b"*2\r\n$3\r\nGET\r\n$4\r\nflat\r\n").await),
+        "$1\r\n1\r\n"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_wrong_secret_is_refused_and_counted() {
+    let server = start_with_keys("instance-secret-key-long").await;
+    let mut client = connect(&server.inner).await;
+    let reply = exchange(&mut client, &auth_frame("not-a-key")).await;
+    assert!(
+        text(&reply).starts_with("-WRONGPASS"),
+        "expected WRONGPASS, got {:?}",
+        text(&reply)
+    );
+    assert_eq!(
+        server
+            .inner
+            .metrics
+            .auth_failures_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "a rejected AUTH must be visible in the metrics"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn the_two_argument_auth_form_works() {
+    // redis-py sends `AUTH <username> <password>` whenever a username is
+    // configured. The username means nothing here, but rejecting it would fail
+    // the connection over a name.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (secret, _) = key_for(&server, "acme").await;
+    let mut client = connect(&server.inner).await;
+    let frame = format!(
+        "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n${}\r\n{}\r\n",
+        secret.len(),
+        secret
+    );
+    assert_eq!(
+        text(&exchange(&mut client, frame.as_bytes()).await),
+        "+OK\r\n"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_revoked_key_stops_working_on_the_next_command() {
+    // The SPEC's wording, as a test. The connection stays open — a client has
+    // to be told to re-authenticate, and a bare socket reset reads as a network
+    // fault and gets retried forever.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (secret, key_id) = key_for(&server, "acme").await;
+    let mut client = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut client, &auth_frame(&secret)).await),
+        "+OK\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut client, b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n1\r\n").await),
+        "+OK\r\n"
+    );
+
+    server.store.revoke_key(&key_id, None).await.unwrap();
+
+    let reply = exchange(&mut client, b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n").await;
+    assert!(
+        text(&reply).starts_with("-NOAUTH"),
+        "a revoked key must stop serving on the very next command, got {:?}",
+        text(&reply)
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn revoking_one_key_does_not_cut_another_connection() {
+    // The revocation epoch is global, so every connection re-checks after any
+    // revocation. It must re-check and *survive*, not assume the worst.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (acme, acme_id) = key_for(&server, "acme").await;
+    let (globex, _) = key_for(&server, "globex").await;
+
+    let mut a = connect(&server.inner).await;
+    assert_eq!(text(&exchange(&mut a, &auth_frame(&acme)).await), "+OK\r\n");
+    let mut g = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut g, &auth_frame(&globex)).await),
+        "+OK\r\n"
+    );
+
+    server.store.revoke_key(&acme_id, None).await.unwrap();
+
+    assert!(text(&exchange(&mut a, b"*1\r\n$6\r\nDBSIZE\r\n").await).starts_with("-NOAUTH"));
+    assert!(
+        !text(&exchange(&mut g, b"*1\r\n$6\r\nDBSIZE\r\n").await).starts_with("-NOAUTH"),
+        "globex's connection must survive acme's key being revoked"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_blocking_pop_replies_with_the_key_the_client_asked_for() {
+    // BLPOP answers `[key, element]` and kombu matches that key against the one
+    // it sent. Handing back the internal `acme<US>jobs` both leaks the layout
+    // and breaks the client — which is what happened while `unscope` returned
+    // its input unchanged in both branches.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (secret, _) = key_for(&server, "acme").await;
+    let mut client = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut client, &auth_frame(&secret)).await),
+        "+OK\r\n"
+    );
+    assert_eq!(
+        text(
+            &exchange(
+                &mut client,
+                b"*3\r\n$5\r\nLPUSH\r\n$4\r\njobs\r\n$1\r\na\r\n"
+            )
+            .await
+        ),
+        ":1\r\n"
+    );
+    let reply = text(
+        &exchange(
+            &mut client,
+            b"*3\r\n$5\r\nBLPOP\r\n$4\r\njobs\r\n$1\r\n1\r\n",
+        )
+        .await,
+    );
+    assert_eq!(
+        reply, "*2\r\n$4\r\njobs\r\n$1\r\na\r\n",
+        "BLPOP must name the key the client sent, not the prefixed one"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_tenant_key_containing_a_colon_cannot_collide_with_another_org() {
+    // With `:` as the separator, org `a` holding `b:c` and org `a:b` holding
+    // `c` are the same physical key. The unit separator cannot appear in an org
+    // id, so the split is unambiguous.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (outer, _) = key_for(&server, "a").await;
+    let (inner, _) = key_for(&server, "a:b").await;
+
+    let mut one = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut one, &auth_frame(&outer)).await),
+        "+OK\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut one, b"*3\r\n$3\r\nSET\r\n$3\r\nb:c\r\n$5\r\nouter\r\n").await),
+        "+OK\r\n"
+    );
+
+    let mut two = connect(&server.inner).await;
+    assert_eq!(
+        text(&exchange(&mut two, &auth_frame(&inner)).await),
+        "+OK\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut two, b"*2\r\n$3\r\nGET\r\n$1\r\nc\r\n").await),
+        "$-1\r\n",
+        "org `a:b` reading `c` must not see org `a`'s `b:c`"
+    );
+    server.inner.shutdown.cancel();
+}
+
+/// One-argument `AUTH` frame for a secret of any length.
+fn auth_frame(secret: &str) -> Vec<u8> {
+    format!("*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n", secret.len(), secret).into_bytes()
 }

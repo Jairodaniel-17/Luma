@@ -7,7 +7,7 @@
 //!
 //! ## Keyspace isolation
 //!
-//! Every key is stored as `{tenant}:{key}` when the connection is bound to an
+//! Every key is stored as `{tenant}<US>{key}` when the connection is bound to an
 //! organization, which is exactly what the HTTP layer's `scope_key` does. Two
 //! organizations using the key `celery` therefore cannot see each other, and the
 //! isolation is the same code path that is already tested for HTTP rather than a
@@ -48,6 +48,23 @@ pub struct Session {
     /// Keys under `WATCH`, with the revision they had when watched. `EXEC`
     /// compares against these; any change aborts the transaction.
     pub watched: Vec<(String, u64)>,
+    /// Row id of the api key this connection authenticated with.
+    ///
+    /// Kept so revocation can be re-checked later without holding the secret
+    /// itself in memory for the connection's lifetime. `None` when the
+    /// connection used the static instance password, which has no row and
+    /// cannot be revoked without a restart.
+    pub key_id: Option<String>,
+}
+
+/// What a successful `AUTH` established.
+#[derive(Debug, Clone, Default)]
+pub struct AuthBinding {
+    /// Org the connection is bound to. `None` is a platform-wide connection
+    /// that sees the unprefixed keyspace.
+    pub tenant: Option<String>,
+    /// Api key row id, or `None` for the static instance password.
+    pub key_id: Option<String>,
 }
 
 impl Session {
@@ -59,7 +76,24 @@ impl Session {
             queued: None,
             queue_error: false,
             watched: Vec::new(),
+            key_id: None,
         }
+    }
+
+    /// Drop everything the credential granted, leaving the connection open.
+    ///
+    /// Used when a key is revoked mid-connection: the socket stays up and the
+    /// next command gets `NOAUTH`, which is what tells a client to
+    /// re-authenticate instead of treating it as a network fault. Clearing the
+    /// tenant matters as much as the flag — a stale tenant on a connection that
+    /// somehow reached a keyed command would read another org's data.
+    pub fn deauthenticate(&mut self) {
+        self.authenticated = false;
+        self.tenant = None;
+        self.key_id = None;
+        self.queued = None;
+        self.queue_error = false;
+        self.watched.clear();
     }
 }
 
@@ -77,11 +111,40 @@ fn command_name(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).to_ascii_uppercase()
 }
 
+/// Separator between a tenant and the key it owns.
+///
+/// ASCII unit separator rather than `:`, which is what Redis users put *inside*
+/// their own keys (`user:1000:sessions`). With a colon, tenant `a` holding key
+/// `b:c` and tenant `a:b` holding key `c` collapse to the same physical key —
+/// one org reading another's data. A control character cannot appear in an org
+/// id, so the split is unambiguous. Pub/Sub channels already use this byte.
+pub const TENANT_SEP: char = '\u{1f}';
+
 /// Prefix a key with the connection's tenant, mirroring the HTTP layer.
+pub fn scope_key(tenant: Option<&str>, key: &str) -> String {
+    match tenant {
+        Some(t) => format!("{t}{TENANT_SEP}{key}"),
+        None => key.to_string(),
+    }
+}
+
 fn scope(session: &Session, key: &[u8]) -> String {
-    let key = String::from_utf8_lossy(key);
-    match &session.tenant {
-        Some(tenant) => format!("{tenant}:{key}"),
+    scope_key(session.tenant.as_deref(), &String::from_utf8_lossy(key))
+}
+
+/// Remove the tenant prefix so a reply names the key the client actually sent.
+///
+/// A client that asked for `jobs` must be told `jobs`; handing back the
+/// internal `acme<US>jobs` both leaks the layout and breaks clients that match
+/// the returned key against the one they requested — kombu and arq both do
+/// exactly that after a blocking pop.
+pub fn unscope_key(tenant: Option<&str>, key: &str) -> String {
+    match tenant {
+        Some(t) => key
+            .strip_prefix(t)
+            .and_then(|rest| rest.strip_prefix(TENANT_SEP))
+            .unwrap_or(key)
+            .to_string(),
         None => key.to_string(),
     }
 }
@@ -132,7 +195,7 @@ pub fn dispatch(
     args: &[Vec<u8>],
     // A trait object rather than `impl Fn`: `exec` calls back into
     // dispatch, and a generic parameter would monomorphize `&&&&...` forever.
-    authenticate: &dyn Fn(&str, &str) -> Option<Option<String>>,
+    authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
     allow_flush: bool,
 ) -> Dispatch {
     let Some(first) = args.first() else {
@@ -303,29 +366,40 @@ pub fn dispatch(
 
 // ── connection commands ──────────────────────────────────────────────────────
 
+/// Split `AUTH`'s arguments into username and password.
+///
+/// Redis 6 added the two-argument form; the one-argument form is still what
+/// most clients send when only a password is configured. Exposed because the
+/// connection loop has to read the credential before dispatch — resolving it
+/// against the api-key store needs an `await`, and dispatch is synchronous.
+pub fn auth_credential(args: &[Vec<u8>]) -> Option<(String, String)> {
+    match args.len() {
+        1 => Some((
+            "default".to_string(),
+            String::from_utf8_lossy(&args[0]).to_string(),
+        )),
+        2 => Some((
+            String::from_utf8_lossy(&args[0]).to_string(),
+            String::from_utf8_lossy(&args[1]).to_string(),
+        )),
+        _ => None,
+    }
+}
+
 fn auth(
     session: &mut Session,
     args: &[Vec<u8>],
-    authenticate: &dyn Fn(&str, &str) -> Option<Option<String>>,
+    authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
 ) -> Value {
-    // Redis 6 added the two-argument form; the one-argument form is still what
-    // most clients send when only a password is configured.
-    let (user, password) = match args.len() {
-        1 => (
-            "default".to_string(),
-            String::from_utf8_lossy(&args[0]).to_string(),
-        ),
-        2 => (
-            String::from_utf8_lossy(&args[0]).to_string(),
-            String::from_utf8_lossy(&args[1]).to_string(),
-        ),
-        _ => return err("ERR wrong number of arguments for 'auth' command"),
+    let Some((user, password)) = auth_credential(args) else {
+        return err("ERR wrong number of arguments for 'auth' command");
     };
 
     match authenticate(&user, &password) {
-        Some(tenant) => {
+        Some(binding) => {
             session.authenticated = true;
-            session.tenant = tenant;
+            session.tenant = binding.tenant;
+            session.key_id = binding.key_id;
             Value::ok()
         }
         None => err("WRONGPASS invalid username-password pair or user is disabled."),
@@ -903,7 +977,7 @@ fn match_class(pattern: &[u8], start: usize, c: u8) -> Option<(bool, usize)> {
 
 /// Keys visible to this session, already unscoped, capped at `limit`.
 fn visible_keys(engine: &Engine, session: &Session, limit: usize) -> Vec<String> {
-    let prefix = session.tenant.as_ref().map(|t| format!("{t}:"));
+    let prefix = session.tenant.as_ref().map(|t| format!("{t}{TENANT_SEP}"));
     engine
         .list_state(prefix.as_deref(), limit)
         .into_iter()
@@ -1196,7 +1270,7 @@ fn watch(engine: &Engine, session: &mut Session, args: &[Vec<u8>]) -> Value {
 fn exec(
     engine: &Engine,
     session: &mut Session,
-    authenticate: &dyn Fn(&str, &str) -> Option<Option<String>>,
+    authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
     allow_flush: bool,
 ) -> Value {
     let Some(queued) = session.queued.take() else {
@@ -1383,8 +1457,8 @@ mod tests {
 
     /// Accepts any credential, binding to no tenant. Auth policy is the server's
     /// business; these tests are about command semantics.
-    fn allow_all(_user: &str, _password: &str) -> Option<Option<String>> {
-        Some(None)
+    fn allow_all(_user: &str, _password: &str) -> Option<AuthBinding> {
+        Some(AuthBinding::default())
     }
 
     fn run(engine: &Engine, session: &mut Session, argv: &[&str]) -> Value {
