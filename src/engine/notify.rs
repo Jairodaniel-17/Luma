@@ -135,17 +135,16 @@ impl Waiter {
             .collect();
 
         let first_fired = async {
-            loop {
-                // `select_all` needs at least one future; an empty key list can
-                // only wait for the timeout.
-                if futures.is_empty() {
-                    std::future::pending::<()>().await;
-                }
+            // `select_all` panics on an empty iterator, and a command whose key
+            // list was filtered to nothing must behave as a plain sleep.
+            if futures.is_empty() {
+                std::future::pending::<String>().await
+            } else {
                 let (_, index, _) = futures_util::future::select_all(
                     futures.iter_mut().map(|(_, fut)| fut.as_mut()),
                 )
                 .await;
-                return futures[index].0.clone();
+                futures[index].0.clone()
             }
         };
 
