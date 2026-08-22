@@ -199,6 +199,60 @@ También valida que la salida entera es texto Prometheus legal: Prometheus
 rechaza el scrape completo ante una sola línea malformada, así que una métrica
 rota se lleva por delante a todas las demás.
 
+## Cuotas por organización (W5.2, parcial)
+
+Multi-tenancy que aísla pero no limita es la mitad del trabajo: una organización
+puede llenar el disco, y el resto se enteran en el mismo momento que el
+operador.
+
+Las cuotas viajan en el registro de la api key (`quotas`), que ya existía como
+JSON sin tipo y **nadie leía**. Ahora tiene tipo y se aplica.
+
+```json
+{ "max_keys": 100000, "max_vectors": 1000000,
+  "max_blob_bytes": 10737418240, "max_queue_messages": 50000 }
+```
+
+Todos los campos son opcionales y ausente significa **sin límite**, así que un
+registro `{}` —que es lo que llevan todas las keys hoy— se comporta exactamente
+igual que antes.
+
+| Recurso | Estado |
+|---|---|
+| `max_keys` | **Aplicado.** El keyspace lleva prefijo de organización, así que medir el uso del llamante es un escaneo por prefijo |
+| `max_vectors`, `max_blob_bytes`, `max_queue_messages` | Parsean y `check` los respeta, pero **nada los invoca todavía** — a propósito, ver abajo |
+
+### Decisiones
+
+- Se rechaza **la escritura que cruzaría el límite**, no las siguientes. Un
+  límite de 100 claves admite la centésima y rechaza la 101, que es lo que hace
+  que el número de la config sea el número sobre el que razonar.
+- **Sobrescribir no consume cuota.** Si contara, los datos pasarían a ser de
+  solo lectura en el instante de alcanzar el límite, y eso no es lo que
+  significa un límite de almacenamiento.
+- Las lecturas **nunca** se rechazan. Una organización en su límite puede sacar
+  sus datos, que es justo el objetivo de decirle que limpie.
+- **507 Insufficient Storage, no 429.** No se está limitando el ritmo: no queda
+  sitio, y reintentar lo mismo no va a funcionar nunca. Un 429 invitaría
+  precisamente al bucle de reintentos que no sirve de nada.
+- Un registro de cuota ilegible se trata como **sin límite**, y se grita en los
+  logs. Un error de tipeo en la config no puede convertirse en una caída.
+- El error nombra uso, petición y límite. "Cuota excedida" a secas deja al
+  llamante sin saber si tiene que borrar una cosa o mil.
+
+### Por qué faltan tres
+
+El keyspace lleva prefijo de organización; los blobs no — el layout es
+`blobs/{bucket}/…` con la propiedad registrada aparte en `sys_collections`. Un
+recorrido de directorio mide los bytes de **todas** las organizaciones, y cobrar
+a una los bytes de otra rechazaría la escritura de B porque A llenó el disco:
+exactamente el fallo que el criterio de aceptación de este ítem prohíbe, y peor
+que no tener cuota.
+
+Aplicarlos requiere consultar el índice de propiedad por bucket, que es una
+consulta asíncrona que este guardián sincrónico no puede hacer. Es el siguiente
+paso, no un atajo que tomar ahora.
+
 ## SSE tuning
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).

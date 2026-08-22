@@ -374,7 +374,7 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
 
 ### Bloque 11 — GA · `v4.36.0` → `1.0`
 
-- `[ ]` **W5.2 — cuotas por organización** (≡ B.1 del roadmap): bytes en blob,
+- `[~]` **W5.2 — cuotas por organización** (claves aplicadas; blobs/colas/vectores pendientes del índice de propiedad) (≡ B.1 del roadmap): bytes en blob,
   claves KV, mensajes en cola, vectores, rps por org. Excedido → error tipado +
   métrica + evento de auditoría, visible en el panel. Test: org A en su límite
   no degrada a org B.

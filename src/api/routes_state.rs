@@ -263,12 +263,18 @@ pub async fn put(
             "value too large",
         ));
     }
-    match state.engine.put_state(
-        scope_key(&ctx, &key),
-        body.value,
-        body.ttl_ms,
-        body.if_revision,
-    ) {
+    // Overwriting an existing key consumes no new quota, so only a genuinely
+    // new key is charged — otherwise an organization at its limit could not
+    // even update what it already has.
+    let scoped = scope_key(&ctx, &key);
+    let is_new = state.engine.get_state(&scoped).is_none();
+    if is_new {
+        crate::api::quotas::guard_key_write(&state.engine, &ctx, 1)?;
+    }
+    match state
+        .engine
+        .put_state(scoped, body.value, body.ttl_ms, body.if_revision)
+    {
         Ok(item) => Ok(axum::Json(PutResponse {
             // Echo back the caller's original (unprefixed) key.
             key,

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod auth_store;
 pub mod errors;
 pub mod pathsafe;
+pub mod quotas;
 pub mod rbac;
 pub mod routes_accounts;
 pub mod routes_admin;
