@@ -542,6 +542,7 @@ Notas de honestidad:
 | [`docs/CLI.md`](docs/CLI.md) | Subcomandos del binario |
 | [`docs/DATA_MODELS.md`](docs/DATA_MODELS.md) | Modelos de datos y esquemas |
 | [`docs/VECTOR_STORAGE.md`](docs/VECTOR_STORAGE.md) | Segmentos, mmap, cuantización |
+| [`docs/RESP.md`](docs/RESP.md) | Compatibilidad con el protocolo de Redis: comandos, divergencias y cómo validarla |
 | [`docs/NS_MEM.md`](docs/NS_MEM.md) | Memoria de agentes (API completa) |
 | [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) | Guía del SDK Python |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Comparativa vs Qdrant/Milvus + benchmarks internos |

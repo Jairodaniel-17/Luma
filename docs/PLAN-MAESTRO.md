@@ -310,7 +310,7 @@ ampliada a estructuras.
 - `[ ]` **F3.4 — E2E de los clientes objetivo.** `tests/resp/e2e_arq/` y
   `tests/resp/e2e_celery/` con versiones fijadas, en CI. Celery incluye revoke
   y restore de unacked tras matar el worker.
-- `[ ]` **F4.3 — `docs/RESP.md`** (adelantado, ver D-2): tabla de comandos con
+- `[x]` **F4.3 — `docs/RESP.md`** (adelantado, ver D-2): tabla de comandos con
   notas de divergencia, guía "migrar de Redis a Luma en 5 minutos" para Celery,
   arq, redis-py e ioredis, y qué NO se soporta y por qué. README enlaza.
 

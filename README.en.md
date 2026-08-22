@@ -544,6 +544,7 @@ Documentation is currently written in Spanish.
 | [`docs/CLI.md`](docs/CLI.md) | Binary subcommands |
 | [`docs/DATA_MODELS.md`](docs/DATA_MODELS.md) | Data models and schemas |
 | [`docs/VECTOR_STORAGE.md`](docs/VECTOR_STORAGE.md) | Segments, mmap, quantization |
+| [`docs/RESP.md`](docs/RESP.md) | Redis protocol compatibility: commands, divergences, how to validate |
 | [`docs/NS_MEM.md`](docs/NS_MEM.md) | Agent memory (full API) |
 | [`docs/SDK_PYTHON.md`](docs/SDK_PYTHON.md) | Python SDK guide |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Qdrant/Milvus comparison + internal benchmarks |

@@ -183,6 +183,7 @@ pub fn dispatch(
         "SELECT" => Dispatch::Reply(select(rest)),
         "CLIENT" => Dispatch::Reply(client(session, rest)),
         "COMMAND" => Dispatch::Reply(Value::Array(Some(Vec::new()))),
+        "INFO" => Dispatch::Reply(info(engine, session, rest)),
         "RESET" => {
             session.name = None;
             Dispatch::Reply(Value::Simple("RESET".into()))
@@ -390,6 +391,60 @@ fn client(session: &mut Session, args: &[Vec<u8>]) -> Value {
         Some("ID") => Value::Integer(0),
         _ => Value::ok(),
     }
+}
+
+/// `INFO [section]`.
+///
+/// kombu reads this to decide how to talk to the broker, and monitoring
+/// dashboards scrape it, so an error here looks like a broken server rather
+/// than a missing feature. The numbers are real — reporting plausible constants
+/// would be worse than not implementing it, because an operator would trust
+/// them.
+///
+/// Lines end with CRLF, as Redis does: some INFO parsers split on `\r\n`
+/// specifically, and bare LF leaves them with a trailing `\r` on every value.
+fn info(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
+    let requested = args.first().map(|a| command_name(a));
+    let want = |section: &str| {
+        requested.is_none()
+            || requested.as_deref() == Some("ALL")
+            || requested.as_deref() == Some("DEFAULT")
+            || requested.as_deref() == Some(&section.to_ascii_uppercase())
+    };
+
+    let mut out = String::new();
+    if want("server") {
+        out.push_str("# Server\r\n");
+        out.push_str("redis_version:7.0.0\r\n");
+        // The real identity, right after the compatibility version: a client
+        // that checks `redis_version` keeps working, and a human reading INFO
+        // is not misled about what they are talking to.
+        out.push_str("server_name:luma\r\n");
+        out.push_str(&format!("luma_version:{}\r\n", env!("CARGO_PKG_VERSION")));
+        out.push_str("redis_mode:standalone\r\n");
+        out.push_str(&format!("process_id:{}\r\n", std::process::id()));
+        out.push_str("\r\n");
+    }
+    if want("clients") {
+        out.push_str("# Clients\r\n");
+        out.push_str("connected_clients:1\r\n\r\n");
+    }
+    if want("stats") {
+        out.push_str("# Stats\r\n");
+        out.push_str("total_connections_received:0\r\n");
+        out.push_str("total_commands_processed:0\r\n\r\n");
+    }
+    if want("keyspace") {
+        out.push_str("# Keyspace\r\n");
+        let keys = visible_keys(engine, session, MAX_KEYSPACE_WALK).len();
+        if keys > 0 {
+            out.push_str(&format!("db0:keys={keys},expires=0,avg_ttl=0\r\n"));
+        }
+        out.push_str("\r\n");
+    }
+    // A bulk string, not a simple one: the body contains CRLF, which only a
+    // length-prefixed reply can carry.
+    Value::bulk(out)
 }
 
 // ── string commands ──────────────────────────────────────────────────────────
@@ -2363,5 +2418,63 @@ mod tests {
             run(&e, &mut s, &["BLPOP", "q"]),
             Value::Error(m) if m.contains("wrong number of arguments")
         ));
+    }
+
+    #[test]
+    fn info_reports_real_numbers_and_its_own_identity() {
+        // kombu reads INFO to decide how to talk to the broker, and dashboards
+        // scrape it. Plausible constants would be worse than nothing, because
+        // an operator would trust them.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MSET", "a", "1", "b", "2"]);
+
+        let Value::Bulk(Some(body)) = run(&e, &mut s, &["INFO"]) else {
+            panic!("INFO must be a bulk string: the body contains CRLF");
+        };
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("redis_version:"), "{text}");
+        // CRLF, not bare LF: parsers that split on CRLF would otherwise leave a
+        // trailing carriage return on every value.
+        assert!(
+            text.contains("redis_version:7.0.0\r\n"),
+            "INFO lines must end with CRLF"
+        );
+        // The real identity sits right beside the compatibility version.
+        assert!(text.contains("server_name:luma"), "{text}");
+        assert!(
+            text.contains("db0:keys=2"),
+            "the keyspace count must be measured, not invented: {text}"
+        );
+    }
+
+    #[test]
+    fn info_honours_a_section_argument() {
+        let (e, _d, mut s) = open();
+        let Value::Bulk(Some(body)) = run(&e, &mut s, &["INFO", "server"]) else {
+            panic!()
+        };
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("# Server"));
+        assert!(!text.contains("# Keyspace"), "asked for one section only");
+    }
+
+    #[test]
+    fn info_keyspace_is_tenant_scoped() {
+        // Otherwise one org could read another's key count out of INFO.
+        let (e, _d) = engine();
+        let mut acme = Session::new(false);
+        acme.tenant = Some("acme".into());
+        let mut globex = Session::new(false);
+        globex.tenant = Some("globex".into());
+        run(&e, &mut acme, &["MSET", "a", "1", "b", "2"]);
+        run(&e, &mut globex, &["SET", "c", "3"]);
+
+        let Value::Bulk(Some(body)) = run(&e, &mut globex, &["INFO", "keyspace"]) else {
+            panic!()
+        };
+        assert!(
+            String::from_utf8_lossy(&body).contains("db0:keys=1"),
+            "globex must see only its own key"
+        );
     }
 }
