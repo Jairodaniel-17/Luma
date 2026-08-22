@@ -280,6 +280,48 @@ pub async fn check_replica_identities(
     Ok(out)
 }
 
+/// The columns of a table's replica identity, from the catalog.
+///
+/// Needed for the backfill, which has no `Relation` message to read the key
+/// from: a `COPY` is not part of the replication stream. Reading the same
+/// definition Postgres will use for the stream is what keeps a backfilled
+/// document and a streamed update on the same id — otherwise the update creates
+/// a second document and the first one never goes away.
+///
+/// Prefers the identity index when one is set, so a table with
+/// `REPLICA IDENTITY USING INDEX` is keyed the way its stream will be.
+pub async fn identity_columns(
+    conn: &mut PgConnection,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>> {
+    let rows = conn
+        .simple_query(&format!(
+            "SELECT a.attname FROM pg_index i \
+             JOIN pg_class c ON c.oid = i.indrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) \
+             WHERE n.nspname = '{}' AND c.relname = '{}' \
+             AND (i.indisreplident OR i.indisprimary) \
+             ORDER BY i.indisreplident DESC, a.attnum",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''")
+        ))
+        .await?;
+    let mut columns = Vec::new();
+    for row in rows {
+        if let Some(Some(name)) = row.into_iter().next() {
+            // The query can return a column twice when a table's identity index
+            // is also its primary key. First occurrence wins, which preserves
+            // the identity-index ordering the ORDER BY establishes.
+            if !columns.contains(&name) {
+                columns.push(name);
+            }
+        }
+    }
+    Ok(columns)
+}
+
 /// `schema.table` split, defaulting the schema to `public`.
 pub fn split_qualified(table: &str) -> (String, String) {
     match table.split_once('.') {

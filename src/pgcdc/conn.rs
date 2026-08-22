@@ -416,6 +416,73 @@ impl PgConnection {
         }
     }
 
+    /// Run `COPY ... TO STDOUT` and hand each row to a callback.
+    ///
+    /// Streamed rather than collected: a backfill's whole point is a table that
+    /// does not fit in memory, and a function that returned `Vec<Vec<_>>` would
+    /// make the size of the table the size of the process.
+    ///
+    /// The callback may stop the copy by returning an error, and the connection
+    /// is left usable — the remaining frames are drained rather than abandoned,
+    /// because a half-read COPY desynchronizes everything after it.
+    pub async fn copy_out<F>(&mut self, sql: &str, mut on_row: F) -> Result<u64>
+    where
+        F: FnMut(Vec<Option<String>>) -> Result<()>,
+    {
+        if self.streaming {
+            bail!("this connection is streaming replication and cannot run queries");
+        }
+        let mut buf = BytesMut::new();
+        frontend::query(sql, &mut buf).context("encoding a COPY")?;
+        self.stream.write_all(&buf).await?;
+        self.stream.flush().await?;
+
+        let mut rows = 0u64;
+        let mut failure: Option<anyhow::Error> = None;
+        // Text format arrives as whole lines, but a CopyData frame is not
+        // guaranteed to be one: it can carry several rows or half of one.
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            let msg = self.read_message().await?;
+            match msg.tag {
+                // CopyOutResponse, then the data, then CopyDone.
+                b'H' | b'c' | b'C' | b'S' | b'N' | b'T' => continue,
+                b'd' => {
+                    if failure.is_some() {
+                        continue;
+                    }
+                    pending.extend_from_slice(&msg.body);
+                    while let Some(at) = pending.iter().position(|&b| b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=at).collect();
+                        let line = &line[..line.len() - 1];
+                        // The trailer of a text-format copy.
+                        if line == b"\\." {
+                            continue;
+                        }
+                        match decode_copy_row(line) {
+                            Ok(row) => match on_row(row) {
+                                Ok(()) => rows += 1,
+                                Err(e) => failure = Some(e),
+                            },
+                            Err(e) => failure = Some(e),
+                        }
+                        if failure.is_some() {
+                            break;
+                        }
+                    }
+                }
+                b'E' => failure = Some(anyhow!("{}", error_text(&msg.body))),
+                b'Z' => {
+                    return match failure {
+                        Some(e) => Err(e),
+                        None => Ok(rows),
+                    }
+                }
+                other => bail!("unexpected message {:?} during a COPY", other as char),
+            }
+        }
+    }
+
     /// Ask the server to start sending WAL, and switch to streaming mode.
     ///
     /// `start_lsn` of 0 means "wherever the slot left off", which is what a
@@ -638,6 +705,124 @@ fn parse_data_row(body: &[u8]) -> Result<Vec<Option<String>>> {
     Ok(values)
 }
 
+/// Decode one line of `COPY ... TO STDOUT` text format.
+///
+/// Two passes, and the order is Postgres's rather than the convenient one.
+/// Fields are split first — on unescaped tabs, since a literal tab inside a
+/// value arrives as an escape — and only then de-escaped. The null marker is
+/// compared against the **raw** field, before de-escaping.
+///
+/// Both halves of that were bugs here first, and the second was caught by this
+/// file's own tests. Splitting after de-escaping breaks a value containing a
+/// tab into two columns and shifts every value after it, invisible in a tidy
+/// table and corrupting the first row of free text. And treating a leading
+/// null marker as NULL makes the ordinary value that de-escapes to "Nope"
+/// arrive as a missing field.
+fn decode_copy_row(line: &[u8]) -> Result<Vec<Option<String>>> {
+    let mut columns = Vec::new();
+    for field in split_copy_fields(line)? {
+        if field == NULL_MARKER {
+            columns.push(None);
+        } else {
+            columns.push(Some(unescape_copy_field(field)?));
+        }
+    }
+    Ok(columns)
+}
+
+/// What `COPY ... TO STDOUT` writes for a NULL, in text format.
+const NULL_MARKER: &[u8] = b"\\N";
+
+/// Split a COPY line on its unescaped tabs.
+fn split_copy_fields(line: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut at = 0;
+    while at < line.len() {
+        match line[at] {
+            b'\t' => {
+                fields.push(&line[start..at]);
+                at += 1;
+                start = at;
+            }
+            // Whatever follows a backslash belongs to this field, tab included.
+            b'\\' => {
+                if at + 1 >= line.len() {
+                    bail!("a COPY row ended on a backslash");
+                }
+                at += 2;
+            }
+            _ => at += 1,
+        }
+    }
+    fields.push(&line[start..]);
+    Ok(fields)
+}
+
+/// Undo the backslash escaping of one COPY field.
+fn unescape_copy_field(field: &[u8]) -> Result<String> {
+    let mut out: Vec<u8> = Vec::with_capacity(field.len());
+    let mut at = 0;
+    while at < field.len() {
+        if field[at] != b'\\' {
+            out.push(field[at]);
+            at += 1;
+            continue;
+        }
+        let next = *field
+            .get(at + 1)
+            .ok_or_else(|| anyhow!("a COPY field ended on a backslash"))?;
+        at += 2;
+        match next {
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0b),
+            b'\\' => out.push(b'\\'),
+            b'x' => {
+                let mut value = 0u8;
+                let mut digits = 0;
+                while digits < 2 {
+                    match field.get(at).and_then(|c| (*c as char).to_digit(16)) {
+                        Some(d) => {
+                            value = value * 16 + d as u8;
+                            at += 1;
+                            digits += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if digits == 0 {
+                    out.push(b'x');
+                } else {
+                    out.push(value);
+                }
+            }
+            b'0'..=b'7' => {
+                let mut value = (next - b'0') as u32;
+                let mut digits = 1;
+                while digits < 3 {
+                    match field.get(at).filter(|c| (b'0'..=b'7').contains(c)) {
+                        Some(c) => {
+                            value = value * 8 + (c - b'0') as u32;
+                            at += 1;
+                            digits += 1;
+                        }
+                        None => break,
+                    }
+                }
+                out.push(value as u8);
+            }
+            // Postgres's documented fallback: an unrecognised escape is the
+            // character itself.
+            other => out.push(other),
+        }
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
 /// The human-readable part of an ErrorResponse.
 ///
 /// Postgres sends a dozen fields; the message and the detail are what an
@@ -815,6 +1000,43 @@ mod tests {
         body.extend_from_slice(b"ab");
         assert!(parse_data_row(&body).is_err());
         assert!(parse_data_row(&[]).is_err());
+    }
+
+    #[test]
+    fn a_copy_row_splits_on_real_tabs_and_not_on_escaped_ones() {
+        // The bug this guards: splitting on tabs before undoing the escaping
+        // breaks a value that contains one into two columns and shifts every
+        // value after it. Invisible in a tidy table; corrupts the first row of
+        // free text.
+        let row = decode_copy_row(b"1\\tone\tsecond").unwrap();
+        assert_eq!(
+            row,
+            vec![Some("1\tone".into()), Some("second".into())],
+            "the escaped tab belongs inside the first column"
+        );
+    }
+
+    #[test]
+    fn a_copy_null_is_not_the_two_character_string() {
+        let row = decode_copy_row(b"a\t\\N\t").unwrap();
+        assert_eq!(row, vec![Some("a".into()), None, Some(String::new())]);
+        // And a value that merely starts with it is text, not NULL: `\Nope` is
+        // the escape fallback applied to N, giving "Nope".
+        let row = decode_copy_row(b"\\Nope").unwrap();
+        assert_eq!(row, vec![Some("Nope".into())]);
+    }
+
+    #[test]
+    fn the_copy_escapes_postgres_documents_all_decode() {
+        let row = decode_copy_row(b"a\\nb\\rc\\\\d\\x41\\101").unwrap();
+        assert_eq!(row, vec![Some("a\nb\rc\\dAA".into())]);
+    }
+
+    #[test]
+    fn a_copy_row_ending_on_a_backslash_is_an_error_not_a_panic() {
+        assert!(decode_copy_row(b"value\\").is_err());
+        // An empty line is one empty column, which is what Postgres means by it.
+        assert_eq!(decode_copy_row(b"").unwrap(), vec![Some(String::new())]);
     }
 
     #[test]

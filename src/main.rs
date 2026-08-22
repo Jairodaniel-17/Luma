@@ -48,6 +48,18 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Demote => {
             cli::run_demote(&config)?;
         }
+        cli::Command::Connect {
+            source,
+            config_path,
+            once,
+            no_backfill,
+        } => match source.as_str() {
+            "postgres" => cli::run_connect(&config, &config_path, once, no_backfill).await?,
+            // Unreachable through the parser, which rejects anything else. Kept
+            // exhaustive so adding a second source is a compile error here
+            // rather than a connector that runs the Postgres path.
+            other => anyhow::bail!("origen `{other}` no soportado"),
+        },
         cli::Command::Role => {
             cli::run_role(&config)?;
         }

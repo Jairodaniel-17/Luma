@@ -59,11 +59,12 @@ pub mod fencing;
 #[forbid(unsafe_code)]
 pub mod memory;
 
-#[forbid(unsafe_code)]
 /// Change data capture from Postgres over logical replication. Luma does not
 /// replace Postgres, it follows it.
+#[forbid(unsafe_code)]
 pub mod pgcdc;
 
+#[forbid(unsafe_code)]
 pub mod resp;
 
 #[forbid(unsafe_code)]

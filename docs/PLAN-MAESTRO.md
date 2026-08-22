@@ -113,7 +113,7 @@ frentes a la vez y no cerrar ninguno.
 | 7 | Operar con vista | `v4.32.0` | W5.1 métricas/OTel, W2.2 réplica de lectura | L |
 | 8 | RESP endurecido | `v4.33.0` | F4.2 backup+panel, F4.5 nightly de resiliencia | M |
 | 9 | Adopción por protocolo | `v4.34.0` | W2.3 failover asistido, W3.2 S3, W3.3 OpenAPI generado | **XL** |
-| 10 | Conector Postgres | `v4.35.0` | W4.1 spike, W4.2 `luma connect postgres`, W4.3 federada | **XL** |
+| 10 | ✅ Conector Postgres | `v4.35.0` | W4.1 spike, W4.2 `luma connect postgres`, W4.3 federada | **XL** |
 | 11 | **GA** | `v4.36.0` → `1.0` | W5.2 cuotas, W5.3 supply chain, W5.5 docs de producto, W5.6 criterio GA | L |
 
 Tamaños: S ≈ días · M ≈ 1–2 semanas · L ≈ 3–5 semanas · XL ≈ 6+ semanas, a
@@ -512,16 +512,65 @@ alcance, no un bug.
 La decisión estratégica del producto: Luma **no** reemplaza Postgres, se
 conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
 
-- `[ ]` **W4.1 — spike de replicación lógica** (`pgoutput`): crear publicación,
-  consumir INSERT/UPDATE/DELETE, confirmar LSN. **Criterio de salida: informe
-  de decisión (crate existente vs subset propio) antes de diseñar nada.**
-- `[ ]` **W4.2 — `luma connect postgres`:** configuración declarativa
-  (fuente + slot + publicación + mapeos tabla → colección/vectores/namespace),
-  backfill por `COPY`, reanudación por LSN persistido con el mismo patrón
-  `applied_offset` de redb, idempotencia por PK+LSN. Columnas nuevas se
-  ingieren; tipos no mapeables se registran y saltan sin romper el stream.
-- `[ ]` **W4.3 — búsqueda federada mínima:** hits con referencia de origen
-  (tabla, PK) para que la app lea el registro canónico en Postgres.
+- `[x]` **W4.1 - spike de replicación lógica.** Informe en
+  `docs\POSTGRES-CDC.md`; 7 pruebas contra un Postgres 16 real
+  (`tests\pgcdc_stream.rs`).
+
+  **La decisión: subconjunto propio.** La elección real nunca fue «crate contra
+  código propio» — fue «dependencia git sobre una rama sin publicar contra
+  código propio». `postgres-replication`, la crate del workspace de
+  rust-postgres que hace exactamente esto, **no está publicada**; y
+  `tokio-postgres` 0.7.18 rechaza `replication=database` como clave desconocida,
+  así que no puede ni abrir el tipo de conexión correcto. Una revisión git
+  fijada es una dependencia de la que nadie puede auditar una versión, y
+  `cargo deny` no tiene nada contra qué comprobarla. SCRAM-SHA-256 sí se delega
+  en `postgres-protocol`: es la única parte donde un error sutil es un fallo de
+  seguridad y no un error de parseo.
+
+  El servidor real corrigió dos suposiciones mías, las dos escritas primero como
+  aserción: una conexión de replicación **lógica** sí acepta SQL corriente, y un
+  valor largo no es un valor TOASTed (`repeat('x', 12000)` se comprime y se
+  queda inline). La segunda importa: una columna grande que no cambió se
+  **omite** del UPDATE, y leer la omisión como NULL destruye un valor que
+  Postgres sigue teniendo y no vuelve a mencionar.
+- `[x]` **W4.2 - `luma connect postgres`.** `src\pgcdc\connector.rs`, CLI en
+  `src\cli.rs`, 8 pruebas de integración (`tests\pgcdc_connector.rs`).
+
+  Configuración declarativa en TOML, backfill por `COPY`, reanudación por LSN
+  persistido en el KV store — así pasa por el WAL y los snapshots como cualquier
+  otro estado, y una restauración devuelve la posición junto con los datos a los
+  que corresponde. Idempotencia en dos capas: por clave (el id sale de la clave
+  primaria, así que reaplicar es un upsert) y por LSN (una transacción anterior
+  al checkpoint se salta entera).
+
+  **El slot antes que el backfill, siempre.** Una copia tomada primero perdería
+  cada cambio hecho entre ella y la creación del slot, y esas filas se van sin
+  rastro de que se esperaban. Hay una prueba que escribe justo en esa ventana.
+
+  **Lo que encontró una prueba y no un razonamiento:** acotar una pasada por
+  número de cambios la paraba **a mitad de transacción**, y la siguiente
+  reanudaba en una posición interior a la transacción que había aplicado a
+  medias. El checkpoint ahora solo se toma en frontera de transacción — decirle
+  a Postgres que puede liberar WAL hasta un punto intermedio le deja descartar
+  el resto de algo que no habíamos terminado de guardar. El segundo fallo propio
+  que encontró una prueba propia en este bloque fue el del formato `COPY`: el
+  marcador de NULL se aplicaba aunque siguiera texto, cuando Postgres compara el
+  campo **crudo** antes de desescapar.
+
+  **TRUNCATE no se aplica.** Vaciar una colección derivada entera por un mensaje
+  del WAL es decisión de un operador; se registra en WARN y el checkpoint queda
+  marcado `stale`.
+- `[x]` **W4.3 - búsqueda federada mínima.** Cada documento producido lleva
+  `_source` con `{system, schema, table, primary_key}`, en el documento y en sus
+  metadatos — así se puede filtrar por tabla de origen sin hidratar. La
+  aplicación busca en Luma y **lee en Postgres**: el índice puede ir unos
+  milisegundos por detrás, la fila que se acaba usando no. `_source` no se
+  indexa como contenido, porque meter el nombre de la tabla en cada documento
+  haría que cada consulta encajara un poco con cada fila.
+
+  **Sin verificar:** TLS contra un servidor real (el contenedor del entorno de
+  pruebas no sirve TLS), volumen más allá de decenas de filas, reconexión a
+  mitad de una transacción grande, y varios conectores contra la misma base.
 
 ### Bloque 11 — GA · `v4.36.0` → `1.0`
 

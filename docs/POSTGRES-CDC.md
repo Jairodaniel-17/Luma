@@ -142,3 +142,133 @@ que se pone verde cuando su sujeto no está reporta una cobertura que no tiene.
 - **Solo protocolo 1.** Las versiones 2–4 añaden streaming de transacciones
   grandes antes del commit. No hacen falta hasta que una transacción grande sea
   un problema, y entonces serán un cambio localizado en `pgoutput.rs`.
+
+---
+
+# El conector (W4.2)
+
+`luma connect postgres <config.toml>`
+
+## Configuración
+
+```toml
+name = "erp"                       # Nombre bajo el que se archiva su posición
+url  = "postgres://luma:secreto@db:5432/erp?sslmode=require"
+slot = "luma_cdc"
+publication = "luma_cdc"
+backfill = true                    # Por defecto
+flush_interval_secs = 10
+
+[[tables]]
+table     = "sales.orders"         # Sin esquema significa `public`
+namespace = "orders"               # La colección de Luma donde aterrizan
+text_columns = ["customer", "notes"]   # Lo que se embebe, en este orden
+skip_columns = ["internal_token"]      # Fuera del documento entero, no solo del texto
+# id_columns  = ["id"]             # Omitido: se usa la identidad de réplica
+```
+
+`id_columns` omitido es lo normal y lo mejor: la identidad de réplica es lo que
+el propio stream reporta, así que es la única elección que no puede discrepar
+de Postgres.
+
+## Las tres fases, y por qué en ese orden
+
+1. **Setup.** Publicación, slot, y comprobación de identidad de réplica en cada
+   tabla mapeada. Aquí, no en el primer UPDATE.
+2. **Backfill.** `COPY` de lo que ya está en la tabla — **después** de crear el
+   slot. Un backfill tomado primero perdería cada cambio hecho entre la copia y
+   la creación del slot, y esas filas se van sin rastro de que se esperaban. Hay
+   una prueba que escribe justo en esa ventana.
+3. **Stream.** Los cambios, aplicados como upserts y borrados.
+
+El orden es el argumento de corrección entero, no un detalle de implementación.
+
+## Reanudación
+
+La posición se guarda en el KV store, no en un fichero: así pasa por el WAL y
+los snapshots como cualquier otro estado, y una restauración devuelve la
+posición del conector junto con los datos a los que corresponde.
+
+```
+pgcdc:{nombre}:checkpoint  →  { lsn, system_id, stale, updated_at_ms }
+```
+
+El `system_id` viaja con el LSN a propósito. Restaurar un backup de Postgres y
+apuntar el conector a la copia reanudaría en una posición aritméticamente
+correcta que se refiere a otra historia. Se rechaza con un mensaje que nombra la
+clave a borrar para empezar de cero.
+
+**El checkpoint solo se toma en frontera de transacción.** Esto lo encontró una
+prueba, no un razonamiento: acotar una pasada por número de cambios la paraba a
+mitad de transacción, y la siguiente reanudaba en una posición *interior* a la
+transacción que había aplicado a medias. Una transacción está aplicada o no lo
+está; decirle a Postgres que puede liberar WAL hasta un punto intermedio le deja
+descartar el resto de algo que no habíamos terminado de guardar.
+
+## Idempotencia
+
+Dos capas, y las dos hacen falta:
+
+- **Por clave.** El id del documento sale de la clave primaria, así que aplicar
+  el mismo cambio dos veces es un upsert. Es lo que hace inofensivo el solape
+  entre backfill y stream.
+- **Por LSN.** Una transacción cuyo `final_lsn` es anterior o igual al
+  checkpoint se salta entera. Sin esto, cada reinicio reprocesa —correctamente,
+  pero gastando una llamada de embedding por fila— y una pasada acotada se
+  llenaría de trabajo ya hecho antes de llegar al nuevo.
+
+## Columnas
+
+- **Nuevas** se ingieren solas: los nombres salen del mensaje `Relation`, que
+  Postgres reemite cuando la tabla cambia.
+- **Sin cambiar** (`Value::Unchanged`) se rellenan desde lo almacenado. Escribir
+  la fila tal como llegó reemplazaría una columna grande que no cambió por nada,
+  y Postgres no la vuelve a mencionar.
+- **Sin mapear** se saltan **por columna, no por fila**, y se registran. Perder
+  un campo es mejor que perder la fila, y de las dos maneras se reporta.
+
+# Búsqueda federada (W4.3)
+
+Cada documento producido lleva su origen:
+
+```json
+{
+  "customer": "acme",
+  "notes": "primer pedido",
+  "_source": {
+    "system": "postgres",
+    "schema": "sales",
+    "table": "orders",
+    "primary_key": "7"
+  }
+}
+```
+
+Eso es lo que hace segura la copia. Un hit dice **dónde vive la fila canónica**,
+así que la aplicación busca en Luma y lee en Postgres. El índice puede ir unos
+milisegundos por detrás; la fila que la aplicación acaba usando, no.
+
+`_source` va también en los metadatos del documento, así que se puede filtrar
+por tabla de origen sin hidratar. Y no se indexa como contenido: meter el nombre
+de la tabla en cada documento haría que cada consulta encajara un poco con cada
+fila.
+
+## Lo que el conector **no** hace
+
+| | |
+|---|---|
+| **No escribe de vuelta** | Es la decisión de producto, no una limitación pendiente. Postgres es la fuente de verdad transaccional |
+| **No aplica TRUNCATE** | Vaciar una colección derivada entera por un mensaje del WAL es decisión de un operador. Se registra en WARN y el checkpoint queda marcado `stale`, en vez de destruir datos o fingir que no pasó nada |
+| **No hace DDL** | Un `ALTER TABLE` upstream se refleja en las columnas que llegan; no crea ni borra colecciones |
+
+## Sin verificar
+
+- **TLS contra un servidor real.** El camino existe (`sslmode=require`,
+  SSLRequest, rustls con las raíces de webpki) pero el Postgres del contenedor
+  no sirve TLS: solo está probado el rechazo de `prefer`.
+- **Volumen.** Las pruebas mueven decenas de filas, no millones.
+- **Reconexión a media transacción.** El bucle largo reconecta por pasada, lo
+  que cubre un corte de red, un failover y un reinicio con el mismo camino de
+  código — pero nadie ha cortado el cable a mitad de una transacción grande.
+- **Varios conectores contra la misma base.** Cada uno querría su slot; no se ha
+  probado.

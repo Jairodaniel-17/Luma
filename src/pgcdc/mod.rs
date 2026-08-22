@@ -13,8 +13,10 @@
 //! - `slots` — the setup a stream needs: a publication and a replication slot.
 
 pub mod conn;
+pub mod connector;
 pub mod pgoutput;
 pub mod slots;
 
 pub use conn::{PgConfig, PgConnection, SslMode, StreamMessage};
+pub use connector::{Connector, ConnectorConfig, RunReport, TableMapping};
 pub use pgoutput::{Change, Relation, Relations, Value};

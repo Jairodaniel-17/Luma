@@ -34,6 +34,22 @@ pub enum Command {
     Demote,
     /// Print which role a data directory holds. Read-only.
     Role,
+    /// Follow a Postgres table into a Luma collection.
+    ///
+    /// `luma connect postgres <config.toml>`. The source system is part of the
+    /// command rather than inferred from the config, so a second connector —
+    /// MySQL, say — is a new word here and not a silently different meaning for
+    /// the same one.
+    Connect {
+        source: String,
+        config_path: String,
+        /// Run one bounded pass and report, instead of following forever.
+        /// What a cron job and a test both want.
+        once: bool,
+        /// Skip the initial COPY even if the configuration asks for it. For
+        /// resuming a connector whose backfill already finished.
+        no_backfill: bool,
+    },
     Help,
 }
 
@@ -68,6 +84,7 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Command> {
             })?;
             Ok(Command::Restore { path })
         }
+        "connect" => parse_connect(&args[2..]),
         "promote" => Ok(Command::Promote),
         "demote" => Ok(Command::Demote),
         "role" => Ok(Command::Role),
@@ -81,6 +98,31 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Command> {
             "subcomando desconocido `{other}`. Ejecuta `luma help` para ver los disponibles."
         ),
     }
+}
+
+/// `connect <source> <config.toml> [--once] [--no-backfill]`
+///
+/// The source is required and checked here rather than accepted and validated
+/// later: `luma connect config.toml` would otherwise read the config path as a
+/// source name and complain about something the operator did not type.
+fn parse_connect(args: &[String]) -> anyhow::Result<Command> {
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    let source = positional.first().map(|s| s.to_string()).ok_or_else(|| {
+        anyhow::anyhow!("connect requiere un origen: `luma connect postgres <config.toml>`")
+    })?;
+    if source != "postgres" {
+        anyhow::bail!("origen `{source}` no soportado; el único disponible es `postgres`");
+    }
+    let config_path = positional
+        .get(1)
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("connect requiere la ruta del fichero de conector: `luma connect postgres <config.toml>`"))?;
+    Ok(Command::Connect {
+        source,
+        config_path,
+        once: args.iter().any(|a| a == "--once"),
+        no_backfill: args.iter().any(|a| a == "--no-backfill"),
+    })
 }
 
 /// Usage text.
@@ -103,9 +145,14 @@ pub fn help_text() -> String {
         "    promote                  Convierte una réplica en primario (quita el marcador REPLICA)",
         "    demote                   Convierte un primario en réplica de solo lectura",
         "    role                     Dice si el data_dir es `primary` o `replica`",
+        "    connect postgres <cfg>   Sigue tablas de Postgres hacia colecciones de Luma",
         "    vacuum --collection <c>  Compacta una colección vectorial",
         "    diskann <...>            Construye/ajusta/consulta el índice DiskANN",
         "    help                     Esto",
+        "",
+        "OPCIONES DE CONNECT:",
+        "    --once                   Una pasada acotada y un informe, en vez de seguir siempre",
+        "    --no-backfill            Omite el COPY inicial (para reanudar uno ya terminado)",
         "",
         "OPCIONES DE SERVE (también configurables en luma.toml):",
         "    --port <n>               Puerto HTTP",
@@ -195,6 +242,125 @@ pub fn run_role(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `luma connect postgres <config.toml>`
+///
+/// Runs against the same data directory the server uses, which is the point:
+/// the connector writes into the collections `/v1/db` and `/v1/memory` read.
+/// Running it as a separate process rather than a task inside `serve` is
+/// deliberate — a connector that falls over should not take the API with it,
+/// and one that needs restarting should not need the server restarted.
+pub async fn run_connect(
+    config: &Config,
+    config_path: &str,
+    once: bool,
+    no_backfill: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use luma::pgcdc::{Connector, ConnectorConfig};
+    use std::sync::Arc;
+
+    let text = std::fs::read_to_string(config_path)
+        .with_context(|| format!("no se pudo leer {config_path}"))?;
+    let mut connector_config = ConnectorConfig::from_toml(&text)?;
+    if no_backfill {
+        connector_config.backfill = false;
+    }
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let engine = Arc::new(luma::engine::Engine::new(config.clone(), shutdown.clone())?);
+    let sqlite = config
+        .data_dir
+        .as_deref()
+        .map(|dir| -> anyhow::Result<Arc<luma::sqlite::SqliteService>> {
+            let path = std::path::Path::new(dir).join("sqlite").join("rustkiss.db");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(Arc::new(luma::sqlite::SqliteService::new(path)?))
+        })
+        .transpose()?;
+    let embeddings = luma::engine::embeddings::EmbeddingHandle::new(
+        luma::engine::embeddings::EmbeddingClient::from_config(config, Some(engine.metrics())),
+    );
+    let hub = Arc::new(luma::engine::hub::LumaDatabase::new(
+        engine.clone(),
+        sqlite,
+        embeddings,
+        luma::engine::chunking::ChunkingEngine::default(),
+        config.clone(),
+    ));
+
+    let name = connector_config.name.clone();
+    let wants_backfill = connector_config.backfill;
+    let connector = Connector::new(connector_config, hub)?;
+
+    // The slot before the copy, always. A backfill taken first would miss every
+    // change made between the copy and the slot's creation, and those rows are
+    // gone with nothing to say they were expected.
+    let fresh_slot = connector.prepare().await?;
+    match fresh_slot {
+        Some(lsn) => println!(
+            "slot creado; punto consistente {}",
+            luma::pgcdc::pgoutput::format_lsn(lsn)
+        ),
+        None => println!("slot existente; se reanuda desde donde quedó"),
+    }
+
+    if wants_backfill && fresh_slot.is_some() {
+        let rows = connector.backfill().await?;
+        println!("backfill: {rows} filas");
+    } else if wants_backfill {
+        println!("backfill omitido: el slot ya existía, así que el stream ya cubre estas filas");
+    }
+
+    if once {
+        let report = connector
+            .stream_once(std::time::Duration::from_secs(30), u64::MAX)
+            .await?;
+        println!(
+            "{name}: +{} ~{} -{} (omitidas {}, ya aplicadas {}) en {}",
+            report.inserted,
+            report.updated,
+            report.deleted,
+            report.skipped,
+            report.already_applied,
+            luma::pgcdc::pgoutput::format_lsn(report.last_lsn)
+        );
+        if !report.truncated_tables.is_empty() {
+            println!(
+                "ATENCIÓN: llegó un TRUNCATE de {:?}. La colección derivada quedó obsoleta y                  Luma no la vacía sola.",
+                report.truncated_tables
+            );
+        }
+        return Ok(());
+    }
+
+    println!("{name}: siguiendo el stream (Ctrl-C para parar)");
+    loop {
+        // Each pass reconnects. A connector that reconnects on a schedule
+        // recovers from a network blip, a primary failover, and a Postgres
+        // restart with the same code path, instead of three.
+        match connector
+            .stream_once(std::time::Duration::from_secs(60), u64::MAX)
+            .await
+        {
+            Ok(report) if report.applied() > 0 => tracing::info!(
+                connector = %name,
+                inserted = report.inserted,
+                updated = report.updated,
+                deleted = report.deleted,
+                lsn = %luma::pgcdc::pgoutput::format_lsn(report.last_lsn),
+                "applied"
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(connector = %name, error = %e, "the connector pass failed; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
 pub fn run_backup(config: &Config, verify: bool) -> anyhow::Result<()> {
     let dest = luma::backup::run_backup(config)?;
     println!("Backup creado en {}", dest.display());
@@ -264,7 +430,8 @@ mod tests {
     #[test]
     fn the_help_mentions_every_subcommand() {
         const SUBCOMMANDS: &[&str] = &[
-            "serve", "backup", "restore", "promote", "demote", "role", "vacuum", "diskann", "help",
+            "serve", "backup", "restore", "promote", "demote", "role", "vacuum", "diskann",
+            "connect", "help",
         ];
         let help = help_text();
         let missing: Vec<&&str> = SUBCOMMANDS
@@ -294,10 +461,61 @@ mod tests {
             vec!["luma", "--help"],
             vec!["luma", "-h"],
             vec!["luma", "vacuum", "--collection", "c"],
+            vec!["luma", "connect", "postgres", "erp.toml"],
+            vec![
+                "luma",
+                "connect",
+                "postgres",
+                "erp.toml",
+                "--once",
+                "--no-backfill",
+            ],
         ] {
             let owned: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
             assert!(parse_args(&owned).is_ok(), "{argv:?} should parse");
         }
+    }
+
+    #[test]
+    fn connect_requires_a_source_and_a_config_and_says_which_is_missing() {
+        // `luma connect erp.toml` would otherwise read the config path as a
+        // source name and complain about `erp.toml` not being supported, which
+        // sends the operator looking for a spelling mistake they did not make.
+        let parse =
+            |args: &[&str]| parse_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(parse(&["luma", "connect"]).is_err());
+
+        let err = parse(&["luma", "connect", "postgres"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fichero de conector"), "{err}");
+
+        let err = parse(&["luma", "connect", "mysql", "cfg.toml"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mysql"), "{err}");
+        assert!(err.contains("postgres"), "{err}");
+    }
+
+    #[test]
+    fn connect_reads_its_flags_in_any_position() {
+        let parse = |args: &[&str]| {
+            parse_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+        };
+        let Command::Connect {
+            source,
+            config_path,
+            once,
+            no_backfill,
+        } = parse(&["luma", "connect", "--once", "postgres", "erp.toml"])
+        else {
+            panic!("expected a connect command");
+        };
+        assert_eq!(source, "postgres");
+        // The flag before the positionals must not be taken for one of them.
+        assert_eq!(config_path, "erp.toml");
+        assert!(once);
+        assert!(!no_backfill);
     }
 
     #[test]
