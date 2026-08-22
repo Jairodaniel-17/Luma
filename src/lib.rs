@@ -34,6 +34,8 @@ pub mod memory;
 
 pub mod resp;
 
+pub mod replica;
+
 pub mod router;
 /// Search primitives shared across the vector and hybrid query paths.
 pub mod search;

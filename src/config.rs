@@ -231,6 +231,13 @@ pub struct Config {
     /// from a misconfigured client is unrecoverable without a restore.
     #[serde(default)]
     pub resp_allow_flush: bool,
+    /// Seconds between replica follow passes.
+    ///
+    /// Only consulted when the data directory carries the replica marker; the
+    /// role is on disk so a restart cannot silently turn a replica into a
+    /// primary.
+    #[serde(default = "default_replica_poll_interval_secs")]
+    pub replica_poll_interval_secs: u64,
     /// Seconds between WAL shipping passes. 0 disables it.
     ///
     /// This interval **is** the recovery point objective: a host lost between
@@ -239,6 +246,9 @@ pub struct Config {
     pub wal_ship_interval_secs: u64,
 }
 
+fn default_replica_poll_interval_secs() -> u64 {
+    10
+}
 fn default_resp_pubsub_inbox() -> usize {
     1_024
 }
@@ -383,6 +393,7 @@ impl Default for Config {
             backup_remote_region: String::new(),
             backup_remote_allow_http: false,
             wal_ship_interval_secs: 0,
+            replica_poll_interval_secs: default_replica_poll_interval_secs(),
             resp_port: 0,
             resp_max_clients: default_resp_max_clients(),
             resp_idle_timeout_secs: default_resp_idle_timeout_secs(),
@@ -916,6 +927,10 @@ impl Config {
             backup_remote_allow_http: std::env::var("BACKUP_REMOTE_ALLOW_HTTP")
                 .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            replica_poll_interval_secs: std::env::var("REPLICA_POLL_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_replica_poll_interval_secs),
             wal_ship_interval_secs: std::env::var("WAL_SHIP_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
