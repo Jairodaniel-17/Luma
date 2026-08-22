@@ -53,13 +53,21 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     // Prometheus only parses a body served as `text/plain; version=0.0.4`;
     // without the header axum falls back to a content type scrapers reject, so
     // the exposition format was already correct but unscrapeable.
+    let mut body = state.engine.metrics_text();
+    // Appended rather than merged into the engine's snapshot: the RESP counters
+    // are owned by the listener and are absent entirely when it is disabled, so
+    // the metric names do not appear at all instead of reporting a permanent
+    // zero that reads as "no traffic" rather than "not running".
+    if let Some(resp) = &state.resp_metrics {
+        resp.render(&mut body);
+    }
     (
         StatusCode::OK,
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.engine.metrics_text(),
+        body,
     )
 }
 

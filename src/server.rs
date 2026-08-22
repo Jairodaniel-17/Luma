@@ -111,6 +111,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let search_engine = Arc::new(SearchEngine::new(data_dir)?);
 
     let embeddings = init_embeddings(&config, engine.metrics());
+    // Allocated before the router so `/v1/metrics` can render the RESP counters
+    // from the same instance the listener increments.
+    let resp_metrics = std::sync::Arc::new(luma::resp::listener::RespMetrics::default());
     let app = luma::api::router(luma::api::RouterDeps {
         engine: engine.clone(),
         config: config.clone(),
@@ -118,6 +121,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         search_engine,
         auth_store,
         embeddings,
+        resp_metrics: config
+            .resp_port
+            .gt(&0)
+            .then(|| std::sync::Arc::clone(&resp_metrics)),
         audit_log,
         rbac,
     });
@@ -128,6 +135,24 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // Continuous WAL shipping: bounds the recovery point to one interval
     // instead of to the gap between full backups.
     luma::wal_ship::spawn(config.clone());
+
+    // Redis-protocol listener. Off unless `resp_port` is set: an engine that
+    // starts listening on 6379 on upgrade is a surprise, and on a shared host a
+    // conflict with the real Redis.
+    match luma::resp::listener::spawn(
+        &config,
+        engine.clone(),
+        std::sync::Arc::clone(&resp_metrics),
+        shutdown_token.clone(),
+    )
+    .await
+    {
+        Ok(Some(port)) => tracing::info!(port, "RESP listener bound"),
+        Ok(None) => {}
+        // A failed bind must not take the HTTP server down with it: the rest of
+        // the instance is perfectly serviceable without RESP.
+        Err(e) => tracing::error!("RESP listener failed to bind, continuing without it: {e}"),
+    }
 
     tracing::info!(%addr, "listening");
     tracing::info!("Process ID: {}", std::process::id());

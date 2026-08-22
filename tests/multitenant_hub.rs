@@ -46,6 +46,7 @@ async fn start() -> (TenantApp, Arc<AuthStore>) {
                 luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
             ),
         ),
+        resp_metrics: None,
         audit_log: None,
         rbac: None,
     });

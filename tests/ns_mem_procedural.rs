@@ -44,6 +44,7 @@ async fn start() -> TestApp {
         search_engine,
         auth_store: None,
         embeddings,
+        resp_metrics: None,
         audit_log: None,
         rbac: None,
     });

@@ -37,6 +37,7 @@ async fn start_with_config(config: Config) -> (String, oneshot::Sender<()>) {
                 luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
             ),
         ),
+        resp_metrics: None,
         audit_log: None,
         rbac: None,
     });

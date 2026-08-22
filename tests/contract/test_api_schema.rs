@@ -32,6 +32,7 @@ async fn test_health_check_contract() {
                 luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
             ),
         ),
+        resp_metrics: None,
         audit_log: None,
         rbac: None,
     });
@@ -81,6 +82,7 @@ async fn test_error_schema_contract() {
                 luma::engine::embeddings::EmbeddingProvider::Mock { dim: 384 },
             ),
         ),
+        resp_metrics: None,
         audit_log: None,
         rbac: None,
     });

@@ -207,6 +207,22 @@ pub struct Config {
     /// request are not.
     #[serde(default)]
     pub backup_remote_allow_http: bool,
+    /// TCP port for the Redis-protocol listener. 0 disables it.
+    ///
+    /// Off by default on purpose: an engine that starts listening on 6379 the
+    /// moment you upgrade is a surprise, and on a shared host it is a port
+    /// conflict with the actual Redis.
+    #[serde(default)]
+    pub resp_port: u16,
+    /// Maximum simultaneous RESP connections.
+    #[serde(default = "default_resp_max_clients")]
+    pub resp_max_clients: usize,
+    /// Close a RESP connection after this many idle seconds.
+    #[serde(default = "default_resp_idle_timeout_secs")]
+    pub resp_idle_timeout_secs: u64,
+    /// Hard cap on one connection's read buffer.
+    #[serde(default = "default_resp_max_buffer_bytes")]
+    pub resp_max_buffer_bytes: usize,
     /// Seconds between WAL shipping passes. 0 disables it.
     ///
     /// This interval **is** the recovery point objective: a host lost between
@@ -215,6 +231,17 @@ pub struct Config {
     pub wal_ship_interval_secs: u64,
 }
 
+fn default_resp_max_clients() -> usize {
+    10_000
+}
+fn default_resp_idle_timeout_secs() -> u64 {
+    300
+}
+/// 64 MiB: comfortably above any real pipeline, far below what a single
+/// connection could otherwise make us hold.
+fn default_resp_max_buffer_bytes() -> usize {
+    64 * 1024 * 1024
+}
 fn default_backup_dir() -> String {
     "backups".to_string()
 }
@@ -345,6 +372,10 @@ impl Default for Config {
             backup_remote_region: String::new(),
             backup_remote_allow_http: false,
             wal_ship_interval_secs: 0,
+            resp_port: 0,
+            resp_max_clients: default_resp_max_clients(),
+            resp_idle_timeout_secs: default_resp_idle_timeout_secs(),
+            resp_max_buffer_bytes: default_resp_max_buffer_bytes(),
         }
     }
 }
@@ -876,6 +907,22 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            resp_port: std::env::var("RESP_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            resp_max_clients: std::env::var("RESP_MAX_CLIENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_resp_max_clients),
+            resp_idle_timeout_secs: std::env::var("RESP_IDLE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_resp_idle_timeout_secs),
+            resp_max_buffer_bytes: std::env::var("RESP_MAX_BUFFER_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_resp_max_buffer_bytes),
         })
     }
 }

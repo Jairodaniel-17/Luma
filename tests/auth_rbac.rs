@@ -49,6 +49,7 @@ async fn start_server(data_dir: &str) -> (String, oneshot::Sender<()>, String) {
         search_engine,
         auth_store: Some(auth_store),
         embeddings,
+        resp_metrics: None,
         audit_log: Some(audit_log),
         rbac: Some(rbac),
     });

@@ -254,24 +254,24 @@ destrucción/restauración con pérdida ≤ `ship_interval`.
 
 El hito visible: `redis-cli -p 6379` conversa con Luma.
 
-- `[ ]` **F1.1 — framing RESP2 + ciclo de conexión.** Listener propio en
+- `[x]` **F1.1 — framing RESP2 + ciclo de conexión.** Listener propio en
   `resp_port` (default **desactivado**), mismo proceso. Decisión pendiente de
   D2: evaluar el crate `redis-protocol` contra `deny.toml` primero; si no
   pasa, parser propio. Soportar *inline commands* (`PING\r\n`), porque
   redis-cli los usa. Pipelining. Fuzzing del parser sin panics.
-- `[ ]` **F4.1 — TLS y límites** (adelantado, ver D-1): `resp_max_clients`,
+- `[~]` **F4.1 — límites** hechos (TLS pendiente) (adelantado, ver D-1): `resp_max_clients`,
   `resp_idle_timeout_secs`, buffer máximo por conexión, backpressure en
   suscriptores lentos. TLS reusando `rustls`, que ya es dependencia.
-- `[ ]` **F1.2 — AUTH multi-tenant.** `AUTH` mapea a las api keys/roles
+- `[x]` **F1.2 — AUTH multi-tenant.** `AUTH` mapea a las api keys/roles
   actuales; keyspace prefijado por `{org_id}\x1f`; `KEYS`/`SCAN` filtran por
   tenant. Dos orgs con la misma clave no se ven. Key revocada corta en el
   siguiente comando.
-- `[ ]` **F1.3 — comandos de strings/keys.** El set completo del SPEC
+- `[~]` **F1.3 — comandos de strings/keys** El set completo del SPEC
   (`GET SET SETEX … SCAN RENAME`), con `FLUSHDB` solo bajo
   `resp_allow_flush = true`. **La suite diferencial contra Redis 7 real en
   docker es la fuente de verdad**, no la documentación de Redis: ~200
   operaciones, salidas byte-idénticas. `SCAN` con cursor real, no snapshot.
-- `[ ]` **F1.4 — observabilidad RESP.** `resp_connections_gauge`,
+- `[x]` **F1.4 — observabilidad RESP.** `resp_connections_gauge`,
   `resp_commands_total{cmd}`, `resp_errors_total{kind}`,
   `resp_auth_failures_total`. `INFO` con secciones reales — kombu las lee.
 

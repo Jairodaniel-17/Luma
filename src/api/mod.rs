@@ -48,6 +48,10 @@ pub struct AppState {
     pub search_engine: Arc<SearchEngine>,
     pub auth_store: Option<Arc<AuthStore>>,
     pub embeddings: crate::engine::embeddings::EmbeddingHandle,
+    /// RESP counters, rendered alongside the HTTP ones. `None` when the
+    /// listener is disabled, so the metric names simply do not appear rather
+    /// than showing a misleading permanent zero.
+    pub resp_metrics: Option<std::sync::Arc<crate::resp::listener::RespMetrics>>,
     pub hub: Arc<crate::engine::hub::LumaDatabase>,
     pub memory: Arc<crate::memory::MemoryService>,
     pub audit_log: Option<Arc<audit::AuditLog>>,
@@ -188,6 +192,7 @@ pub struct RouterDeps {
     pub search_engine: Arc<SearchEngine>,
     pub auth_store: Option<Arc<AuthStore>>,
     pub embeddings: crate::engine::embeddings::EmbeddingHandle,
+    pub resp_metrics: Option<std::sync::Arc<crate::resp::listener::RespMetrics>>,
     pub audit_log: Option<Arc<audit::AuditLog>>,
     pub rbac: Option<Arc<rbac::RbacService>>,
 }
@@ -200,6 +205,7 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         search_engine,
         auth_store,
         embeddings,
+        resp_metrics,
         audit_log,
         rbac,
     } = deps;
@@ -231,6 +237,7 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         search_engine,
         auth_store,
         embeddings,
+        resp_metrics,
         hub,
         memory,
         audit_log,
