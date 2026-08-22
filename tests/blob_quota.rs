@@ -294,3 +294,88 @@ async fn bytes_are_attributed_per_bucket_owner_not_per_writer() {
     assert_eq!(usage_of(&harness, "acme").await, 300);
     assert_eq!(usage_of(&harness, "globex").await, 5000);
 }
+
+// ─── Queue messages and vectors ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn one_orgs_full_queue_does_not_block_another() {
+    // The acceptance criterion again, for messages. Queues are already isolated
+    // by directory, so this is checking that the guard reads the *right*
+    // subtree — a guard that counted the whole root would refuse org B because
+    // org A is full.
+    let harness = start().await;
+    let queues = harness.blobs_root.parent().unwrap().join("queues");
+    for org in ["acme", "globex"] {
+        std::fs::create_dir_all(queues.join(format!("t_{org}")).join("jobs")).unwrap();
+    }
+    for i in 0..5 {
+        std::fs::write(
+            queues.join("t_acme").join("jobs").join(format!("m{i}")),
+            b"{}",
+        )
+        .unwrap();
+    }
+    std::fs::write(queues.join("t_globex").join("jobs").join("m0"), b"{}").unwrap();
+
+    assert!(
+        luma::api::quotas::guard_queue_write(&queues, &ctx_with(&acme_quota(5)), 1).is_err(),
+        "acme holds 5 of 5 and must be refused"
+    );
+    assert!(
+        luma::api::quotas::guard_queue_write(&queues, &globex_ctx(5), 1).is_ok(),
+        "globex holds 1 of 5 and must be unaffected"
+    );
+}
+
+#[tokio::test]
+async fn a_platform_caller_is_not_charged_for_queue_messages() {
+    // A platform caller writes to the shared top-level namespace, not to any
+    // org's subtree, so there is nothing to charge.
+    let harness = start().await;
+    let queues = harness.blobs_root.parent().unwrap().join("queues");
+    std::fs::create_dir_all(&queues).unwrap();
+    let platform = TenantContext {
+        tenant_id: None,
+        user_id: None,
+        role: "admin".to_string(),
+        platform_admin: true,
+        permissions: serde_json::json!({}),
+        quotas: serde_json::json!({ "max_queue_messages": 1 }),
+    };
+    assert!(luma::api::quotas::guard_queue_write(&queues, &platform, 100).is_ok());
+}
+
+#[tokio::test]
+async fn a_missing_queue_directory_counts_as_empty() {
+    // A brand-new org has no directory yet. Treating an unreadable directory as
+    // an error would refuse the very first enqueue.
+    let harness = start().await;
+    let queues = harness.blobs_root.parent().unwrap().join("queues");
+    assert!(luma::api::quotas::guard_queue_write(&queues, &ctx_with(&acme_quota(1)), 1).is_ok());
+}
+
+fn acme_quota(limit: u64) -> serde_json::Value {
+    serde_json::json!({ "max_queue_messages": limit })
+}
+
+fn ctx_with(quotas: &serde_json::Value) -> TenantContext {
+    TenantContext {
+        tenant_id: Some("acme".to_string()),
+        user_id: None,
+        role: "member".to_string(),
+        platform_admin: false,
+        permissions: serde_json::json!({}),
+        quotas: quotas.clone(),
+    }
+}
+
+fn globex_ctx(limit: u64) -> TenantContext {
+    TenantContext {
+        tenant_id: Some("globex".to_string()),
+        user_id: None,
+        role: "member".to_string(),
+        platform_admin: false,
+        permissions: serde_json::json!({ "": "" }),
+        quotas: serde_json::json!({ "max_queue_messages": limit }),
+    }
+}

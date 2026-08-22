@@ -483,6 +483,118 @@ fn internal(message: String) -> ApiError {
     )
 }
 
+// ── Queue messages and vectors per organization ──────────────────────────────
+//
+// The last two of W5.2. Both are cheaper than blob bytes, for opposite reasons:
+//
+// * **Queues** are already isolated by directory (`queues/t_{org}/…`), so an
+//   org's messages are a walk of one subtree it exclusively owns. No ownership
+//   registry and no stored counter: the answer is right there and small.
+// * **Vectors** are counted by the vector store already — `live_count` per
+//   collection — so the only question is which collections belong to the org,
+//   and the ownership registry answers that.
+//
+// Neither needs the stored-total machinery blob bytes needed, and adding it
+// would be cost with no benefit: a counter that can drift, guarding a number
+// that was never expensive to compute.
+
+/// Refuse an enqueue that would take the organization past its message limit.
+///
+/// Returns `Ok(())` with no limit and for a platform caller, who writes to the
+/// shared top-level namespace rather than to any org's subtree.
+pub fn guard_queue_write(
+    queues_root: &std::path::Path,
+    ctx: &TenantContext,
+    incoming: u64,
+) -> Result<(), ApiError> {
+    let quotas = Quotas::from_value(&ctx.quotas);
+    let Some(limit) = quotas.max_queue_messages else {
+        return Ok(());
+    };
+    let Some(org) = ctx.tenant_id.as_deref() else {
+        return Ok(());
+    };
+
+    let current = count_files(&queues_root.join(format!("t_{org}")));
+    if current.saturating_add(incoming) > limit {
+        return Err(to_api_error(Exceeded {
+            resource: Resource::QueueMessages,
+            limit,
+            current,
+            requested: incoming,
+        }));
+    }
+    Ok(())
+}
+
+/// Messages held under a directory tree, one file each.
+fn count_files(directory: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += count_files(&path);
+        } else {
+            total += 1;
+        }
+    }
+    total
+}
+
+/// Refuse a vector upsert that would take the organization past its limit.
+///
+/// Counts `live_count`, not total records: a tombstoned vector is not storage
+/// the caller can read back, and charging for it would make a collection
+/// permanently full after enough deletes.
+pub async fn guard_vector_write(
+    engine: &Engine,
+    accounts: Option<&crate::api::accounts::AccountsService>,
+    ctx: &TenantContext,
+    incoming: u64,
+) -> Result<(), ApiError> {
+    let quotas = Quotas::from_value(&ctx.quotas);
+    let Some(limit) = quotas.max_vectors else {
+        return Ok(());
+    };
+    let Some(org) = ctx.tenant_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(accounts) = accounts else {
+        return Ok(());
+    };
+
+    let owned = accounts.names_owned_by(org).await.map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("ownership lookup failed: {e}"),
+        )
+    })?;
+    // The registry is keyed by name across every scoped resource, so this list
+    // also holds blob buckets and doc namespaces. Those are not collections and
+    // contribute nothing — used as-is rather than filtered, because a filter
+    // would need to know every resource kind and would go stale when one is
+    // added.
+    let current: u64 = owned
+        .iter()
+        .filter_map(|name| engine.vector_collection_info(name))
+        .map(|info| info.live_count as u64)
+        .sum();
+
+    if current.saturating_add(incoming) > limit {
+        return Err(to_api_error(Exceeded {
+            resource: Resource::Vectors,
+            limit,
+            current,
+            requested: incoming,
+        }));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

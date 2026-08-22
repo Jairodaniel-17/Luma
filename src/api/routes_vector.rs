@@ -297,9 +297,13 @@ pub async fn add(
 
 pub async fn upsert(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::TenantContext>,
     Path(collection): Path<String>,
     axum::Json(body): axum::Json<AddBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // One vector at a time here; the batch route charges for its whole batch.
+    crate::api::quotas::guard_vector_write(&state.engine, state.accounts.as_deref(), &ctx, 1)
+        .await?;
     if collection.len() > state.config.max_collection_len {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -348,9 +352,19 @@ pub async fn upsert(
 
 pub async fn upsert_batch(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::TenantContext>,
     Path(collection): Path<String>,
     axum::Json(body): axum::Json<UpsertBatchBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The whole batch is charged before any of it is applied: half-applying a
+    // batch leaves the caller unable to tell what landed.
+    crate::api::quotas::guard_vector_write(
+        &state.engine,
+        state.accounts.as_deref(),
+        &ctx,
+        body.items.len() as u64,
+    )
+    .await?;
     if collection.len() > state.config.max_collection_len {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,

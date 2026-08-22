@@ -271,6 +271,9 @@ pub async fn enqueue(
     let dir = resolve_queue_dir(&state, &ctx, &queue)?;
     let delay = req.delay_secs.unwrap_or(0);
     check_delay(delay)?;
+    // Before writing: one org filling the disk with queued messages is the same
+    // shared-resource exhaustion the blob quota exists to stop.
+    crate::api::quotas::guard_queue_write(&queues_root(&state), &ctx, 1)?;
 
     let now = now_millis();
     // Lexicographically-sortable id: zero-padded enqueue millis + short uuid

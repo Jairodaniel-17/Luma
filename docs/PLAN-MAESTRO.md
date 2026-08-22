@@ -455,8 +455,7 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
 
 ### Bloque 11 — GA · `v4.36.0` → `1.0`
 
-- `[~]` **W5.2 - cuotas por organización** (claves y bytes de blob aplicados;
-  colas y vectores pendientes) (≡ B.1 del roadmap). Excedido → 507 tipado con
+- `[x]` **W5.2 - cuotas por organización** (las cuatro aplicadas) (≡ B.1 del roadmap). Excedido → 507 tipado con
   los tres números (en uso, pedido, límite). Test de aceptación: org A en su
   límite no degrada a org B, para las dos.
 
@@ -482,9 +481,20 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
   Dicho claramente porque una cuota calladamente equivocada es peor que una
   ausente.
 
-  **Pendiente:** colas y vectores. Las colas necesitan el mismo tratamiento y
-  los vectores ya tienen colección con dueño, así que ninguna es un problema de
-  diseño — solo trabajo.
+  **Colas y vectores** salieron más baratos, por razones opuestas. Las colas ya
+  están aisladas por directorio (`queues/t_{org}/…`), así que los mensajes de una
+  org son un recorrido de un subárbol que le pertenece en exclusiva: ni registro
+  de propiedad ni contador guardado, la respuesta está ahí y es pequeña. Los
+  vectores los cuenta ya el store (`live_count` por colección), así que la única
+  pregunta es qué colecciones son de la org, y eso lo responde el registro.
+
+  Ninguno necesita la maquinaria de total guardado que los bytes de blob sí
+  necesitaban, y añadirla habría sido coste sin beneficio: un contador que puede
+  derivar, protegiendo un número que nunca fue caro de calcular.
+
+  Se cuenta `live_count` y no el total de registros: un vector con tombstone no
+  es almacenamiento que el llamante pueda leer, y cobrarlo dejaría una colección
+  permanentemente llena tras suficientes borrados.
 - `[~]` **W5.3 - supply chain** (hecho salvo verificar la publicación real de
   la imagen, que necesita un tag).
 
