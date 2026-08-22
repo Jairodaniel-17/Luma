@@ -35,6 +35,19 @@ pub struct Session {
     /// Set by `CLIENT SETNAME`; purely informational, but clients send it and a
     /// server that errors on it looks broken.
     pub name: Option<String>,
+    /// Commands queued by `MULTI`, or `None` outside a transaction.
+    ///
+    /// `Some(vec![])` is a started-but-empty transaction, which is different
+    /// from not being in one at all — `EXEC` there returns an empty array
+    /// rather than an error.
+    pub queued: Option<Vec<Vec<Vec<u8>>>>,
+    /// Set when a queued command failed to parse. `EXEC` must then abort with
+    /// `EXECABORT` instead of running a transaction the client already knows
+    /// is broken.
+    pub queue_error: bool,
+    /// Keys under `WATCH`, with the revision they had when watched. `EXEC`
+    /// compares against these; any change aborts the transaction.
+    pub watched: Vec<(String, u64)>,
 }
 
 impl Session {
@@ -43,6 +56,9 @@ impl Session {
             tenant: None,
             authenticated: !requires_auth,
             name: None,
+            queued: None,
+            queue_error: false,
+            watched: Vec::new(),
         }
     }
 }
@@ -71,10 +87,23 @@ fn scope(session: &Session, key: &[u8]) -> String {
 }
 
 /// Outcome of dispatching one command.
+#[derive(Debug)]
 pub enum Dispatch {
     Reply(Value),
     /// The client asked to close the connection.
     Quit,
+    /// A blocking read. Dispatch stays synchronous and hands the wait back to
+    /// the connection loop, which is the only place that can await without
+    /// holding a lock on the store.
+    Block {
+        /// Keys to watch, in the order the client gave them — a `BLPOP` that
+        /// wakes must pop from the *first* ready key in argument order.
+        keys: Vec<String>,
+        /// `None` means wait forever, which is how Redis spells `timeout 0`.
+        timeout: Option<std::time::Duration>,
+        /// Pop from the head (`BLPOP`) or the tail (`BRPOP`).
+        left: bool,
+    },
 }
 
 /// Execute one command.
@@ -82,7 +111,9 @@ pub fn dispatch(
     engine: &Engine,
     session: &mut Session,
     args: &[Vec<u8>],
-    authenticate: impl Fn(&str, &str) -> Option<Option<String>>,
+    // A trait object rather than `impl Fn`: `exec` calls back into
+    // dispatch, and a generic parameter would monomorphize `&&&&...` forever.
+    authenticate: &dyn Fn(&str, &str) -> Option<Option<String>>,
     allow_flush: bool,
 ) -> Dispatch {
     let Some(first) = args.first() else {
@@ -94,6 +125,24 @@ pub fn dispatch(
 
     if !session.authenticated && !PRE_AUTH.contains(&name.as_str()) {
         return Dispatch::Reply(err("NOAUTH Authentication required."));
+    }
+
+    // Inside MULTI everything except the transaction controls is queued rather
+    // than run, and the client is told so with +QUEUED.
+    if session.queued.is_some() && !TRANSACTION_CONTROL.contains(&name.as_str()) {
+        if is_unknown_command(&name) {
+            // Redis reports the error now *and* refuses the EXEC later: a
+            // client that mistyped a command must not have the rest of its
+            // transaction applied.
+            session.queue_error = true;
+            return Dispatch::Reply(err(format!(
+                "ERR unknown command '{name}', with args beginning with: "
+            )));
+        }
+        if let Some(queue) = session.queued.as_mut() {
+            queue.push(args.to_vec());
+        }
+        return Dispatch::Reply(Value::Simple("QUEUED".into()));
     }
 
     match name.as_str() {
@@ -144,6 +193,27 @@ pub fn dispatch(
         "EXPIRE" => Dispatch::Reply(expire(engine, session, rest, 1000)),
         "PEXPIRE" => Dispatch::Reply(expire(engine, session, rest, 1)),
         "PERSIST" => Dispatch::Reply(persist(engine, session, rest)),
+
+        // ── transactions ─────────────────────────────────────────────────────
+        "MULTI" => Dispatch::Reply(if session.queued.is_some() {
+            // Redis refuses to nest; silently accepting would make the inner
+            // EXEC run only part of what the client thinks it queued.
+            err("ERR MULTI calls can not be nested")
+        } else {
+            session.queued = Some(Vec::new());
+            session.queue_error = false;
+            Value::ok()
+        }),
+        "EXEC" => Dispatch::Reply(exec(engine, session, authenticate, allow_flush)),
+        "DISCARD" => Dispatch::Reply(discard(session)),
+        "WATCH" => Dispatch::Reply(watch(engine, session, rest)),
+        "UNWATCH" => {
+            session.watched.clear();
+            Dispatch::Reply(Value::ok())
+        }
+
+        // ── blocking reads ───────────────────────────────────────────────────
+        "BLPOP" | "BRPOP" => blocking_pop(session, rest, name == "BLPOP"),
         "EXPIREAT" => Dispatch::Reply(expire_at(engine, session, rest, 1000)),
         "PEXPIREAT" => Dispatch::Reply(expire_at(engine, session, rest, 1)),
         "RENAME" => Dispatch::Reply(rename(engine, session, rest, false)),
@@ -176,7 +246,7 @@ pub fn dispatch(
 fn auth(
     session: &mut Session,
     args: &[Vec<u8>],
-    authenticate: impl Fn(&str, &str) -> Option<Option<String>>,
+    authenticate: &dyn Fn(&str, &str) -> Option<Option<String>>,
 ) -> Value {
     // Redis 6 added the two-argument form; the one-argument form is still what
     // most clients send when only a password is configured.
@@ -976,6 +1046,207 @@ fn expire_at(engine: &Engine, session: &Session, args: &[Vec<u8>], multiplier: u
     }
 }
 
+// ── transactions ─────────────────────────────────────────────────────────────
+
+/// Commands that act on the transaction itself and are therefore executed
+/// immediately rather than queued.
+const TRANSACTION_CONTROL: &[&str] = &["MULTI", "EXEC", "DISCARD", "WATCH", "UNWATCH", "QUIT"];
+
+/// The revision a key currently has, or 0 when it does not exist.
+///
+/// Absent is deliberately a *value* rather than a special case: `WATCH`ing a
+/// key that does not exist yet and having it created before `EXEC` must abort
+/// the transaction, which only works if "absent" and "revision 1" compare
+/// unequal.
+fn revision_of(engine: &Engine, key: &str) -> u64 {
+    engine.get_state(key).map(|item| item.revision).unwrap_or(0)
+}
+
+fn watch(engine: &Engine, session: &mut Session, args: &[Vec<u8>]) -> Value {
+    if args.is_empty() {
+        return err("ERR wrong number of arguments for 'watch' command");
+    }
+    // Redis refuses this: watching after MULTI could not affect the outcome,
+    // and silently accepting it would give a false sense of protection.
+    if session.queued.is_some() {
+        return err("ERR WATCH inside MULTI is not allowed");
+    }
+    for key in args {
+        let scoped = scope(session, key);
+        let revision = revision_of(engine, &scoped);
+        session.watched.push((scoped, revision));
+    }
+    Value::ok()
+}
+
+fn exec(
+    engine: &Engine,
+    session: &mut Session,
+    authenticate: &dyn Fn(&str, &str) -> Option<Option<String>>,
+    allow_flush: bool,
+) -> Value {
+    let Some(queued) = session.queued.take() else {
+        return err("ERR EXEC without MULTI");
+    };
+    let watched = std::mem::take(&mut session.watched);
+
+    if session.queue_error {
+        session.queue_error = false;
+        // The client already saw the queueing error, so running the rest would
+        // execute a transaction it knows is incomplete.
+        return err("EXECABORT Transaction discarded because of previous errors.");
+    }
+
+    // Optimistic concurrency: if anything we watched moved, the whole
+    // transaction is abandoned and the client retries. A *null array* is the
+    // signal — not an error and not an empty array, both of which a client
+    // would read as "it ran".
+    for (key, revision) in &watched {
+        if revision_of(engine, key) != *revision {
+            return Value::Array(None);
+        }
+    }
+
+    let mut replies = Vec::with_capacity(queued.len());
+    for args in queued {
+        match dispatch(engine, session, &args, authenticate, allow_flush) {
+            Dispatch::Reply(value) => replies.push(value),
+            // QUIT is in TRANSACTION_CONTROL so it never reaches the queue;
+            // treating it as a reply keeps this total without a panic.
+            Dispatch::Quit => replies.push(Value::ok()),
+            Dispatch::Block { .. } => {
+                // A blocking command inside MULTI must not block: Redis runs it
+                // with a zero timeout, so it behaves as its non-blocking twin.
+                replies.push(Value::Array(None));
+            }
+        }
+    }
+    Value::Array(Some(replies))
+}
+
+fn discard(session: &mut Session) -> Value {
+    if session.queued.take().is_none() {
+        return err("ERR DISCARD without MULTI");
+    }
+    session.queue_error = false;
+    session.watched.clear();
+    Value::ok()
+}
+
+/// Parse `BLPOP key [key ...] timeout` into a wait request.
+///
+/// The timeout is seconds and may be fractional, which is how Redis spells
+/// sub-second waits. `0` means wait forever.
+fn blocking_pop(session: &Session, args: &[Vec<u8>], left: bool) -> Dispatch {
+    if args.len() < 2 {
+        return Dispatch::Reply(err(format!(
+            "ERR wrong number of arguments for '{}' command",
+            if left { "blpop" } else { "brpop" }
+        )));
+    }
+    let (keys, timeout_raw) = args.split_at(args.len() - 1);
+    let Some(seconds) = std::str::from_utf8(&timeout_raw[0])
+        .ok()
+        .and_then(|t| t.trim().parse::<f64>().ok())
+    else {
+        return Dispatch::Reply(err("ERR timeout is not a float or out of range"));
+    };
+    if seconds < 0.0 || !seconds.is_finite() {
+        return Dispatch::Reply(err("ERR timeout is negative"));
+    }
+    Dispatch::Block {
+        keys: keys.iter().map(|k| scope(session, k)).collect(),
+        timeout: (seconds > 0.0).then(|| std::time::Duration::from_secs_f64(seconds)),
+        left,
+    }
+}
+
+/// Whether a name is one this server does not implement.
+///
+/// Used only to reject inside MULTI. Kept as one list so a command added to the
+/// dispatcher but forgotten here would merely be queued rather than silently
+/// mis-reported — failing towards accepting a real command rather than
+/// rejecting it.
+fn is_unknown_command(name: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "PING",
+        "ECHO",
+        "AUTH",
+        "HELLO",
+        "SELECT",
+        "CLIENT",
+        "COMMAND",
+        "RESET",
+        "SET",
+        "GET",
+        "GETDEL",
+        "SETEX",
+        "PSETEX",
+        "SETNX",
+        "STRLEN",
+        "INCR",
+        "DECR",
+        "INCRBY",
+        "DECRBY",
+        "MGET",
+        "MSET",
+        "DEL",
+        "UNLINK",
+        "EXISTS",
+        "TYPE",
+        "TTL",
+        "PTTL",
+        "EXPIRE",
+        "PEXPIRE",
+        "PERSIST",
+        "EXPIREAT",
+        "PEXPIREAT",
+        "RENAME",
+        "RENAMENX",
+        "APPEND",
+        "GETSET",
+        "INCRBYFLOAT",
+        "KEYS",
+        "SCAN",
+        "DBSIZE",
+        "RANDOMKEY",
+        "FLUSHDB",
+        "FLUSHALL",
+        "BLPOP",
+        "BRPOP",
+        "LPUSH",
+        "RPUSH",
+        "LPOP",
+        "RPOP",
+        "LLEN",
+        "LRANGE",
+        "LREM",
+        "HSET",
+        "HGET",
+        "HMGET",
+        "HDEL",
+        "HGETALL",
+        "HLEN",
+        "HEXISTS",
+        "HKEYS",
+        "HVALS",
+        "HINCRBY",
+        "SADD",
+        "SREM",
+        "SMEMBERS",
+        "SISMEMBER",
+        "SCARD",
+        "ZADD",
+        "ZREM",
+        "ZSCORE",
+        "ZCARD",
+        "ZRANGE",
+        "ZRANGEBYSCORE",
+        "ZRANK",
+    ];
+    !KNOWN.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,10 +1270,21 @@ mod tests {
 
     fn run(engine: &Engine, session: &mut Session, argv: &[&str]) -> Value {
         let args: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
-        match dispatch(engine, session, &args, allow_all, true) {
+        match dispatch(engine, session, &args, &allow_all, true) {
             Dispatch::Reply(value) => value,
             Dispatch::Quit => Value::Simple("QUIT".into()),
+            // The test helper is synchronous; a blocking command is reported
+            // rather than silently turned into something else.
+            Dispatch::Block { .. } => Value::Simple("BLOCK".into()),
         }
+    }
+
+    /// Run a command on a fresh session — the "another client" in the WATCH
+    /// tests, and the way to read state without disturbing a transaction in
+    /// progress on the session under test.
+    fn run_outside(engine: &Engine, argv: &[&str]) -> Value {
+        let mut other = Session::new(false);
+        run(engine, &mut other, argv)
     }
 
     fn open() -> (Engine, tempfile::TempDir, Session) {
@@ -1108,9 +1390,10 @@ mod tests {
         let (e, _d) = engine();
         let mut s = Session::new(true);
         let args = vec![b"AUTH".to_vec(), b"wrong".to_vec()];
-        let reply = match dispatch(&e, &mut s, &args, |_, _| None, true) {
+        let reply = match dispatch(&e, &mut s, &args, &|_, _| None, true) {
             Dispatch::Reply(v) => v,
             Dispatch::Quit => panic!(),
+            Dispatch::Block { .. } => panic!("unexpected block"),
         };
         assert!(matches!(reply, Value::Error(m) if m.starts_with("WRONGPASS")));
         assert!(!s.authenticated);
@@ -1160,7 +1443,7 @@ mod tests {
             b"bin".to_vec(),
             vec![0x80, 0x04, 0x00, 0xFF],
         ];
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all, true) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, true) else {
             panic!()
         };
         assert_eq!(reply, Value::ok());
@@ -1405,7 +1688,7 @@ mod tests {
         let mut s = Session::new(false);
         let args = vec![b"QUIT".to_vec()];
         assert!(matches!(
-            dispatch(&e, &mut s, &args, allow_all, true),
+            dispatch(&e, &mut s, &args, &allow_all, true),
             Dispatch::Quit
         ));
     }
@@ -1594,13 +1877,13 @@ mod tests {
         run(&e, &mut s, &["SET", "k", "v"]);
 
         let args = vec![b"FLUSHDB".to_vec()];
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all, false) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, false) else {
             panic!()
         };
         assert!(matches!(reply, Value::Error(m) if m.contains("disabled")));
         assert_eq!(run(&e, &mut s, &["GET", "k"]), Value::bulk("v"));
 
-        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, allow_all, true) else {
+        let Dispatch::Reply(reply) = dispatch(&e, &mut s, &args, &allow_all, true) else {
             panic!()
         };
         assert_eq!(reply, Value::ok());
@@ -1618,7 +1901,7 @@ mod tests {
         run(&e, &mut globex, &["SET", "k", "globex"]);
 
         let args = vec![b"FLUSHDB".to_vec()];
-        let _ = dispatch(&e, &mut acme, &args, allow_all, true);
+        let _ = dispatch(&e, &mut acme, &args, &allow_all, true);
 
         assert_eq!(run(&e, &mut acme, &["GET", "k"]), Value::nil());
         assert_eq!(
@@ -1742,5 +2025,277 @@ mod tests {
             panic!()
         };
         assert!((90..=100).contains(&remaining), "got {remaining}");
+    }
+
+    // ── transactions ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn multi_queues_then_exec_runs_in_order() {
+        let (e, _d, mut s) = open();
+        assert_eq!(run(&e, &mut s, &["MULTI"]), Value::ok());
+        // Queued commands reply +QUEUED, not their result: a client that saw a
+        // real reply here would act on a value that has not been written yet.
+        assert_eq!(
+            run(&e, &mut s, &["SET", "k", "1"]),
+            Value::Simple("QUEUED".into())
+        );
+        assert_eq!(
+            run(&e, &mut s, &["INCR", "k"]),
+            Value::Simple("QUEUED".into())
+        );
+        // Nothing has run yet.
+        assert_eq!(run_outside(&e, &["GET", "k"]), Value::nil());
+
+        assert_eq!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Array(Some(vec![Value::ok(), Value::Integer(2)]))
+        );
+        assert_eq!(run_outside(&e, &["GET", "k"]), Value::bulk("2"));
+    }
+
+    #[test]
+    fn discard_throws_the_queue_away() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "k", "1"]);
+        assert_eq!(run(&e, &mut s, &["DISCARD"]), Value::ok());
+        assert_eq!(run_outside(&e, &["GET", "k"]), Value::nil());
+        // And we are out of the transaction, so EXEC is now an error.
+        assert!(matches!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Error(m) if m.contains("EXEC without MULTI")
+        ));
+    }
+
+    #[test]
+    fn exec_and_discard_without_multi_are_errors() {
+        let (e, _d, mut s) = open();
+        assert!(matches!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Error(m) if m.contains("EXEC without MULTI")
+        ));
+        assert!(matches!(
+            run(&e, &mut s, &["DISCARD"]),
+            Value::Error(m) if m.contains("DISCARD without MULTI")
+        ));
+    }
+
+    #[test]
+    fn multi_cannot_be_nested() {
+        // Accepting it silently would make the inner EXEC run only part of what
+        // the client thinks it queued.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MULTI"]);
+        assert!(matches!(
+            run(&e, &mut s, &["MULTI"]),
+            Value::Error(m) if m.contains("can not be nested")
+        ));
+    }
+
+    #[test]
+    fn an_empty_transaction_execs_to_an_empty_array() {
+        // Started-but-empty is not the same as not being in a transaction.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MULTI"]);
+        assert_eq!(run(&e, &mut s, &["EXEC"]), Value::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn a_bad_command_inside_multi_aborts_the_whole_exec() {
+        // EXECABORT, not a partial application: a client that mistyped one
+        // command must not have the rest of its transaction land.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "k", "1"]);
+        assert!(matches!(
+            run(&e, &mut s, &["NOSUCHCOMMAND"]),
+            Value::Error(m) if m.contains("unknown command")
+        ));
+        assert!(matches!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Error(m) if m.starts_with("EXECABORT")
+        ));
+        assert_eq!(run_outside(&e, &["GET", "k"]), Value::nil());
+    }
+
+    // ── WATCH ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn watch_aborts_exec_when_the_key_changed() {
+        // The optimistic-concurrency contract. A *null array* is the abort
+        // signal — not an error and not an empty array, both of which a client
+        // would read as "it ran".
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "k", "1"]);
+        assert_eq!(run(&e, &mut s, &["WATCH", "k"]), Value::ok());
+
+        // Another client writes.
+        run_outside(&e, &["SET", "k", "999"]);
+
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "k", "2"]);
+        assert_eq!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Array(None),
+            "a watched key that moved must abort the transaction"
+        );
+        assert_eq!(run_outside(&e, &["GET", "k"]), Value::bulk("999"));
+    }
+
+    #[test]
+    fn watch_lets_exec_through_when_nothing_changed() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "k", "1"]);
+        run(&e, &mut s, &["WATCH", "k"]);
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "k", "2"]);
+        assert_eq!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Array(Some(vec![Value::ok()]))
+        );
+        assert_eq!(run_outside(&e, &["GET", "k"]), Value::bulk("2"));
+    }
+
+    #[test]
+    fn watching_a_key_that_is_then_created_aborts() {
+        // "Absent" and "revision 1" must compare unequal, or a client watching
+        // for a key to *not* appear would be silently defeated.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["WATCH", "newkey"]);
+        run_outside(&e, &["SET", "newkey", "sneaked-in"]);
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "other", "1"]);
+        assert_eq!(run(&e, &mut s, &["EXEC"]), Value::Array(None));
+    }
+
+    #[test]
+    fn unwatch_clears_the_guard() {
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "k", "1"]);
+        run(&e, &mut s, &["WATCH", "k"]);
+        assert_eq!(run(&e, &mut s, &["UNWATCH"]), Value::ok());
+        run_outside(&e, &["SET", "k", "999"]);
+
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "k", "2"]);
+        assert_eq!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Array(Some(vec![Value::ok()])),
+            "after UNWATCH the change must no longer abort"
+        );
+    }
+
+    #[test]
+    fn exec_clears_the_watch_list() {
+        // Otherwise a stale watch from a completed transaction would abort the
+        // next one for no reason.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["SET", "k", "1"]);
+        run(&e, &mut s, &["WATCH", "k"]);
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["EXEC"]);
+
+        run(&e, &mut s, &["MULTI"]);
+        run(&e, &mut s, &["SET", "other", "1"]);
+        assert_eq!(
+            run(&e, &mut s, &["EXEC"]),
+            Value::Array(Some(vec![Value::ok()]))
+        );
+    }
+
+    #[test]
+    fn watch_inside_multi_is_refused() {
+        // It could not affect the outcome, and accepting it would give a false
+        // sense of protection.
+        let (e, _d, mut s) = open();
+        run(&e, &mut s, &["MULTI"]);
+        assert!(matches!(
+            run(&e, &mut s, &["WATCH", "k"]),
+            Value::Error(m) if m.contains("WATCH inside MULTI")
+        ));
+    }
+
+    #[test]
+    fn a_hundred_concurrent_transactions_sum_exactly() {
+        // The property the whole mechanism exists for: with WATCH/MULTI/EXEC and
+        // a retry loop, N clients incrementing one key land on exactly N.
+        let (e, _d, mut writer) = open();
+        run(&e, &mut writer, &["SET", "counter", "0"]);
+
+        for _ in 0..100 {
+            loop {
+                let mut s = Session::new(false);
+                run(&e, &mut s, &["WATCH", "counter"]);
+                let current = match run(&e, &mut s, &["GET", "counter"]) {
+                    Value::Bulk(Some(b)) => String::from_utf8_lossy(&b).parse::<i64>().unwrap(),
+                    other => panic!("unexpected GET reply {other:?}"),
+                };
+                run(&e, &mut s, &["MULTI"]);
+                run(&e, &mut s, &["SET", "counter", &(current + 1).to_string()]);
+                if !matches!(run(&e, &mut s, &["EXEC"]), Value::Array(None)) {
+                    break;
+                }
+                // Aborted: another writer got there first, so retry.
+            }
+        }
+        assert_eq!(run_outside(&e, &["GET", "counter"]), Value::bulk("100"));
+    }
+
+    // ── blocking ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn blpop_reports_a_block_rather_than_replying() {
+        // Dispatch stays synchronous; the wait is handed to the connection loop,
+        // which is the only place that can await without holding the store.
+        let (e, _d, mut s) = open();
+        let args: Vec<Vec<u8>> = ["BLPOP", "a", "b", "0"]
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect();
+        match dispatch(&e, &mut s, &args, &allow_all, true) {
+            Dispatch::Block {
+                keys,
+                timeout,
+                left,
+            } => {
+                assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+                assert!(timeout.is_none(), "timeout 0 means wait forever");
+                assert!(left);
+            }
+            other => panic!("expected a block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blpop_parses_a_fractional_timeout() {
+        let (e, _d, mut s) = open();
+        let args: Vec<Vec<u8>> = ["BRPOP", "q", "0.25"]
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect();
+        match dispatch(&e, &mut s, &args, &allow_all, true) {
+            Dispatch::Block { timeout, left, .. } => {
+                assert_eq!(timeout, Some(std::time::Duration::from_millis(250)));
+                assert!(!left, "BRPOP pops from the tail");
+            }
+            other => panic!("expected a block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blpop_rejects_a_negative_or_unparseable_timeout() {
+        let (e, _d, mut s) = open();
+        assert!(matches!(
+            run(&e, &mut s, &["BLPOP", "q", "-1"]),
+            Value::Error(m) if m.contains("negative")
+        ));
+        assert!(matches!(
+            run(&e, &mut s, &["BLPOP", "q", "soon"]),
+            Value::Error(m) if m.contains("not a float")
+        ));
+        assert!(matches!(
+            run(&e, &mut s, &["BLPOP", "q"]),
+            Value::Error(m) if m.contains("wrong number of arguments")
+        ));
     }
 }

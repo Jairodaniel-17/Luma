@@ -297,10 +297,10 @@ ampliada a estructuras.
 
 ### Bloque 6 — Celery y arq funcionando · `v4.31.0` · **el hito de adopción**
 
-- `[ ]` **F3.1 — bloqueantes:** `BLPOP BRPOP BLMOVE BRPOPLPUSH BZPOPMIN
+- `[~]` **F3.1 — bloqueantes** (BLPOP/BRPOP hechos; BLMOVE/BZPOPMIN pendientes): `BLPOP BRPOP BLMOVE BRPOPLPUSH BZPOPMIN
   BZPOPMAX`, multi-clave con orden de argumentos como contrato. Cierre de
   conexión con waiters pendientes no filtra memoria (test con 1k conexiones).
-- `[ ]` **F3.2 — `MULTI/EXEC/DISCARD/WATCH/UNWATCH`.** `WATCH` usa la
+- `[x]` **F3.2 — `MULTI/EXEC/DISCARD/WATCH/UNWATCH`.** `WATCH` usa la
   `revision` del `StateStore` y el contador por clave que el Bloque 2 dejó en
   las estructuras. Test de carrera: 100 clientes incrementando la misma clave
   → suma exacta.

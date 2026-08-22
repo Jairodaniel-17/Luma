@@ -304,3 +304,157 @@ async fn a_disabled_listener_binds_nothing() {
     assert!(bound.is_none());
     shutdown.cancel();
 }
+
+// ─── block 6: blocking reads over a real socket ──────────────────────────────
+
+#[tokio::test]
+async fn blpop_returns_immediately_when_data_is_already_there() {
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    exchange(
+        &mut client,
+        b"*3\r\n$5\r\nRPUSH\r\n$1\r\nq\r\n$3\r\njob\r\n",
+    )
+    .await;
+
+    let reply = exchange(&mut client, b"*3\r\n$5\r\nBLPOP\r\n$1\r\nq\r\n$1\r\n0\r\n").await;
+    // Redis replies [key, element] so a multi-key waiter knows which queue
+    // served it.
+    assert_eq!(text(&reply), "*2\r\n$1\r\nq\r\n$3\r\njob\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn blpop_parks_until_another_client_pushes() {
+    // The property that makes it a queue rather than a poll loop: the waiter is
+    // released by the push, not by its own timeout.
+    let server = start(|_| {}).await;
+    let mut waiter = connect(&server).await;
+
+    waiter
+        .write_all(b"*3\r\n$5\r\nBLPOP\r\n$4\r\nwork\r\n$1\r\n5\r\n")
+        .await
+        .unwrap();
+    // Give it time to actually park rather than racing the push.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut producer = connect(&server).await;
+    let started = std::time::Instant::now();
+    exchange(
+        &mut producer,
+        b"*3\r\n$5\r\nRPUSH\r\n$4\r\nwork\r\n$5\r\nhello\r\n",
+    )
+    .await;
+
+    let mut chunk = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(3), waiter.read(&mut chunk))
+        .await
+        .expect("the waiter should have been woken by the push")
+        .unwrap();
+    assert_eq!(text(&chunk[..n]), "*2\r\n$4\r\nwork\r\n$5\r\nhello\r\n");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the push should wake it well before the 5s timeout"
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn blpop_times_out_with_a_null_array() {
+    // Null, not empty: the client distinguishes "timed out" from "served an
+    // empty value".
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    let reply = exchange(
+        &mut client,
+        b"*3\r\n$5\r\nBLPOP\r\n$4\r\nidle\r\n$3\r\n0.2\r\n",
+    )
+    .await;
+    assert_eq!(text(&reply), "*-1\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn one_push_wakes_exactly_one_of_two_waiters() {
+    // Otherwise a single job would wake every worker, and all but one would
+    // find an empty queue and re-park — the thundering herd the notifier
+    // exists to prevent.
+    let server = start(|_| {}).await;
+    let mut first = connect(&server).await;
+    let mut second = connect(&server).await;
+
+    for client in [&mut first, &mut second] {
+        client
+            .write_all(b"*3\r\n$5\r\nBLPOP\r\n$1\r\nq\r\n$1\r\n2\r\n")
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut producer = connect(&server).await;
+    exchange(
+        &mut producer,
+        b"*3\r\n$5\r\nRPUSH\r\n$1\r\nq\r\n$3\r\none\r\n",
+    )
+    .await;
+
+    let mut served = 0;
+    for client in [&mut first, &mut second] {
+        let mut chunk = [0u8; 256];
+        if let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(900), client.read(&mut chunk)).await
+        {
+            if n > 0 && text(&chunk[..n]).starts_with("*2") {
+                served += 1;
+            }
+        }
+    }
+    assert_eq!(served, 1, "exactly one waiter may be served by one push");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_multi_key_blpop_reports_which_key_served_it() {
+    let server = start(|_| {}).await;
+    let mut waiter = connect(&server).await;
+    waiter
+        .write_all(b"*4\r\n$5\r\nBLPOP\r\n$2\r\nq1\r\n$2\r\nq2\r\n$1\r\n3\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut producer = connect(&server).await;
+    exchange(
+        &mut producer,
+        b"*3\r\n$5\r\nRPUSH\r\n$2\r\nq2\r\n$1\r\nx\r\n",
+    )
+    .await;
+
+    let mut chunk = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(3), waiter.read(&mut chunk))
+        .await
+        .expect("should be woken")
+        .unwrap();
+    assert_eq!(text(&chunk[..n]), "*2\r\n$2\r\nq2\r\n$1\r\nx\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_transaction_round_trips_over_the_socket() {
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    assert_eq!(text(&exchange(&mut client, b"MULTI\r\n").await), "+OK\r\n");
+    assert_eq!(
+        text(&exchange(&mut client, b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n7\r\n").await),
+        "+QUEUED\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut client, b"EXEC\r\n").await),
+        "*1\r\n+OK\r\n"
+    );
+    assert_eq!(
+        text(&exchange(&mut client, b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n").await),
+        "$1\r\n7\r\n"
+    );
+    server.shutdown.cancel();
+}

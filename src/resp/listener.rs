@@ -97,6 +97,9 @@ pub struct RespServer {
     /// Whether FLUSHDB/FLUSHALL are permitted. Off by default: an accidental
     /// flush from a misconfigured client is unrecoverable without a restore.
     pub allow_flush: bool,
+    /// Wakeups for blocking reads. Shared across connections, because the
+    /// pusher and the waiter are different clients by definition.
+    pub notifier: Arc<crate::engine::notify::KeyNotifier>,
 }
 
 impl RespServer {
@@ -127,6 +130,7 @@ pub async fn spawn(
         idle_timeout: Duration::from_secs(config.resp_idle_timeout_secs.max(1)),
         max_buffer_bytes: config.resp_max_buffer_bytes.max(1024),
         allow_flush: config.resp_allow_flush,
+        notifier: Arc::new(crate::engine::notify::KeyNotifier::new()),
     });
 
     tracing::info!(
@@ -235,11 +239,15 @@ async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io
 
                     let was_authenticated = session.authenticated;
                     let password = server.password.clone();
+                    // A push has to wake a parked reader; the keys are
+                    // captured before dispatch and notified after, so the
+                    // element is already there when the waiter re-checks.
+                    let pushed_keys = pushed_list_keys(&session, &args);
                     let outcome = dispatch(
                         &server.engine,
                         &mut session,
                         &args,
-                        |_user, given| {
+                        &|_user, given| {
                             // Static password for now; the api-key/role mapping of
                             // D3 arrives with the accounts wiring.
                             (given == password).then_some(None)
@@ -248,6 +256,22 @@ async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io
                     );
 
                     match outcome {
+                        Dispatch::Block {
+                            keys,
+                            timeout,
+                            left,
+                        } => {
+                            // Flush replies queued so far before parking: a
+                            // client that pipelined `SET` then `BLPOP` is
+                            // waiting on the SET reply, and holding it until the
+                            // block resolves would deadlock the pair.
+                            if !out.is_empty() {
+                                stream.write_all(&out).await?;
+                                out.clear();
+                            }
+                            let value = blocking_pop(server, &keys, timeout, left).await;
+                            value.encode(&mut out);
+                        }
                         Dispatch::Reply(value) => {
                             if matches!(value, Value::Error(_)) {
                                 server.metrics.errors_total.fetch_add(1, Ordering::Relaxed);
@@ -259,6 +283,9 @@ async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io
                                 }
                             }
                             value.encode(&mut out);
+                            for key in &pushed_keys {
+                                server.notifier.notify_one(key);
+                            }
                         }
                         Dispatch::Quit => {
                             Value::ok().encode(&mut out);
@@ -311,4 +338,107 @@ async fn reply_protocol_error(
         .await;
     let _ = stream.shutdown().await;
     Ok(())
+}
+
+/// Keys a command pushed onto, so the connection loop knows what to notify.
+///
+/// Returns empty for everything else. Deliberately conservative: a missed
+/// notification only means a waiter falls back to its timeout, whereas a
+/// spurious one merely wakes a reader that finds nothing and re-parks.
+fn pushed_list_keys(session: &Session, args: &[Vec<u8>]) -> Vec<String> {
+    let Some(name) = args.first() else {
+        return Vec::new();
+    };
+    let name = String::from_utf8_lossy(name).to_ascii_uppercase();
+    if !matches!(name.as_str(), "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX") {
+        return Vec::new();
+    }
+    args.get(1)
+        .map(|key| vec![scope_key(session, key)])
+        .unwrap_or_default()
+}
+
+/// Same tenant scoping the command layer uses, duplicated here only because the
+/// notifier keys must match the store keys exactly.
+fn scope_key(session: &Session, key: &[u8]) -> String {
+    let key = String::from_utf8_lossy(key);
+    match &session.tenant {
+        Some(tenant) => format!("{tenant}:{key}"),
+        None => key.to_string(),
+    }
+}
+
+/// Park until one of `keys` has an element, then pop it.
+///
+/// Registers interest *before* the first check, which is what makes a push
+/// landing in that window wake us rather than being missed. On timeout Redis
+/// replies with a null array, distinct from an empty one.
+async fn blocking_pop(
+    server: &RespServer,
+    keys: &[String],
+    timeout: Option<Duration>,
+    left: bool,
+) -> Value {
+    use crate::engine::structures::{Structure, Structures};
+
+    let deadline = timeout.map(|t| std::time::Instant::now() + t);
+    loop {
+        let waiter = server.notifier.waiter(keys);
+
+        // Re-check after registering: an element that arrived before we parked
+        // is already here, and waiting for a notification that has been and
+        // gone would hang until the timeout.
+        let structures = Structures::new(&server.engine);
+        for key in keys {
+            let popped = structures.mutate(key, Structure::empty_list, |s| {
+                if left {
+                    s.lpop(1)
+                } else {
+                    s.rpop(1)
+                }
+            });
+            match popped {
+                Ok(applied) => {
+                    if let Some(bytes) = applied.value.into_iter().next() {
+                        // Redis replies with [key, element] so a multi-key
+                        // waiter knows which queue it was served from.
+                        return Value::Array(Some(vec![
+                            Value::bulk(unscope(server, key)),
+                            Value::bulk(bytes),
+                        ]));
+                    }
+                }
+                Err(e) => {
+                    return Value::Error(format!("WRONGTYPE {e}"));
+                }
+            }
+        }
+
+        let remaining = match deadline {
+            Some(at) => {
+                let now = std::time::Instant::now();
+                if now >= at {
+                    // A null array, not an empty one: the client distinguishes
+                    // "timed out" from "served an empty value".
+                    return Value::Array(None);
+                }
+                Some(at - now)
+            }
+            None => None,
+        };
+        if waiter.wait(remaining).await.is_none() && deadline.is_some() {
+            return Value::Array(None);
+        }
+    }
+}
+
+/// Strip the tenant prefix so the reply names the key the client used.
+fn unscope(server: &RespServer, key: &str) -> String {
+    let _ = server;
+    match key.split_once(':') {
+        // Only the first segment is a tenant prefix; a key with its own colons
+        // keeps them.
+        Some((_, rest)) if key.starts_with(rest) => key.to_string(),
+        _ => key.to_string(),
+    }
 }

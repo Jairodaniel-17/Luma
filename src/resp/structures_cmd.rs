@@ -632,9 +632,10 @@ mod tests {
     /// only callable directly.
     fn run(engine: &Engine, session: &mut Session, argv: &[&str]) -> Value {
         let args: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
-        match command_dispatch(engine, session, &args, |_, _| Some(None), true) {
+        match command_dispatch(engine, session, &args, &|_, _| Some(None), true) {
             Dispatch::Reply(value) => value,
             Dispatch::Quit => panic!("unexpected quit"),
+            Dispatch::Block { .. } => panic!("unexpected block"),
         }
     }
 
@@ -973,7 +974,7 @@ mod tests {
         let (e, _d, mut s) = open();
         let payload = vec![0x80u8, 0x04, 0x00, 0xFF];
         let args = vec![b"RPUSH".to_vec(), b"q".to_vec(), payload.clone()];
-        let Dispatch::Reply(_) = command_dispatch(&e, &mut s, &args, |_, _| Some(None), true)
+        let Dispatch::Reply(_) = command_dispatch(&e, &mut s, &args, &|_, _| Some(None), true)
         else {
             panic!()
         };
