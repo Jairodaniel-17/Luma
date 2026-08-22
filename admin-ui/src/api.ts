@@ -62,6 +62,19 @@ export const api = {
     request<{ revoked: number }>("POST", "/v1/auth/sessions/revoke-all"),
   stats: () => request<Record<string, number>>("GET", "/v1/admin/stats"),
   health: () => request<Record<string, unknown>>("GET", "/v1/health"),
+  respActivity: () =>
+    request<{
+      sampled_at_ms: number;
+      totals: Record<string, number>;
+      orgs: {
+        org: string;
+        connections_open: number;
+        connections_total: number;
+        commands_total: number;
+        errors_total: number;
+      }[];
+      note: string;
+    }>("GET", "/v1/admin/resp"),
   listUsers: () =>
     request<{ users: UserRow[] }>("GET", "/v1/admin/users"),
   createUser: (email: string, password: string, role: string, org_id?: string) =>

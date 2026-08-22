@@ -170,9 +170,41 @@ jobs:
       - name: Server log on failure
         if: failure()
         run: cat luma.log
+  admin-ui:
+    name: Admin panel is in sync
+    runs-on: ubuntu-latest
+    # `ui/dist` is committed and embedded into the binary with rust-embed, so
+    # the panel a user sees is the *built* output, not the source. Editing
+    # `admin-ui/src` and forgetting to rebuild changes nothing at runtime and
+    # nothing in the test suite: the change simply does not happen, silently.
+    #
+    # The vite build is deterministic (content-hashed filenames), so rebuilding
+    # and diffing is a real check rather than a coin toss.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+      - name: Install
+        working-directory: admin-ui
+        run: npm ci
+      - name: Build
+        working-directory: admin-ui
+        run: npm run build
+      - name: The committed bundle must match the source
+        run: |
+          if ! git diff --quiet -- ui/dist; then
+            echo '::error::ui/dist is stale: admin-ui/src changed without a rebuild.'
+            echo 'Run `npm run build` in admin-ui/ and commit ui/dist.'
+            git diff --stat -- ui/dist
+            exit 1
+          fi
+          echo 'the committed bundle matches the source'
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e]
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, admin-ui]
     runs-on: ubuntu-latest
     if: always()
     steps:

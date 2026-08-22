@@ -373,8 +373,24 @@ alcance, no un bug.
 
 ### Bloque 8 — RESP endurecido · `v4.33.0`
 
-- `[~]` **F4.2 —** backup/restore de estructuras verificado; panel pendiente. las estructuras entran en `/v1/admin/backup` y restore; el
-  panel muestra conexiones RESP por org y comandos/s.
+- `[x]` **F4.2 - backup/restore de estructuras y panel RESP.** Las estructuras
+  entran en el backup y vuelven del restore (`tests/backup_restore.rs`,
+  incluido un score infinito, que es el caso que se serializaba como `null`).
+  El panel tiene pestaña **RESP** con conexiones por organizacion y
+  comandos/s, sobre `GET /v1/admin/resp`.
+
+  La tasa se calcula **en el cliente**, dividiendo dos muestras. Un servidor
+  que devolviera "comandos/s" tendria que elegir una ventana, y esa ventana
+  seria un numero cuyo significado el lector no puede ver: suavizado sobre
+  que, desde cuando. Consecuencia honesta: recien abierto el panel no muestra
+  tasa hasta la segunda lectura, y lo dice en pantalla en vez de pintar un
+  cero que se leeria como "nadie lo usa".
+
+  El contador por org lo sostiene un guarda cuyo `Drop` lo suelta:
+  `serve_inner` retorna desde una docena de sitios y un decremento olvidado
+  deja una conexion fantasma para siempre, que se lee como una fuga del
+  servidor y no como un bug de contabilidad. El listener ya aprendio esto una
+  vez con `drop_connection`.
 - `[x]` **F4.5 - harness permanente en CI.**
 
   - **Fuzzing del parser con corpus versionado** (`tests/resp_fuzz.rs`): corre

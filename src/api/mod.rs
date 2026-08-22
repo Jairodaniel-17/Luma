@@ -483,6 +483,7 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         )
         .route("/v1/admin/backup", post(routes_admin::backup))
         .route("/v1/admin/audit", get(routes_admin::get_audit_log))
+        .route("/v1/admin/resp", get(routes_admin::resp_activity))
         .route("/search", post(routes_search::search))
         .route("/search/ingest", post(routes_search::ingest))
         // SPA fallback: serves embedded admin panel assets + index.html for any

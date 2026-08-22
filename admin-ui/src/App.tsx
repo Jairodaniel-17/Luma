@@ -47,6 +47,7 @@ type Tab =
   | "access"
   | "config"
   | "audit"
+  | "resp"
   | "health"
   | "docs";
 
@@ -61,6 +62,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "access", label: "Acceso" },
   { id: "config", label: "Configuración" },
   { id: "audit", label: "Auditoría" },
+  { id: "resp", label: "RESP" },
   { id: "health", label: "Salud" },
 ];
 
@@ -76,6 +78,7 @@ const ICONS: Record<string, LucideIcon> = {
   access: ShieldCheck,
   config: Settings,
   audit: ScrollText,
+  resp: Activity,
   health: Activity,
   storage: HardDrive,
 };
@@ -248,6 +251,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           {tab === "access" && <Access />}
           {tab === "config" && <Configuration />}
           {tab === "audit" && <Audit />}
+          {tab === "resp" && <Resp />}
           {tab === "health" && <Health />}
         </div>
       </main>
@@ -1175,4 +1179,177 @@ function cell(col: string, v: unknown): ReactNode {
 
 function ErrorBox({ msg }: { msg: string }) {
   return <div className="error">{msg}</div>;
+}
+
+/* --- RESP (puerto Redis) -------------------------------------------------- */
+
+type OrgActivity = {
+  org: string;
+  connections_open: number;
+  connections_total: number;
+  commands_total: number;
+  errors_total: number;
+};
+type RespActivity = {
+  sampled_at_ms: number;
+  totals: Record<string, number>;
+  orgs: OrgActivity[];
+  note: string;
+};
+
+/** Comandos por segundo entre dos muestras.
+ *
+ * El servidor devuelve contadores acumulados y su propio reloj; la tasa se
+ * calcula aquí. Un servidor que devolviera "comandos/s" tendría que elegir una
+ * ventana, y esa ventana sería un número cuyo significado el lector no puede
+ * ver: ¿suavizado sobre qué? ¿desde cuándo? Dividiendo dos muestras, lo que se
+ * muestra es exactamente "esto pasó entre estas dos lecturas".
+ *
+ * La consecuencia honesta: recién abierto, el panel no muestra tasa hasta la
+ * segunda lectura. Se dice en pantalla en vez de mostrar un cero que se leería
+ * como "nadie está usando esto".
+ */
+function ratePerSecond(
+  now: { at: number; count: number },
+  before: { at: number; count: number } | null,
+): number | null {
+  if (!before) return null;
+  const seconds = (now.at - before.at) / 1000;
+  // Un intervalo no positivo significa que el reloj del servidor no avanzó
+  // entre muestras: dividir daría infinito, que se pintaría como un pico.
+  if (seconds <= 0) return null;
+  // Los contadores solo crecen; si bajan, el servidor se reinició y la tasa
+  // sobre ese salto no significa nada.
+  if (now.count < before.count) return null;
+  return (now.count - before.count) / seconds;
+}
+
+const RESP_POLL_MS = 5000;
+
+function Resp() {
+  // Both samples in one piece of state: the rate is a function of the pair, so
+  // storing them separately invites a render where they disagree about which
+  // poll they came from.
+  const [samples, setSamples] = useState<{ now: RespActivity; before: RespActivity | null } | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    async function poll() {
+      try {
+        const next = await api.respActivity();
+        if (!live) return;
+        setSamples((previous) => ({ now: next, before: previous?.now ?? null }));
+        setError(null);
+      } catch (e) {
+        if (live) setError((e as Error).message);
+      }
+    }
+    poll();
+    const timer = setInterval(poll, RESP_POLL_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  if (error) return <ErrorBox msg={error} />;
+  if (!samples) return <p className="muted">Cargando…</p>;
+  const { now, before } = samples;
+
+  const totalRate = ratePerSecond(
+    { at: now.sampled_at_ms, count: now.totals.commands_total ?? 0 },
+    before ? { at: before.sampled_at_ms, count: before.totals.commands_total ?? 0 } : null,
+  );
+  const previousByOrg = new Map((before?.orgs ?? []).map((o) => [o.org, o]));
+
+  const fmtRate = (r: number | null) =>
+    r === null ? "—" : r < 10 ? r.toFixed(2) : Math.round(r).toString();
+
+  return (
+    <div>
+      <PageHead
+        title="RESP"
+        desc="Actividad del puerto compatible con Redis, por organización."
+        tag="experimental"
+      />
+      <div className="stat-grid">
+        <div className="card stat">
+          <div className="stat-value">{now.totals.connections_open ?? 0}</div>
+          <div className="stat-label">Conexiones abiertas</div>
+        </div>
+        <div className="card stat">
+          <div className="stat-value">{fmtRate(totalRate)}</div>
+          <div className="stat-label">Comandos/s</div>
+        </div>
+        <div className="card stat">
+          <div className="stat-value">{now.totals.errors_total ?? 0}</div>
+          <div className="stat-label">Errores</div>
+        </div>
+        <div className="card stat">
+          <div className="stat-value">{now.totals.auth_failures_total ?? 0}</div>
+          <div className="stat-label">AUTH rechazados</div>
+        </div>
+        <div className="card stat">
+          <div className="stat-value">{now.totals.rejected_at_limit_total ?? 0}</div>
+          <div className="stat-label">Rechazadas por límite</div>
+        </div>
+      </div>
+
+      {before === null && (
+        <p className="muted">
+          Los comandos/s aparecen en la siguiente lectura (cada{" "}
+          {RESP_POLL_MS / 1000} s): una tasa necesita dos muestras.
+        </p>
+      )}
+
+      <div className="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Organización</th>
+              <th>Conexiones</th>
+              <th>Comandos/s</th>
+              <th>Comandos</th>
+              <th>Errores</th>
+            </tr>
+          </thead>
+          <tbody>
+            {now.orgs.length === 0 && (
+              <tr>
+                <td colSpan={5} className="muted">
+                  Ninguna conexión todavía.
+                </td>
+              </tr>
+            )}
+            {now.orgs.map((o) => {
+              const prev = previousByOrg.get(o.org);
+              const rate = ratePerSecond(
+                { at: now.sampled_at_ms, count: o.commands_total },
+                prev && before ? { at: before.sampled_at_ms, count: prev.commands_total } : null,
+              );
+              return (
+                <tr key={o.org}>
+                  <td>
+                    <code>{o.org}</code>
+                  </td>
+                  <td>
+                    {o.connections_open}
+                    <span className="muted"> / {o.connections_total} hist.</span>
+                  </td>
+                  <td>{fmtRate(rate)}</td>
+                  <td>{o.commands_total}</td>
+                  <td>{o.errors_total}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="muted">{now.note}</p>
+    </div>
+  );
 }

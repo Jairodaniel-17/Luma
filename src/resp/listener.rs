@@ -34,6 +34,111 @@ pub struct RespMetrics {
     pub errors_total: AtomicU64,
     pub auth_failures_total: AtomicU64,
     pub rejected_at_limit_total: AtomicU64,
+    /// Per-organization breakdown.
+    ///
+    /// Separate from the totals rather than derived from them: a connection is
+    /// counted globally the moment it is accepted, but it has no organization
+    /// until it authenticates, so the per-org numbers can never sum to the
+    /// totals. Presenting them as if they did would have an operator hunting for
+    /// the missing connections.
+    pub per_org: parking_lot::Mutex<std::collections::BTreeMap<String, OrgCounters>>,
+}
+
+/// What one organization is doing on the RESP port.
+#[derive(Default, Clone, Debug, serde::Serialize)]
+pub struct OrgCounters {
+    /// Connections currently authenticated to this org.
+    pub connections_open: u64,
+    /// Connections this org has ever opened.
+    pub connections_total: u64,
+    pub commands_total: u64,
+    pub errors_total: u64,
+}
+
+/// Holds the per-org connection count for as long as a connection is
+/// attributed to that org.
+///
+/// A guard rather than a matching pair of calls: `serve_inner` returns from a
+/// dozen places — a framing error, a quit, an idle timeout, a broken pipe — and
+/// a missed decrement leaves a phantom connection in the panel forever, which
+/// looks like a leak in the server rather than a bug in the accounting. The
+/// listener already learned this once with `drop_connection`.
+struct OrgAttribution {
+    metrics: Arc<RespMetrics>,
+    org: Option<String>,
+}
+
+impl OrgAttribution {
+    fn new(metrics: Arc<RespMetrics>, org: Option<String>) -> Self {
+        metrics.org_connected(org.as_deref());
+        Self { metrics, org }
+    }
+}
+
+impl Drop for OrgAttribution {
+    fn drop(&mut self) {
+        self.metrics.org_disconnected(self.org.as_deref());
+    }
+}
+
+/// The label for everything not attributable to an organization: the platform
+/// credential, a server with no password at all, and commands from a connection
+/// that has not authenticated.
+///
+/// Named rather than hidden. The platform credential is a real caller, and a
+/// scanner hammering the port is information an operator wants — a blank row
+/// would make the panel disagree with the totals for a reason nobody could see.
+pub const PLATFORM_ORG: &str = "(platform)";
+
+/// How many distinct organizations the breakdown will track.
+///
+/// A bound, because the map is keyed by something an authenticated caller
+/// influences. Beyond it, counts land in an overflow bucket that is visibly
+/// named rather than silently dropped — an operator who sees it knows the
+/// breakdown is incomplete, which a missing row would not tell them.
+const MAX_TRACKED_ORGS: usize = 1000;
+pub const OVERFLOW_ORG: &str = "(overflow)";
+
+impl RespMetrics {
+    /// Apply `change` to one org's counters.
+    fn with_org(&self, org: Option<&str>, change: impl FnOnce(&mut OrgCounters)) {
+        let key = org.unwrap_or(PLATFORM_ORG);
+        let mut map = self.per_org.lock();
+        if !map.contains_key(key) && map.len() >= MAX_TRACKED_ORGS {
+            change(map.entry(OVERFLOW_ORG.to_string()).or_default());
+            return;
+        }
+        change(map.entry(key.to_string()).or_default());
+    }
+
+    /// A connection became attributable to an org — that is, it authenticated.
+    pub fn org_connected(&self, org: Option<&str>) {
+        self.with_org(org, |counters| {
+            counters.connections_open += 1;
+            counters.connections_total += 1;
+        });
+    }
+
+    /// A connection attributed to `org` closed.
+    pub fn org_disconnected(&self, org: Option<&str>) {
+        self.with_org(org, |counters| {
+            counters.connections_open = counters.connections_open.saturating_sub(1);
+        });
+    }
+
+    pub fn org_command(&self, org: Option<&str>, was_error: bool) {
+        self.with_org(org, |counters| {
+            counters.commands_total += 1;
+            if was_error {
+                counters.errors_total += 1;
+            }
+        });
+    }
+
+    /// A snapshot of the breakdown, for the admin API.
+    pub fn per_org_snapshot(&self) -> std::collections::BTreeMap<String, OrgCounters> {
+        self.per_org.lock().clone()
+    }
 }
 
 impl RespMetrics {
@@ -417,6 +522,15 @@ where
     // at the current value: a key revoked *before* this connection existed
     // cannot have authenticated it.
     let mut seen_epoch = server.revocation_epoch();
+    // Which org this connection is counted against, if any. Dropped on every
+    // exit path, so the gauge cannot drift upwards.
+    //
+    // With no password configured the session starts authenticated, so the
+    // connection is attributable immediately. Waiting for an AUTH that will
+    // never come would leave a no-password deployment with an empty panel.
+    let mut attribution: Option<OrgAttribution> = session
+        .authenticated
+        .then(|| OrgAttribution::new(Arc::clone(&server.metrics), session.tenant.clone()));
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 16 * 1024];
 
@@ -473,6 +587,7 @@ where
                     // captured before dispatch and notified after, so the
                     // element is already there when the waiter re-checks.
                     let pushed_keys = pushed_list_keys(&session, &args);
+                    let authenticated_before = session.authenticated;
                     let outcome = dispatch(
                         &server.engine,
                         &mut session,
@@ -521,6 +636,29 @@ where
                             }
                         }
                         Dispatch::Reply(value) => {
+                            // Attribution follows the session: a connection is
+                            // counted from the moment it authenticates, and
+                            // re-authenticating to another org moves it rather
+                            // than counting it twice. Dropping the old guard
+                            // first is what makes the move a move.
+                            if session.authenticated != authenticated_before
+                                || attribution
+                                    .as_ref()
+                                    .map(|a| a.org.as_deref() != session.tenant.as_deref())
+                                    .unwrap_or(false)
+                            {
+                                attribution = None;
+                                if session.authenticated {
+                                    attribution = Some(OrgAttribution::new(
+                                        Arc::clone(&server.metrics),
+                                        session.tenant.clone(),
+                                    ));
+                                }
+                            }
+                            server.metrics.org_command(
+                                session.tenant.as_deref(),
+                                matches!(value, Value::Error(_)),
+                            );
                             if matches!(value, Value::Error(_)) {
                                 server.metrics.errors_total.fetch_add(1, Ordering::Relaxed);
                                 if !was_authenticated && !session.authenticated {
