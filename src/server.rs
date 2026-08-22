@@ -125,6 +125,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     // Opt-in periodic backups (SQLite + snapshot + WAL).
     luma::backup::spawn_backup_task(config.clone());
+    // Continuous WAL shipping: bounds the recovery point to one interval
+    // instead of to the gap between full backups.
+    luma::wal_ship::spawn(config.clone());
 
     tracing::info!(%addr, "listening");
     tracing::info!("Process ID: {}", std::process::id());

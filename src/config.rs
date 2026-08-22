@@ -207,6 +207,12 @@ pub struct Config {
     /// request are not.
     #[serde(default)]
     pub backup_remote_allow_http: bool,
+    /// Seconds between WAL shipping passes. 0 disables it.
+    ///
+    /// This interval **is** the recovery point objective: a host lost between
+    /// ticks loses at most one interval of writes.
+    #[serde(default)]
+    pub wal_ship_interval_secs: u64,
 }
 
 fn default_backup_dir() -> String {
@@ -338,6 +344,7 @@ impl Default for Config {
             backup_remote_endpoint: String::new(),
             backup_remote_region: String::new(),
             backup_remote_allow_http: false,
+            wal_ship_interval_secs: 0,
         }
     }
 }
@@ -865,6 +872,10 @@ impl Config {
             backup_remote_allow_http: std::env::var("BACKUP_REMOTE_ALLOW_HTTP")
                 .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            wal_ship_interval_secs: std::env::var("WAL_SHIP_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         })
     }
 }

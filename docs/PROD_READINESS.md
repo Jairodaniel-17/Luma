@@ -122,6 +122,37 @@ Un fallo remoto se registra pero no es fatal: el backup local ya salió bien, y
 convertir un problema de red pasajero en una ejecución fallida tiraría una copia
 buena para nada.
 
+### WAL shipping continuo (W2.1)
+
+`wal_ship_interval_secs` (0 = desactivado, requiere `backup_remote_url`).
+
+Un backup completo da una foto cada varias horas; todo lo escrito desde la
+última vive en un solo disco. El shipping sube los segmentos sellados según se
+cierran y **reenvía el que está creciendo** en cada intervalo.
+
+> **Ese intervalo *es* el RPO.** Una máquina perdida entre ticks pierde como
+> mucho un intervalo de escrituras. Es el número que va en el runbook, y por eso
+> se registra al arrancar en vez de dejarlo a deducir.
+
+Se suben los segmentos en crudo, no un formato de replicación aparte: un
+snapshot más la cadena de segmentos posterior es exactamente lo que el servidor
+reconstruye al arrancar, así que **la ruta de recuperación es la ruta de
+arranque**, ya cubierta por la matriz de crash-recovery. Recuperar es "descargar
+y arrancar", sin un paso de aplicación separado que equivocar.
+
+El snapshot se sube **primero**: un bucket con segmentos más nuevos que su
+snapshot es recuperable; uno con un snapshot más nuevo que sus segmentos no lo
+es, porque el replay arrancaría después de eventos que nunca subieron.
+
+Un segmento que no ha cambiado no se resube — se compara la longitud, que basta
+porque el WAL es append-only y nunca se reescribe en sitio. Un intervalo tranquilo
+cuesta un listado de directorio.
+
+**Esto no es replicación.** Nada sigue el stream y lo aplica en vivo; eso es
+W2.2 (réplica de lectura). Esto es recuperación ante desastre: el bucket guarda
+lo suficiente para reconstruir la instancia en otra máquina, con una pérdida
+máxima declarada.
+
 ## SSE tuning
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).

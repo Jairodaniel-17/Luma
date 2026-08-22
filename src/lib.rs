@@ -39,3 +39,5 @@ pub mod search;
 pub mod sqlite;
 /// Vector store: segmented storage with HNSW, IVF-FLAT-Q8, and DiskANN indexing.
 pub mod vector;
+
+pub mod wal_ship;

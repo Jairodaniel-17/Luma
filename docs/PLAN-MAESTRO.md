@@ -106,7 +106,7 @@ frentes a la vez y no cerrar ninguno.
 | 0 | ✅ Barrido de deuda del roadmap | `v4.25.0` | M3.2, M3.4, M4.1, M3.3 + fix de `content-type` en métricas | S |
 | 1 | ✅ **Durabilidad demostrada** | `v4.26.0` | W1.1 (harness compartido), W1.2, fixture dorado en CI | M |
 | 2 | ✅ Cimientos del motor RESP | `v4.27.0` | F0.1 `StoredVal`, F0.2 estructuras, F0.3 notificadores | **XL** |
-| 3 | RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
+| 3 | ✅ RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
 | 4 | Listener RESP + strings/keys | `v4.29.0` | F1.1–F1.4 + **F4.1** (ver D-1) | L |
 | 5 | Estructuras por RESP | `v4.30.0` | F2.1 listas, F2.2 hashes, F2.3 sets, F2.4 zsets | L |
 | 6 | **Celery y arq funcionando** | `v4.31.0` | F3.1 bloqueantes, F3.2 MULTI/WATCH, F3.3 Pub/Sub, F3.4 E2E + **F4.3** (ver D-2) | L |
@@ -240,7 +240,7 @@ extendido a los registros nuevos.
 - `[x]` **W1.4 — `luma backup --verify`.** Restaura a un temporal, corre
   checks, reporta. `backup_last_verified_ts` en métricas + regla Prometheus de
   ejemplo. Un backup no verificado no cuenta como backup.
-- `[ ]` **W2.1 — WAL shipping continuo** al bucket (estilo Litestream).
+- `[x]` **W2.1 — WAL shipping continuo** al bucket (estilo Litestream).
   Snapshot + cadena de segmentos = punto en el tiempo;
   `luma restore --to-timestamp`. **Requiere un spike previo** para decidir qué
   hacer con el WAL de SQLite (¿shipping directo o checkpoint + copia?);
