@@ -14,36 +14,67 @@
 //! Each top-level module corresponds to one subsystem of the engine.
 
 /// HTTP layer: Axum router, authentication, and per-concern route handlers.
+// ── `unsafe` is confined to `vector` ─────────────────────────────────────────
+//
+// Every module below except `vector` carries `#[forbid(unsafe_code)]`. That is
+// not decoration: it turns "no module outside the vector engine uses unsafe"
+// from something that happens to be true today into something the compiler
+// refuses to let change.
+//
+// `vector` is the exception because memory-mapped segment files and the SIMD
+// dot products genuinely need it — 16 sites across four files, inventoried with
+// their justifications in `docs/SECURITY.md`. Marking the exception explicitly
+// is the point: an `unsafe` block appearing anywhere else is a compile error,
+// not a review comment somebody might miss.
+//
+// `tests/unsafe_inventory.rs` checks that this list has not silently lost a
+// module, because a new `pub mod` added without the attribute would compile
+// perfectly well.
+#[forbid(unsafe_code)]
 pub mod api;
 /// Consistent on-disk backups (SQLite + snapshot + WAL) and restore.
+#[forbid(unsafe_code)]
 pub mod backup;
 
+#[forbid(unsafe_code)]
 pub mod backup_remote;
 /// Configuration loading and defaults (`luma.toml` + environment overrides).
+#[forbid(unsafe_code)]
 pub mod config;
 /// Encryption-at-rest (AEAD) and password hashing (Argon2id).
+#[forbid(unsafe_code)]
 pub mod crypto;
 /// Document store: chunking, storage, and retrieval of ingested documents.
+#[forbid(unsafe_code)]
 pub mod docstore;
 
+#[forbid(unsafe_code)]
 pub mod durability;
 /// Core engine: subsystem coordination, event sourcing, WAL, and persistence.
+#[forbid(unsafe_code)]
 pub mod engine;
 /// NS-Mem: the agent memory layer (episodic, semantic, procedural, working).
+#[forbid(unsafe_code)]
 pub mod memory;
 
+#[forbid(unsafe_code)]
 pub mod resp;
 
+#[forbid(unsafe_code)]
 pub mod replica;
 
+#[forbid(unsafe_code)]
 pub mod router;
 /// Search primitives shared across the vector and hybrid query paths.
+#[forbid(unsafe_code)]
 pub mod search;
 /// Embedded SQLite access via the thread-safe async actor pattern.
+#[forbid(unsafe_code)]
 pub mod sqlite;
 /// Vector store: segmented storage with HNSW, IVF-FLAT-Q8, and DiskANN indexing.
 pub mod vector;
 
+#[forbid(unsafe_code)]
 pub mod wal_ship;
 
 /// Install the rustls cryptography provider, once per process.

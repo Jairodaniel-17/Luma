@@ -459,9 +459,32 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
   claves KV, mensajes en cola, vectores, rps por org. Excedido → error tipado +
   métrica + evento de auditoría, visible en el panel. Test: org A en su límite
   no degrada a org B.
-- `[ ]` **W5.3 — supply chain:** imagen `FROM scratch` firmada con cosign,
-  SBOM por release, `cargo audit` en CI, inventario de `unsafe` y
-  `#![forbid(unsafe_code)]` donde ya se cumpla.
+- `[~]` **W5.3 - supply chain** (hecho salvo verificar la publicación real de
+  la imagen, que necesita un tag).
+
+  - **`unsafe` acotado por el compilador**: los 16 sitios viven en
+    `src/vector/` (mmap de segmentos y productos escalares SIMD) y **todos**
+    los demás módulos llevan `#[forbid(unsafe_code)]`. Un bloque `unsafe`
+    fuera de ahí es un error de compilación, no un comentario de revisión que
+    alguien pueda pasar por alto. Inventariado con su justificación en
+    `docs/SECURITY.md`.
+  - `tests/unsafe_inventory.rs` tapa el hueco que el atributo deja: un
+    `pub mod` nuevo sin marcar compila igual, y la protección dejaría de
+    cubrir en silencio el código más reciente. Verificado que el guarda falla
+    con un módulo sin marcar, y que el `forbid` rechaza un `unsafe` real.
+  - **Imagen `FROM scratch`** ya existía en el `Dockerfile`; lo que faltaba es
+    que nada la publicaba, nada describía qué llevaba dentro y nada permitía a
+    un usuario comprobar que lo que descargó es lo que este repositorio
+    construyó. Nuevo job `container` en el release: push a GHCR, SBOM SPDX con
+    syft, firma **keyless** con cosign (una clave en un secreto es una clave
+    que se filtra con el secreto, y rotarla invalida toda firma pasada), y
+    `cosign verify` del propio artefacto recién publicado.
+  - `cargo audit` ya estaba en CI; ahora también en el nightly, porque un
+    advisory se publica en el calendario de otros.
+
+  **Sin verificar de verdad:** la publicación a GHCR y la firma solo se
+  ejecutan al empujar un tag `v*`. La sintaxis está validada y los pasos son
+  los estándar, pero nadie ha visto todavía este job pasar.
 - `[ ]` **W5.5 — documentación de producto:** reorganizar `docs/` en *Empezar*
   / *Operar* (runbooks: backup/restore, promoción de réplica, rotación de
   master key, upgrade) / *Integrar* (RESP, S3, CDC, SSE) / *Referencia*.

@@ -45,3 +45,35 @@ rustkiss.mydomain.com {
 - **Backups**: usa snapshots (`Persist::write_snapshot`) + WAL y cópialos a storage cifrado.
 - **Rotación de API key**: acepta un `Authorization` listado en un Vault externo y refresca el proceso (o implementa un endpoint admin si lo necesitas).
 - **Logs**: no logeamos bodies ni API keys. Si los necesitas, usa el proxy para offloading/auditoría.
+
+## 6. Inventario de `unsafe`
+
+W5.3 del plan maestro. **16 sitios, 4 ficheros, un solo módulo.**
+
+Todos los demás módulos del crate llevan `#[forbid(unsafe_code)]` en
+`src/lib.rs`, así que un bloque `unsafe` fuera de `vector` es un **error de
+compilación**, no un comentario de revisión que alguien pueda pasar por alto.
+`tests/unsafe_inventory.rs` tapa el único hueco que eso deja: un `pub mod` nuevo
+sin el atributo compilaría perfectamente, y la protección dejaría de cubrir en
+silencio el código más reciente, que es justo donde más se quiere.
+
+| Fichero | Sitios | Qué es | Qué lo hace correcto |
+|---|---|---|---|
+| `src/vector/mmap.rs` | 5 | `unsafe impl Pod`/`Zeroable` para `MmapHeader`, y 3 `MmapMut::map_mut` | El header es `#[repr(C)]` de enteros sin padding ni punteros, que es exactamente lo que `Pod` requiere. El `map_mut` es inseguro porque otro proceso puede truncar el fichero bajo el mapeo; el fichero vive dentro del `data_dir` de Luma y solo lo escribe Luma |
+| `src/vector/q8mmap.rs` | 5 | Lo mismo para `Q8Header` y su mapeo | Idéntico razonamiento |
+| `src/vector/simd.rs` | 4 | `dot_avx2` y `accumulate_avx2`, más sus dos llamadas | Las funciones son `#[target_feature(enable = "avx2")]`, y llamarlas sin AVX2 es UB. Cada llamada está tras `is_x86_feature_detected!("avx2")` **y** un `len() >= 8`, porque la versión vectorizada lee de ocho en ocho |
+| `src/vector/q8.rs` | 2 | `dot_i8_avx2` y su llamada | Igual, con `len() >= 32` porque procesa 32 enteros de 8 bits por iteración |
+
+Las dos formas de que esto se rompa, y por qué no se rompen:
+
+1. **Llamar a una función `target_feature` en una CPU que no la tiene.** Es UB,
+   no un fallo. La detección es en tiempo de ejecución (`is_x86_feature_detected!`)
+   y no en tiempo de compilación, así que un binario construido en una máquina con
+   AVX2 y ejecutado en una sin él cae al camino escalar en vez de morir.
+2. **Leer fuera del final del slice.** Las rutas AVX2 avanzan en bloques, así que
+   una entrada más corta que un bloque leería memoria ajena. De ahí las
+   comprobaciones de longitud junto a la de CPU: son parte de la precondición, no
+   una optimización.
+
+El camino escalar existe siempre y es el que se ejecuta cuando `simd_enabled` está
+apagado, lo que da una forma de comparar resultados sin recompilar.
