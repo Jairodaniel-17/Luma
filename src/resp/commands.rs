@@ -900,7 +900,9 @@ fn script_command(args: &[Vec<u8>]) -> Value {
 fn eval(engine: &Engine, session: &Session, args: &[Vec<u8>], by_digest: bool) -> Value {
     let verb = if by_digest { "evalsha" } else { "eval" };
     if args.len() < 2 {
-        return err(format!("ERR wrong number of arguments for '{verb}' command"));
+        return err(format!(
+            "ERR wrong number of arguments for '{verb}' command"
+        ));
     }
     let Ok(numkeys) = String::from_utf8_lossy(&args[1]).parse::<i64>() else {
         return err("ERR value is not an integer or out of range");
