@@ -412,6 +412,33 @@ olvido; conviene reactivar W5.4 antes de declarar GA en el Bloque 11.
 
 ---
 
+## Hallazgos abiertos fuera del alcance del plan
+
+Defectos reales encontrados al pasar las puertas de verificación, que no
+pertenecen a ningún bloque y no se arreglan de paso para no ensanchar el
+alcance en silencio.
+
+- `[ ]` **IVF pierde el vecino correcto tras `retrain_ivf`.**
+  `tests/vector_ivf.rs::ivf_large_dataset_retrain_consistent` (1M vectores,
+  128 clústeres, `nprobe=8`) falla: el top-1 pasa de `vec-102857`
+  (coseno ≈ 0.9999 contra la query) a `vec-109999` (coseno ≈ 0.87). No es un
+  desempate entre resultados equivalentes — es recall que se cae después de
+  reentrenar.
+
+  **No es una regresión de este plan:** `src/vector/ivf.rs` no se ha tocado
+  desde `v3.0.0`, y el único cambio en `src/vector/mod.rs` que roza la ruta
+  Q8 es `!A && !B` reescrito como early-return, equivalente.
+
+  **Por qué llevaba tiempo oculto:** el test está tras la feature
+  `ivf_stress_tests` y CI corre `cargo test --locked`, sin `--all-features`.
+  Nunca se ejecutó en CI. Tarda ~200 s en debug.
+
+  Cuando se aborde, la pregunta a responder primero es si la asignación a
+  clúster y el ranking usan la misma métrica: con `Metric::Cosine`, unos
+  centroides entrenados por distancia L2 sobre vectores sin normalizar
+  probarían los clústeres equivocados, que es exactamente esta forma de fallo.
+
+---
 ## Decisiones de negocio pendientes (no bloquean código)
 
 Heredadas de `SPEC-producto.md`, marcadas ahí como `[DECISIÓN]`:
