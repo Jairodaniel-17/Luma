@@ -207,7 +207,7 @@ verde del harness.
 
 Sin RESP todavía. Todo lo de aquí sirve también a la API HTTP.
 
-- `[ ]` **F0.1 — `StoredVal { Json, Raw }`.** El ítem de mayor riesgo de
+- `[x]` **F0.1 — `StoredVal { Json, Raw }`.** El ítem de mayor riesgo de
   compatibilidad del plan: toca `state.rs`, `state_db.rs`, `persist.rs` y la
   API HTTP (expone `Raw` como base64 + `content_type`). Registro WAL nuevo
   versionado; **los registros legados se leen como `Json` y no se
@@ -222,7 +222,7 @@ Sin RESP todavía. Todo lo de aquí sirve también a la API HTTP.
   - una clave, un tipo — operar con el tipo equivocado da error tipado (será
     `-WRONGTYPE`);
   - límites `MAX_STRUCTURE_ENTRIES` / `MAX_MEMBER_LEN` configurables.
-- `[ ]` **F0.3 — notificadores por clave.** `tokio::sync::Notify` por clave
+- `[x]` **F0.3 — notificadores por clave.** `tokio::sync::Notify` por clave
   para los bloqueantes de F3.1. Un `LPUSH` despierta exactamente un `BLPOP`
   (sin thundering herd); limpieza al quedar sin waiters.
 
