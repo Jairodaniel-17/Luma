@@ -290,23 +290,34 @@ fn default_backup_retention() -> usize {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            port: 8080,
+            port: DEFAULT_PORT,
             bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             api_key: "dev".to_string(),
-            data_dir: Some("data".to_string()),
+            data_dir: Some(DEFAULT_DATA_DIR.to_string()),
             snapshot_interval_secs: 30,
             event_buffer_size: 10_000,
             live_broadcast_capacity: 4096,
             wal_segment_max_bytes: 64 * 1024 * 1024,
-            wal_retention_segments: 10,
+            wal_retention_segments: 8,
             request_timeout_secs: 30,
-            max_body_bytes: 10 * 1024 * 1024,
-            max_key_len: 256,
+            // 100 MB, matching `resolve_max_body_mb`. It has to match: the
+            // `luma.toml` merge treats any difference as "the environment set
+            // this", so while the struct said 10 MB and the resolver said 100 MB,
+            // a `max_body_bytes` in the file was discarded — an operator could
+            // not lower the limit.
+            max_body_bytes: 100 * 1024 * 1024,
+            // These three, and the two above, all match their resolver in
+            // `config::resolve`. The values here are the ones the server has
+            // always actually used, because the resolver won the merge; writing
+            // them down is what makes the same numbers settable from the file.
+            max_key_len: 512,
             max_collection_len: 64,
             max_id_len: 128,
-            max_vector_dim: 1536,
-            max_k: 100,
-            max_json_bytes: 1024 * 1024,
+            max_vector_dim: 4096,
+            max_k: 256,
+            // Likewise 100 MB, and likewise unreachable from the file until
+            // the two agreed.
+            max_json_bytes: 100 * 1024 * 1024,
             max_state_batch: 256,
             max_vector_batch: 256,
             max_doc_find: 100,
@@ -325,7 +336,14 @@ impl Default for Config {
             ivf_retrain_min_deltas: 50_000,
             q8_refine_topk: 512,
             diskann_max_degree: 48,
-            diskann_build_threads: 1,
+            // Machine-dependent on purpose, and machine-dependent *here* as
+            // well as in the resolver. A fixed number would differ from what
+            // the resolver produces on every machine with more than one core,
+            // and the merge would read that difference as an instruction and
+            // ignore the file.
+            diskann_build_threads: std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1),
             diskann_search_list_size: 64,
             diskann_auto_build_min_vectors: 10_000,
             diskann_rebuild_min_deltas: 100_000,
@@ -420,6 +438,24 @@ impl Default for Config {
         }
     }
 }
+
+/// Port used when neither `--port` nor `PORT_LUMA_VDB` says otherwise.
+///
+/// A constant rather than a literal in two places, because it is *also* the
+/// baseline the `luma.toml` merge diffs against. The merge asks "did the
+/// environment move this field off its default?", so when the fallback and
+/// `Config::default()` disagree, the fallback looks like an instruction and
+/// silently overrides the file. They disagreed — 1234 against 8080 — and a
+/// `port` in `luma.toml` was therefore ignored, with no warning.
+pub const DEFAULT_PORT: u16 = 1234;
+
+/// Data directory used when neither `--data` nor `DATA_DIR` says otherwise.
+///
+/// Same reason, and it had the same bug for a subtler reason: the fallback was
+/// `"./data"` and the struct default `"data"`. Two spellings of one directory,
+/// but a different string, so every `data_dir` in `luma.toml` was discarded and
+/// the data went wherever the process happened to be started from.
+pub const DEFAULT_DATA_DIR: &str = "data";
 
 impl Config {
     /// The certificate and key the RESP listener should use, if any.
@@ -1042,7 +1078,7 @@ fn resolve_port() -> u16 {
         );
     }
 
-    1234
+    DEFAULT_PORT
 }
 
 fn resolve_data_dir() -> Option<String> {
@@ -1059,7 +1095,7 @@ fn resolve_data_dir() -> Option<String> {
     }
     std::env::var("DATA_DIR")
         .ok()
-        .or_else(|| Some("./data".to_string()))
+        .or_else(|| Some(DEFAULT_DATA_DIR.to_string()))
 }
 
 fn resolve_bind_addr() -> IpAddr {
@@ -1365,5 +1401,73 @@ mod precedence_tests {
             !text.contains("api_key ="),
             "secrets must never be written to luma.toml"
         );
+    }
+
+    /// The invariant that makes `luma.toml` authoritative at all.
+    ///
+    /// `load()` decides "did the environment set this field?" by comparing a
+    /// config built from the environment against `Config::default()`. Any field
+    /// whose env resolver falls back to something *other* than its struct default
+    /// therefore looks permanently set, and the file's value for it is discarded
+    /// with no warning.
+    ///
+    /// Two fields were in exactly that state: `port` (fallback 1234, default
+    /// 8080) and `data_dir` (fallback `"./data"`, default `"data"` — the same
+    /// directory spelled two ways, which is all it took). Both were unreachable
+    /// from `luma.toml`.
+    ///
+    /// This checks the property rather than the two known cases, so a third
+    /// field added with a mismatched fallback fails here instead of quietly
+    /// ignoring an operator's configuration.
+    #[test]
+    fn no_env_resolver_falls_back_to_a_value_other_than_its_default() {
+        // With nothing set in the environment, a config built from the
+        // environment must be indistinguishable from the defaults.
+        let defaults = toml::Value::try_from(Config::default()).unwrap();
+        let from_env = toml::Value::try_from(Config::from_env().unwrap()).unwrap();
+
+        let (toml::Value::Table(defaults), toml::Value::Table(from_env)) = (&defaults, &from_env)
+        else {
+            panic!("a Config serializes as a table");
+        };
+
+        // Secrets are read from the environment by design and this process has
+        // some set, so they are not part of the claim.
+        const SECRETS: &[&str] = &[
+            "api_key",
+            "embedding_api_key",
+            "llm_api_key",
+            "libsql_auth_token",
+        ];
+
+        let mut mismatched = Vec::new();
+        for (field, default_value) in defaults {
+            if SECRETS.contains(&field.as_str()) {
+                continue;
+            }
+            // Only fields this process has *not* set in its environment can be
+            // judged; the suite runs with LUMA_API_KEY exported, for instance.
+            let Some(env_value) = from_env.get(field) else {
+                continue;
+            };
+            if env_value != default_value {
+                mismatched.push(format!("{field}: default {default_value}, env {env_value}"));
+            }
+        }
+
+        assert!(
+            mismatched.is_empty(),
+            "these fields fall back to something other than their default, which \
+             makes them unreachable from luma.toml:\n  {}",
+            mismatched.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_default_port_matches_what_the_documentation_promises() {
+        // README and the repository's own luma.toml both say 1234. The struct
+        // default said 8080, which is how the mismatch above came about.
+        assert_eq!(Config::default().port, 1234);
+        assert_eq!(DEFAULT_PORT, 1234);
     }
 }
