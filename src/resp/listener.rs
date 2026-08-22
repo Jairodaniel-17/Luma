@@ -16,7 +16,7 @@
 //! it is a port conflict with the actual Redis.
 
 use crate::engine::Engine;
-use crate::resp::commands::{dispatch, AuthBinding, Dispatch, Session};
+use crate::resp::commands::{dispatch, AuthBinding, BlockKind, Dispatch, Session};
 use crate::resp::protocol::{Decoder, ProtocolError, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -392,7 +392,7 @@ async fn serve_inner(
                         Dispatch::Block {
                             keys,
                             timeout,
-                            left,
+                            kind,
                         } => {
                             // Flush replies queued so far before parking: a
                             // client that pipelined `SET` then `BLPOP` is
@@ -402,14 +402,23 @@ async fn serve_inner(
                                 stream.write_all(&out).await?;
                                 out.clear();
                             }
-                            let value = blocking_pop(
+                            let value = block_on_keys(
                                 server,
                                 &keys,
                                 session.tenant.as_deref(),
                                 timeout,
-                                left,
+                                &kind,
                             )
                             .await;
+                            // A blocking move fills its destination, and
+                            // another connection may be parked on it. The
+                            // notify has to happen here as well as in the
+                            // `Reply` arm: a `BRPOPLPUSH` that resolves is a
+                            // push, and the chain of workers feeding each other
+                            // is exactly the shape kombu uses.
+                            for key in &pushed_keys {
+                                server.notifier.notify_one(key);
+                            }
                             value.encode(&mut out);
                         }
                         Dispatch::PubSub(command) => {
@@ -525,12 +534,23 @@ fn pushed_list_keys(session: &Session, args: &[Vec<u8>]) -> Vec<String> {
         return Vec::new();
     };
     let name = String::from_utf8_lossy(name).to_ascii_uppercase();
-    if !matches!(name.as_str(), "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX") {
-        return Vec::new();
-    }
-    args.get(1)
-        .map(|key| vec![scope_key(session, key)])
-        .unwrap_or_default()
+    let keys: Vec<&Vec<u8>> = match name.as_str() {
+        // A push makes the key non-empty, which is what a parked BLPOP waits
+        // for.
+        "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX" => args[1..].iter().take(1).collect(),
+        // A ZADD does the same for a parked BZPOPMIN/BZPOPMAX. Leaving this out
+        // is not a missed optimisation: the waiter sleeps until its own timeout
+        // and the element sits there unserved, which looks like a hung worker.
+        "ZADD" | "ZINCRBY" => args[1..].iter().take(1).collect(),
+        // A move fills its *destination*, and another connection may be parked
+        // on it — the BRPOPLPUSH chain, where one worker feeds the next.
+        "RPOPLPUSH" => args.get(2).into_iter().collect(),
+        "LMOVE" | "BLMOVE" | "BRPOPLPUSH" => args.get(2).into_iter().collect(),
+        _ => return Vec::new(),
+    };
+    keys.into_iter()
+        .map(|key| scope_key(session, key))
+        .collect()
 }
 
 /// Same tenant scoping the command layer uses, duplicated here only because the
@@ -543,20 +563,18 @@ fn scope_key(session: &Session, key: &[u8]) -> String {
     }
 }
 
-/// Park until one of `keys` has an element, then pop it.
+/// Park until one of `keys` has something, then serve it.
 ///
 /// Registers interest *before* the first check, which is what makes a push
 /// landing in that window wake us rather than being missed. On timeout Redis
 /// replies with a null array, distinct from an empty one.
-async fn blocking_pop(
+async fn block_on_keys(
     server: &RespServer,
     keys: &[String],
     tenant: Option<&str>,
     timeout: Option<Duration>,
-    left: bool,
+    kind: &BlockKind,
 ) -> Value {
-    use crate::engine::structures::{Structure, Structures};
-
     let deadline = timeout.map(|t| std::time::Instant::now() + t);
     loop {
         let waiter = server.notifier.waiter(keys);
@@ -564,29 +582,10 @@ async fn blocking_pop(
         // Re-check after registering: an element that arrived before we parked
         // is already here, and waiting for a notification that has been and
         // gone would hang until the timeout.
-        let structures = Structures::new(&server.engine);
         for key in keys {
-            let popped = structures.mutate(key, Structure::empty_list, |s| {
-                if left {
-                    s.lpop(1)
-                } else {
-                    s.rpop(1)
-                }
-            });
-            match popped {
-                Ok(applied) => {
-                    if let Some(bytes) = applied.value.into_iter().next() {
-                        // Redis replies with [key, element] so a multi-key
-                        // waiter knows which queue it was served from.
-                        return Value::Array(Some(vec![
-                            Value::bulk(crate::resp::commands::unscope_key(tenant, key)),
-                            Value::bulk(bytes),
-                        ]));
-                    }
-                }
-                Err(e) => {
-                    return Value::Error(format!("WRONGTYPE {e}"));
-                }
+            match try_serve(server, key, tenant, kind) {
+                Served::Value(value) => return value,
+                Served::Empty => continue,
             }
         }
 
@@ -604,6 +603,113 @@ async fn blocking_pop(
         };
         if waiter.wait(remaining).await.is_none() && deadline.is_some() {
             return Value::Array(None);
+        }
+    }
+}
+
+/// Outcome of one non-blocking attempt against one key.
+enum Served {
+    /// A reply for the client — a value, or an error worth reporting now rather
+    /// than blocking until the timeout on a key the client got wrong.
+    Value(Value),
+    /// Nothing there yet; try the next key or park.
+    Empty,
+}
+
+fn try_serve(server: &RespServer, key: &str, tenant: Option<&str>, kind: &BlockKind) -> Served {
+    use crate::engine::structures::{Structure, Structures};
+    let structures = Structures::new(&server.engine);
+
+    match kind {
+        BlockKind::Pop { left } => {
+            let popped = structures.mutate(key, Structure::empty_list, |s| {
+                if *left {
+                    s.lpop(1)
+                } else {
+                    s.rpop(1)
+                }
+            });
+            match popped {
+                Ok(applied) => match applied.value.into_iter().next() {
+                    // Redis replies [key, element] so a multi-key waiter knows
+                    // which queue served it.
+                    Some(bytes) => Served::Value(Value::Array(Some(vec![
+                        Value::bulk(crate::resp::commands::unscope_key(tenant, key)),
+                        Value::bulk(bytes),
+                    ]))),
+                    None => Served::Empty,
+                },
+                Err(e) => Served::Value(Value::Error(format!("WRONGTYPE {e}"))),
+            }
+        }
+        BlockKind::ZPop { min } => {
+            let popped = structures.mutate(key, Structure::empty_zset, |s| {
+                Ok(s.as_zset_mut()?.pop(1, *min))
+            });
+            match popped {
+                Ok(applied) => match applied.value.into_iter().next() {
+                    // Three elements, not two: [key, member, score].
+                    Some((member, score)) => Served::Value(Value::Array(Some(vec![
+                        Value::bulk(crate::resp::commands::unscope_key(tenant, key)),
+                        Value::bulk(member),
+                        Value::bulk(crate::resp::structures_cmd::format_score(score)),
+                    ]))),
+                    None => Served::Empty,
+                },
+                Err(e) => Served::Value(Value::Error(format!("WRONGTYPE {e}"))),
+            }
+        }
+        BlockKind::Move {
+            destination,
+            from_left,
+            to_left,
+        } => {
+            let popped = structures.mutate(key, Structure::empty_list, |s| {
+                if *from_left {
+                    s.lpop(1)
+                } else {
+                    s.rpop(1)
+                }
+            });
+            let element = match popped {
+                Ok(applied) => match applied.value.into_iter().next() {
+                    Some(bytes) => bytes,
+                    None => return Served::Empty,
+                },
+                Err(e) => return Served::Value(Value::Error(format!("WRONGTYPE {e}"))),
+            };
+            // Same non-atomicity as the synchronous `LMOVE`, and the same
+            // compensating push-back: see `docs/RESP.md`. Blocking makes the
+            // window no wider, but it does make it more likely to be hit,
+            // because the element arrives at an arbitrary moment.
+            let pushed = structures.mutate(destination, Structure::empty_list, |s| {
+                let values = vec![element.clone()];
+                if *to_left {
+                    s.lpush(values)
+                } else {
+                    s.rpush(values)
+                }
+            });
+            match pushed {
+                Ok(_) => Served::Value(Value::bulk(element)),
+                Err(e) => {
+                    let restore = structures.mutate(key, Structure::empty_list, |s| {
+                        let values = vec![element.clone()];
+                        if *from_left {
+                            s.lpush(values)
+                        } else {
+                            s.rpush(values)
+                        }
+                    });
+                    if let Err(restore_error) = restore {
+                        tracing::error!(
+                            source = %key,
+                            "BLMOVE lost an element: push failed ({e}) and restore failed ({restore_error})"
+                        );
+                    }
+                    Served::Value(Value::Error(format!("WRONGTYPE {e}")))
+                }
+            }
         }
     }
 }

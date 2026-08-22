@@ -290,19 +290,19 @@ Exponer por protocolo lo que el Bloque 2 ya implementó. Riesgo bajo de diseño,
 alto de detalle.
 
 Cobertura **medida** contra las listas de comandos de `SPEC-resp.md`, no
-estimada (33/57 comandos):
+estimada: **57/57**.
 
-- `[~]` **F2.1 listas** — 9/14. Faltan `LINDEX LSET LTRIM RPOPLPUSH LMOVE`.
-- `[~]` **F2.2 hashes** — 10/12. Faltan `HSETNX HSCAN`.
-- `[~]` **F2.3 sets** — 5/8. Faltan `SPOP SRANDMEMBER SSCAN`.
-- `[~]` **F2.4 sorted sets** — 7/17. Faltan `ZMSCORE ZCOUNT ZINCRBY
-  ZREVRANGEBYSCORE ZREMRANGEBYSCORE ZREMRANGEBYRANK ZREVRANK ZPOPMIN ZPOPMAX
-  ZSCAN`, más los flags de `ZADD` (`NX XX GT LT CH INCR`) y las opciones de
-  `ZRANGE` (`REV BYSCORE BYLEX LIMIT WITHSCORES`).
+- `[x]` **F2.1 listas** — 14/14.
+- `[x]` **F2.2 hashes** — 12/12.
+- `[x]` **F2.3 sets** — 8/8.
+- `[x]` **F2.4 sorted sets** — 17/17, con los modificadores `NX`/`XX`/`GT`/
+  `LT`/`CH`/`INCR` de `ZADD` y las opciones `REV`/`BYSCORE`/`BYLEX`/`LIMIT`/
+  `WITHSCORES` de `ZRANGE`.
 
-F2.1 estuvo marcado `[x]` con 9/14 comandos. El recuento de arriba sale de
-comparar los literales implementados contra el SPEC, que es la única forma de
-que esta casilla no vuelva a mentir.
+F2.1 estuvo marcado `[x]` con 9/14 comandos. El recuento se obtiene comparando
+las ramas del dispatcher contra el SPEC — no los literales del fichero, que
+daban un falso 57/57 porque `LPUSHX`/`RPUSHX` aparecian en `pushed_list_keys`
+sin estar implementados.
 
 Las dos trampas que la aceptación tiene que cazar explícitamente: **nil vs
 array vacío** y **`-WRONGTYPE` cruzando tipos**. Ahí es donde los clientes
@@ -315,7 +315,7 @@ ampliada a estructuras.
 
 ### Bloque 6 — Celery y arq funcionando · `v4.31.0` · **el hito de adopción**
 
-- `[~]` **F3.1 — bloqueantes** (BLPOP/BRPOP hechos; BLMOVE/BZPOPMIN pendientes): `BLPOP BRPOP BLMOVE BRPOPLPUSH BZPOPMIN
+- `[x]` **F3.1 — bloqueantes** (BLPOP BRPOP BLMOVE BRPOPLPUSH BZPOPMIN BZPOPMAX):
   BZPOPMAX`, multi-clave con orden de argumentos como contrato. Cierre de
   conexión con waiters pendientes no filtra memoria (test con 1k conexiones).
 - `[x]` **F3.2 — `MULTI/EXEC/DISCARD/WATCH/UNWATCH`.** `WATCH` usa la

@@ -975,3 +975,311 @@ async fn a_tenant_key_containing_a_colon_cannot_collide_with_another_org() {
 fn auth_frame(secret: &str) -> Vec<u8> {
     format!("*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n", secret.len(), secret).into_bytes()
 }
+
+// ─── F3.1 remainder: BLMOVE, BRPOPLPUSH, BZPOPMIN, BZPOPMAX ──────────────────
+
+#[tokio::test]
+async fn brpoplpush_moves_an_element_that_is_already_there() {
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    exchange(
+        &mut client,
+        b"*3\r\n$5\r\nRPUSH\r\n$1\r\nq\r\n$3\r\njob\r\n",
+    )
+    .await;
+    // Replies with the element alone — the client already knows both keys.
+    assert_eq!(
+        text(
+            &exchange(
+                &mut client,
+                b"*4\r\n$10\r\nBRPOPLPUSH\r\n$1\r\nq\r\n$2\r\nip\r\n$1\r\n1\r\n"
+            )
+            .await
+        ),
+        "$3\r\njob\r\n"
+    );
+    assert_eq!(
+        text(
+            &exchange(
+                &mut client,
+                b"*4\r\n$6\r\nLRANGE\r\n$2\r\nip\r\n$1\r\n0\r\n$2\r\n-1\r\n"
+            )
+            .await
+        ),
+        "*1\r\n$3\r\njob\r\n"
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn brpoplpush_parks_until_another_client_pushes() {
+    // The whole point of the blocking form: a worker waits on an empty queue
+    // and is served the moment a producer arrives.
+    let server = start(|_| {}).await;
+    let mut worker = connect(&server).await;
+    let mut producer = connect(&server).await;
+
+    let waiting = tokio::spawn(async move {
+        let reply = exchange(
+            &mut worker,
+            b"*4\r\n$10\r\nBRPOPLPUSH\r\n$1\r\nq\r\n$2\r\nip\r\n$1\r\n5\r\n",
+        )
+        .await;
+        text(&reply)
+    });
+
+    // Give the worker time to park before the push, so this exercises the
+    // wakeup rather than the already-there fast path.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    exchange(
+        &mut producer,
+        b"*3\r\n$5\r\nLPUSH\r\n$1\r\nq\r\n$4\r\nlate\r\n",
+    )
+    .await;
+
+    let served = tokio::time::timeout(Duration::from_secs(3), waiting)
+        .await
+        .expect("the parked worker must be woken, not time out")
+        .unwrap();
+    assert_eq!(served, "$4\r\nlate\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn brpoplpush_times_out_with_a_null_array() {
+    // A null array, not an empty one and not a nil bulk: redis-py distinguishes
+    // "nothing arrived" from "served an empty value".
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    let reply = exchange(
+        &mut client,
+        b"*4\r\n$10\r\nBRPOPLPUSH\r\n$5\r\nempty\r\n$2\r\nip\r\n$1\r\n1\r\n",
+    )
+    .await;
+    assert_eq!(text(&reply), "*-1\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn blmove_honours_the_sides_it_was_given() {
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    exchange(
+        &mut client,
+        b"*4\r\n$5\r\nRPUSH\r\n$3\r\nsrc\r\n$1\r\na\r\n$1\r\nb\r\n",
+    )
+    .await;
+    // LEFT from the source: 'a', not 'b'.
+    assert_eq!(
+        text(&exchange(
+            &mut client,
+            b"*6\r\n$6\r\nBLMOVE\r\n$3\r\nsrc\r\n$3\r\ndst\r\n$4\r\nLEFT\r\n$5\r\nRIGHT\r\n$1\r\n1\r\n"
+        )
+        .await),
+        "$1\r\na\r\n"
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn blmove_rejects_a_side_it_does_not_understand() {
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    let reply = exchange(
+        &mut client,
+        b"*6\r\n$6\r\nBLMOVE\r\n$3\r\nsrc\r\n$3\r\ndst\r\n$2\r\nUP\r\n$5\r\nRIGHT\r\n$1\r\n1\r\n",
+    )
+    .await;
+    assert!(
+        text(&reply).starts_with("-ERR syntax error"),
+        "an unknown side must be a syntax error, not a silent block: {:?}",
+        text(&reply)
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn bzpopmin_replies_with_three_elements() {
+    // The trap for a client written against BLPOP: [key, member, score], not
+    // [key, member].
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    exchange(
+        &mut client,
+        b"*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n2\r\n$3\r\nlow\r\n",
+    )
+    .await;
+    exchange(
+        &mut client,
+        b"*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n9\r\n$4\r\nhigh\r\n",
+    )
+    .await;
+    assert_eq!(
+        text(
+            &exchange(
+                &mut client,
+                b"*3\r\n$8\r\nBZPOPMIN\r\n$1\r\nz\r\n$1\r\n1\r\n"
+            )
+            .await
+        ),
+        "*3\r\n$1\r\nz\r\n$3\r\nlow\r\n$1\r\n2\r\n"
+    );
+    assert_eq!(
+        text(
+            &exchange(
+                &mut client,
+                b"*3\r\n$8\r\nBZPOPMAX\r\n$1\r\nz\r\n$1\r\n1\r\n"
+            )
+            .await
+        ),
+        "*3\r\n$1\r\nz\r\n$4\r\nhigh\r\n$1\r\n9\r\n"
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn bzpopmin_parks_and_is_woken_by_a_zadd() {
+    let server = start(|_| {}).await;
+    let mut worker = connect(&server).await;
+    let mut producer = connect(&server).await;
+
+    let waiting = tokio::spawn(async move {
+        text(
+            &exchange(
+                &mut worker,
+                b"*3\r\n$8\r\nBZPOPMIN\r\n$1\r\nz\r\n$1\r\n5\r\n",
+            )
+            .await,
+        )
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    exchange(
+        &mut producer,
+        b"*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n",
+    )
+    .await;
+
+    let served = tokio::time::timeout(Duration::from_secs(3), waiting)
+        .await
+        .expect("a ZADD must wake a parked BZPOPMIN")
+        .unwrap();
+    assert_eq!(served, "*3\r\n$1\r\nz\r\n$1\r\nm\r\n$1\r\n1\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_blocking_move_stays_inside_its_own_org() {
+    // Both keys are prefixed, so one org's BRPOPLPUSH cannot drain another's
+    // queue even when both are called `q`.
+    let server = start_with_keys("instance-secret-key-long").await;
+    let (acme, _) = key_for(&server, "acme").await;
+    let (globex, _) = key_for(&server, "globex").await;
+
+    let mut a = connect(&server.inner).await;
+    exchange(&mut a, &auth_frame(&acme)).await;
+    exchange(&mut a, b"*3\r\n$5\r\nRPUSH\r\n$1\r\nq\r\n$4\r\nmine\r\n").await;
+
+    let mut g = connect(&server.inner).await;
+    exchange(&mut g, &auth_frame(&globex)).await;
+    // globex's queue is empty, so this must time out rather than steal.
+    assert_eq!(
+        text(
+            &exchange(
+                &mut g,
+                b"*4\r\n$10\r\nBRPOPLPUSH\r\n$1\r\nq\r\n$2\r\nip\r\n$1\r\n1\r\n"
+            )
+            .await
+        ),
+        "*-1\r\n",
+        "one org must not be served from another's queue"
+    );
+    // And acme's element is still there.
+    assert_eq!(
+        text(&exchange(&mut a, b"*2\r\n$4\r\nLLEN\r\n$1\r\nq\r\n").await),
+        ":1\r\n"
+    );
+    server.inner.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_move_wakes_a_worker_parked_on_the_destination() {
+    // The chain kombu builds: one worker waits on the in-flight list while
+    // another moves a job into it. Without notifying the *destination* of a
+    // move, the second worker sleeps until its own timeout with the job sitting
+    // right there — a hang that looks like an idle system.
+    let server = start(|_| {}).await;
+    let mut waiter = connect(&server).await;
+    let mut mover = connect(&server).await;
+    let mut producer = connect(&server).await;
+
+    exchange(
+        &mut producer,
+        b"*3\r\n$5\r\nRPUSH\r\n$1\r\nq\r\n$3\r\njob\r\n",
+    )
+    .await;
+
+    let parked = tokio::spawn(async move {
+        text(&exchange(&mut waiter, b"*3\r\n$5\r\nBLPOP\r\n$2\r\nip\r\n$1\r\n5\r\n").await)
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Non-blocking move: the notify must still fire.
+    assert_eq!(
+        text(
+            &exchange(
+                &mut mover,
+                b"*3\r\n$9\r\nRPOPLPUSH\r\n$1\r\nq\r\n$2\r\nip\r\n"
+            )
+            .await
+        ),
+        "$3\r\njob\r\n"
+    );
+
+    let served = tokio::time::timeout(Duration::from_secs(3), parked)
+        .await
+        .expect("a move into the watched key must wake the parked worker")
+        .unwrap();
+    assert_eq!(served, "*2\r\n$2\r\nip\r\n$3\r\njob\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_blocking_move_wakes_a_worker_parked_on_its_destination() {
+    // Same property through the blocking form, which resolves in a different
+    // arm of the connection loop and therefore needs its own notify.
+    let server = start(|_| {}).await;
+    let mut waiter = connect(&server).await;
+    let mut mover = connect(&server).await;
+    let mut producer = connect(&server).await;
+
+    let parked = tokio::spawn(async move {
+        text(&exchange(&mut waiter, b"*3\r\n$5\r\nBLPOP\r\n$2\r\nip\r\n$1\r\n5\r\n").await)
+    });
+    let moving = tokio::spawn(async move {
+        text(
+            &exchange(
+                &mut mover,
+                b"*4\r\n$10\r\nBRPOPLPUSH\r\n$1\r\nq\r\n$2\r\nip\r\n$1\r\n5\r\n",
+            )
+            .await,
+        )
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    exchange(
+        &mut producer,
+        b"*3\r\n$5\r\nRPUSH\r\n$1\r\nq\r\n$4\r\nlate\r\n",
+    )
+    .await;
+
+    let moved = tokio::time::timeout(Duration::from_secs(3), moving)
+        .await
+        .expect("the mover must be woken by the push")
+        .unwrap();
+    assert_eq!(moved, "$4\r\nlate\r\n");
+    let served = tokio::time::timeout(Duration::from_secs(3), parked)
+        .await
+        .expect("the second worker must be woken by the move")
+        .unwrap();
+    assert_eq!(served, "*2\r\n$2\r\nip\r\n$4\r\nlate\r\n");
+    server.shutdown.cancel();
+}

@@ -30,7 +30,7 @@
 //! - **Members are bytes.** Not strings: Redis members are binary, and a
 //!   pickled Celery payload is not valid UTF-8.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Maximum entries in one structure. Bounds both memory per key and the cost of
@@ -59,6 +59,19 @@ pub enum StructureError {
     NotANumber,
     #[error("value is not an integer or out of range")]
     NotAnInteger,
+    /// `LSET` past the end. A read out of range is a nil, but a *write* out of
+    /// range is an error: the client asked to overwrite something that is not
+    /// there, and silently appending would corrupt its idea of the list.
+    #[error("index out of range")]
+    IndexOutOfRange,
+    /// The stored value is a structure that will not deserialize.
+    ///
+    /// Distinct from [`StructureError::WrongType`] on purpose. Reporting this as
+    /// `WRONGTYPE` says "you used the wrong command", when the truth is "what is
+    /// stored cannot be read" — and that mislabel is what hid the infinite-score
+    /// bug: the symptom looked like a client mistake.
+    #[error("stored structure could not be read: {0}")]
+    Corrupt(String),
 }
 
 /// Serde helpers that carry byte strings through JSON as base64.
@@ -75,7 +88,6 @@ pub enum StructureError {
 mod b64 {
     use super::{Bytes, OrderedScore};
     use base64::Engine as _;
-    use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -164,13 +176,18 @@ mod b64 {
     pub mod score_map {
         use super::*;
 
+        // Both directions go through `OrderedScore`'s own impls rather than a
+        // raw `f64`. Using the number directly is what let an infinite score be
+        // written as JSON `null` and make the whole sorted set unreadable: the
+        // type that knows NaN is illegal is also the type that knows how to
+        // survive a format with no infinity.
         pub fn serialize<S: Serializer>(
             value: &BTreeMap<Bytes, OrderedScore>,
             serializer: S,
         ) -> Result<S::Ok, S::Error> {
             value
                 .iter()
-                .map(|(k, v)| (encode(k), v.get()))
+                .map(|(k, v)| (encode(k), *v))
                 .collect::<Vec<_>>()
                 .serialize(serializer)
         }
@@ -178,16 +195,9 @@ mod b64 {
         pub fn deserialize<'de, D: Deserializer<'de>>(
             deserializer: D,
         ) -> Result<BTreeMap<Bytes, OrderedScore>, D::Error> {
-            let raw = Vec::<(String, f64)>::deserialize(deserializer)?;
-            raw.iter()
-                .map(|(k, score)| {
-                    let score = OrderedScore::new(*score).map_err(|e| {
-                        // A NaN score on disk means the record is corrupt: it
-                        // could never have been written through `add`.
-                        D::Error::custom(format!("stored score is invalid: {e}"))
-                    })?;
-                    Ok((decode::<D::Error>(k)?, score))
-                })
+            let raw = Vec::<(String, OrderedScore)>::deserialize(deserializer)?;
+            raw.into_iter()
+                .map(|(k, score)| Ok((decode::<D::Error>(&k)?, score)))
                 .collect()
         }
     }
@@ -201,7 +211,7 @@ mod b64 {
         ) -> Result<S::Ok, S::Error> {
             value
                 .iter()
-                .map(|(score, member)| (score.get(), encode(member)))
+                .map(|(score, member)| (*score, encode(member)))
                 .collect::<Vec<_>>()
                 .serialize(serializer)
         }
@@ -209,13 +219,9 @@ mod b64 {
         pub fn deserialize<'de, D: Deserializer<'de>>(
             deserializer: D,
         ) -> Result<BTreeSet<(OrderedScore, Bytes)>, D::Error> {
-            let raw = Vec::<(f64, String)>::deserialize(deserializer)?;
-            raw.iter()
-                .map(|(score, member)| {
-                    let score = OrderedScore::new(*score)
-                        .map_err(|e| D::Error::custom(format!("stored score is invalid: {e}")))?;
-                    Ok((score, decode::<D::Error>(member)?))
-                })
+            let raw = Vec::<(OrderedScore, String)>::deserialize(deserializer)?;
+            raw.into_iter()
+                .map(|(score, member)| Ok((score, decode::<D::Error>(&member)?)))
                 .collect()
         }
     }
@@ -237,8 +243,61 @@ pub struct ZSet {
 
 /// A score that is totally ordered. Constructed only through
 /// [`OrderedScore::new`], which rejects NaN.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+///
+/// ## Why this has a hand-written `Serialize`
+///
+/// JSON has no infinity, and `serde_json` writes `f64::INFINITY` as `null`.
+/// With the derived impl, `ZADD key +inf member` reported success and the whole
+/// sorted set became unreadable on the next command — the deserialize failed and
+/// the load path reported it as `WRONGTYPE`, which sent the reader looking for a
+/// type mixup that was not there. `+inf` is an ordinary Redis idiom, so silently
+/// destroying those keys is not an option.
+///
+/// Finite scores are still written as a bare JSON number, byte-identical to the
+/// derived form, so structures already on disk are unaffected. Only the two
+/// infinities are written as strings, and both spellings are accepted on the way
+/// back in.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrderedScore(f64);
+
+impl Serialize for OrderedScore {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0.is_finite() {
+            return serializer.serialize_f64(self.0);
+        }
+        serializer.serialize_str(if self.0 > 0.0 { "inf" } else { "-inf" })
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderedScore {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        // An untagged value: a number from the common path, a string for an
+        // infinity, and `null` from data written before this was fixed — those
+        // scores are unrecoverable, but reading them as an infinity at least
+        // keeps the rest of the structure loadable instead of failing the whole
+        // key.
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let score = match &raw {
+            serde_json::Value::Number(n) => n.as_f64().ok_or_else(|| {
+                D::Error::custom(format!("score {n} is not representable as f64"))
+            })?,
+            serde_json::Value::String(text) => match text.as_str() {
+                "inf" | "+inf" | "Infinity" => f64::INFINITY,
+                "-inf" | "-Infinity" => f64::NEG_INFINITY,
+                other => other
+                    .parse::<f64>()
+                    .map_err(|e| D::Error::custom(format!("score {other:?}: {e}")))?,
+            },
+            serde_json::Value::Null => f64::INFINITY,
+            other => return Err(D::Error::custom(format!("score is not a number: {other}"))),
+        };
+        if score.is_nan() {
+            return Err(D::Error::custom("score is NaN"));
+        }
+        Ok(OrderedScore(score))
+    }
+}
 
 impl OrderedScore {
     pub fn new(score: f64) -> Result<Self, StructureError> {
@@ -338,6 +397,91 @@ impl ZSet {
     pub fn rank(&self, member: &[u8]) -> Option<usize> {
         let score = *self.scores.get(member)?;
         Some(self.ordered.range(..(score, member.to_vec())).count())
+    }
+
+    /// Zero-based rank in *descending* order, which is what `ZREVRANK` reports.
+    pub fn rev_rank(&self, member: &[u8]) -> Option<usize> {
+        let ascending = self.rank(member)?;
+        Some(self.len() - 1 - ascending)
+    }
+
+    /// How many members score within `[min, max]`, inclusive.
+    pub fn count_by_score(&self, min: f64, max: f64) -> usize {
+        self.ordered
+            .iter()
+            .filter(|(score, _)| score.get() >= min && score.get() <= max)
+            .count()
+    }
+
+    /// Add `delta` to a member's score, creating it at `delta` if absent.
+    ///
+    /// Returns the new score. A resulting NaN is an error rather than a stored
+    /// value: `+inf` plus `-inf` is the case Redis rejects too, and a NaN score
+    /// would break the total ordering the whole structure depends on.
+    pub fn incr_by(&mut self, member: Bytes, delta: f64) -> Result<f64, StructureError> {
+        let current = self.score(&member).unwrap_or(0.0);
+        let next = current + delta;
+        if next.is_nan() {
+            return Err(StructureError::NotANumber);
+        }
+        self.add(member, next)?;
+        Ok(next)
+    }
+
+    /// Remove every member scoring within `[min, max]`. Returns how many went.
+    pub fn remove_range_by_score(&mut self, min: f64, max: f64) -> usize {
+        let doomed: Vec<Bytes> = self
+            .ordered
+            .iter()
+            .filter(|(score, _)| score.get() >= min && score.get() <= max)
+            .map(|(_, member)| member.clone())
+            .collect();
+        doomed.iter().filter(|m| self.remove(m)).count()
+    }
+
+    /// Remove members by ascending rank range, inclusive, with Redis's negative
+    /// indexing. Returns how many went.
+    pub fn remove_range_by_rank(&mut self, start: i64, stop: i64) -> usize {
+        let len = self.len() as i64;
+        if len == 0 {
+            return 0;
+        }
+        let start = normalize_index(start, len).max(0);
+        let stop = normalize_index(stop, len).min(len - 1);
+        if start > stop {
+            return 0;
+        }
+        let doomed: Vec<Bytes> = self
+            .ordered
+            .iter()
+            .skip(start as usize)
+            .take((stop - start + 1) as usize)
+            .map(|(_, member)| member.clone())
+            .collect();
+        doomed.iter().filter(|m| self.remove(m)).count()
+    }
+
+    /// Pop up to `count` members from the low-score end (`ZPOPMIN`) or the
+    /// high-score end (`ZPOPMAX`).
+    pub fn pop(&mut self, count: usize, min: bool) -> Vec<(Bytes, f64)> {
+        let taken: Vec<(Bytes, f64)> = if min {
+            self.ordered
+                .iter()
+                .take(count)
+                .map(|(s, m)| (m.clone(), s.get()))
+                .collect()
+        } else {
+            self.ordered
+                .iter()
+                .rev()
+                .take(count)
+                .map(|(s, m)| (m.clone(), s.get()))
+                .collect()
+        };
+        for (member, _) in &taken {
+            self.remove(member);
+        }
+        taken
     }
 }
 
@@ -556,6 +700,90 @@ impl Structure {
         Ok(removed)
     }
 
+    /// `LINDEX index`, with Redis's negative indexing. Out of range is a nil,
+    /// not an error.
+    pub fn lindex(&self, index: i64) -> Result<Option<Bytes>, StructureError> {
+        let items = self.as_list()?;
+        let len = items.len() as i64;
+        let at = normalize_index(index, len);
+        if at < 0 || at >= len {
+            return Ok(None);
+        }
+        Ok(items.get(at as usize).cloned())
+    }
+
+    /// `LSET index value`. Out of range is an error, unlike `LINDEX` — the
+    /// client asked to write somewhere that does not exist.
+    pub fn lset(&mut self, index: i64, value: Bytes) -> Result<(), StructureError> {
+        let items = self.as_list_mut()?;
+        let len = items.len() as i64;
+        let at = normalize_index(index, len);
+        if at < 0 || at >= len {
+            return Err(StructureError::IndexOutOfRange);
+        }
+        items[at as usize] = value;
+        Ok(())
+    }
+
+    /// `LTRIM start stop`: keep only that inclusive range, dropping the rest.
+    ///
+    /// An empty result is not an error — Redis deletes the key, and the caller
+    /// sees an empty list, which `Structures::mutate` prunes the same way it
+    /// prunes a list emptied by `LPOP`.
+    pub fn ltrim(&mut self, start: i64, stop: i64) -> Result<(), StructureError> {
+        let kept = self.lrange(start, stop)?;
+        let items = self.as_list_mut()?;
+        *items = kept.into();
+        Ok(())
+    }
+
+    /// `HSETNX field value`: set only when the field is absent. Returns true
+    /// when it was written.
+    pub fn hsetnx(&mut self, field: Bytes, value: Bytes) -> Result<bool, StructureError> {
+        let map = self.as_hash_mut()?;
+        if map.contains_key(&field) {
+            return Ok(false);
+        }
+        if map.len() >= MAX_STRUCTURE_ENTRIES {
+            return Err(StructureError::TooManyEntries);
+        }
+        map.insert(field, value);
+        Ok(true)
+    }
+
+    /// `SPOP count`: remove and return up to `count` members.
+    ///
+    /// Redis picks at random; this takes them in the set's stored order. See
+    /// `docs/RESP.md` — the divergence is deliberate and documented, because
+    /// every real use of `SPOP` is "give me any member" and a deterministic
+    /// answer is testable.
+    pub fn spop(&mut self, count: usize) -> Result<Vec<Bytes>, StructureError> {
+        let members = self.as_set_mut()?;
+        let taken: Vec<Bytes> = members.iter().take(count).cloned().collect();
+        for member in &taken {
+            members.remove(member);
+        }
+        Ok(taken)
+    }
+
+    /// `SRANDMEMBER count`: members *without* removing them.
+    ///
+    /// A negative count in Redis means "allow repeats, return exactly that
+    /// many"; a positive one means "distinct, at most that many". Both are
+    /// honoured; the ordering caveat of `spop` applies.
+    pub fn srandmember(&self, count: i64) -> Result<Vec<Bytes>, StructureError> {
+        let members = self.as_set()?;
+        if members.is_empty() {
+            return Ok(Vec::new());
+        }
+        if count >= 0 {
+            return Ok(members.iter().take(count as usize).cloned().collect());
+        }
+        let wanted = count.unsigned_abs() as usize;
+        let pool: Vec<&Bytes> = members.iter().collect();
+        Ok((0..wanted).map(|i| pool[i % pool.len()].clone()).collect())
+    }
+
     // ── hash operations ──────────────────────────────────────────────────────
 
     /// `HSET`: returns how many fields were newly created (not updated).
@@ -695,8 +923,17 @@ impl<'a> Structures<'a> {
         let Some(json) = item.value.as_json() else {
             return Err(StructureError::WrongType);
         };
-        let structure = serde_json::from_value::<Structure>(json.clone())
-            .map_err(|_| StructureError::WrongType)?;
+        // A value that is not a structure at all is a type error; a value that
+        // *is* one but will not parse is corruption, and saying so is the
+        // difference between a client fixing its command and an operator
+        // looking at the data.
+        let structure = match serde_json::from_value::<Structure>(json.clone()) {
+            Ok(structure) => structure,
+            Err(e) if json.get("kind").is_some() => {
+                return Err(StructureError::Corrupt(e.to_string()))
+            }
+            Err(_) => return Err(StructureError::WrongType),
+        };
         Ok(Some((structure, item.revision)))
     }
 
@@ -1259,5 +1496,86 @@ mod tests {
         assert_eq!(structures.load("s").unwrap().unwrap().0.type_name(), "set");
         let (zset, _) = structures.load("z").unwrap().unwrap();
         assert_eq!(zset.as_zset().unwrap().score(&[0xFE]), Some(-1.5));
+    }
+
+    /// The bug this pins: `serde_json` writes `f64::INFINITY` as `null`, so with
+    /// a derived `Serialize` a sorted set holding `+inf` was written
+    /// successfully and then failed to load — and the load path called that
+    /// `WRONGTYPE`, which points at the client instead of the data.
+    #[test]
+    fn an_infinite_score_survives_a_json_round_trip() {
+        let mut zset = ZSet::default();
+        zset.add(b"never".to_vec(), f64::INFINITY).unwrap();
+        zset.add(b"always".to_vec(), f64::NEG_INFINITY).unwrap();
+        zset.add(b"middle".to_vec(), 1.5).unwrap();
+
+        let json = serde_json::to_string(&zset).unwrap();
+        assert!(
+            !json.contains("null"),
+            "an infinity must not be written as null: {json}"
+        );
+        let back: ZSet = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.score(b"never"), Some(f64::INFINITY));
+        assert_eq!(back.score(b"always"), Some(f64::NEG_INFINITY));
+        assert_eq!(back.score(b"middle"), Some(1.5));
+        // And the ordering survived, which is the part the `ordered` index
+        // depends on.
+        let order: Vec<&[u8]> = back.range().map(|(m, _)| m.as_slice()).collect();
+        assert_eq!(order, [b"always".as_slice(), b"middle", b"never"]);
+    }
+
+    /// A finite score must still be written as a bare JSON number, so sorted
+    /// sets already on disk load unchanged.
+    #[test]
+    fn a_finite_score_is_still_written_as_a_number() {
+        let mut zset = ZSet::default();
+        zset.add(b"m".to_vec(), 2.5).unwrap();
+        let json = serde_json::to_string(&zset).unwrap();
+        assert!(
+            json.contains("2.5") && !json.contains("\"2.5\""),
+            "a finite score must stay a JSON number, not become a string: {json}"
+        );
+    }
+
+    #[test]
+    fn a_structure_that_will_not_parse_is_reported_as_corrupt_not_wrongtype() {
+        // The mislabel is what hid the infinite-score bug for as long as it
+        // existed, so the distinction is pinned rather than left to a comment.
+        let (engine, _dir) = test_engine();
+        let structures = Structures::new(&engine);
+        // A value that *is* tagged as a structure but whose body is nonsense.
+        engine
+            .put_state(
+                structure_key("broken"),
+                serde_json::json!({ "kind": "z_set", "scores": "not a list" }),
+                None,
+                None,
+            )
+            .unwrap();
+        match structures.load("broken") {
+            Err(StructureError::Corrupt(detail)) => {
+                assert!(
+                    !detail.is_empty(),
+                    "the reason must be carried, not dropped"
+                )
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+
+        // While a value that is not a structure at all is still a type error:
+        // that really is a client using the wrong command on a plain string.
+        engine
+            .put_state(
+                structure_key("plain"),
+                serde_json::json!("just a string"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            structures.load("plain"),
+            Err(StructureError::WrongType)
+        ));
     }
 }

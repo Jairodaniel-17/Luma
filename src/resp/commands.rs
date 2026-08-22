@@ -164,12 +164,35 @@ pub enum Dispatch {
         keys: Vec<String>,
         /// `None` means wait forever, which is how Redis spells `timeout 0`.
         timeout: Option<std::time::Duration>,
-        /// Pop from the head (`BLPOP`) or the tail (`BRPOP`).
-        left: bool,
+        /// What to do once a key has something.
+        kind: BlockKind,
     },
     /// A Pub/Sub command. Handled by the connection loop, which owns the
     /// subscriber inbox and the socket it has to be pushed to.
     PubSub(PubSubCommand),
+}
+
+/// What a blocking command does when one of its keys becomes non-empty.
+///
+/// Kept as data rather than a closure because the wait happens in the
+/// connection loop, which is the only place that can await — the command layer
+/// decides *what* to do and hands it over.
+#[derive(Debug, Clone)]
+pub enum BlockKind {
+    /// `BLPOP` / `BRPOP`. Replies `[key, element]`.
+    Pop { left: bool },
+    /// `BLMOVE` / `BRPOPLPUSH`. Pops from the watched key and pushes to
+    /// `destination`; replies with the element alone, since the client already
+    /// knows both keys.
+    Move {
+        destination: String,
+        from_left: bool,
+        to_left: bool,
+    },
+    /// `BZPOPMIN` / `BZPOPMAX`. Replies `[key, member, score]` — three
+    /// elements, not two, which is the trap for a client written against
+    /// `BLPOP`.
+    ZPop { min: bool },
 }
 
 /// A Pub/Sub request, parsed but not yet executed.
@@ -296,7 +319,61 @@ pub fn dispatch(
         }
 
         // ── blocking reads ───────────────────────────────────────────────────
-        "BLPOP" | "BRPOP" => blocking_pop(session, rest, name == "BLPOP"),
+        "BLPOP" | "BRPOP" => blocking(
+            session,
+            rest,
+            &name,
+            BlockKind::Pop {
+                left: name == "BLPOP",
+            },
+        ),
+        "BZPOPMIN" | "BZPOPMAX" => blocking(
+            session,
+            rest,
+            &name,
+            BlockKind::ZPop {
+                min: name == "BZPOPMIN",
+            },
+        ),
+        "BRPOPLPUSH" => {
+            // `BRPOPLPUSH source destination timeout`: exactly one source, so
+            // the shared parser cannot be reused for the key list.
+            if rest.len() != 3 {
+                return Dispatch::Reply(err(
+                    "ERR wrong number of arguments for 'brpoplpush' command",
+                ));
+            }
+            blocking(
+                session,
+                &[rest[0].clone(), rest[2].clone()],
+                &name,
+                BlockKind::Move {
+                    destination: scope(session, &rest[1]),
+                    from_left: false,
+                    to_left: true,
+                },
+            )
+        }
+        "BLMOVE" => {
+            // `BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout`.
+            if rest.len() != 5 {
+                return Dispatch::Reply(err("ERR wrong number of arguments for 'blmove' command"));
+            }
+            let (Some(from_left), Some(to_left)) = (parse_side(&rest[2]), parse_side(&rest[3]))
+            else {
+                return Dispatch::Reply(err("ERR syntax error"));
+            };
+            blocking(
+                session,
+                &[rest[0].clone(), rest[4].clone()],
+                &name,
+                BlockKind::Move {
+                    destination: scope(session, &rest[1]),
+                    from_left,
+                    to_left,
+                },
+            )
+        }
 
         // ── pub/sub ──────────────────────────────────────────────────────────
         "SUBSCRIBE" | "PSUBSCRIBE" => {
@@ -1330,11 +1407,26 @@ fn discard(session: &mut Session) -> Value {
 ///
 /// The timeout is seconds and may be fractional, which is how Redis spells
 /// sub-second waits. `0` means wait forever.
-fn blocking_pop(session: &Session, args: &[Vec<u8>], left: bool) -> Dispatch {
+/// `LEFT`/`RIGHT` for `LMOVE` and `BLMOVE`.
+fn parse_side(raw: &[u8]) -> Option<bool> {
+    if raw.eq_ignore_ascii_case(b"LEFT") {
+        Some(true)
+    } else if raw.eq_ignore_ascii_case(b"RIGHT") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Parse `<key...> <timeout>` and hand the wait to the connection loop.
+///
+/// Every blocking command shares this tail, including the ones whose keys are
+/// not a variadic list — those pass the single source plus the timeout.
+fn blocking(session: &Session, args: &[Vec<u8>], name: &str, kind: BlockKind) -> Dispatch {
     if args.len() < 2 {
         return Dispatch::Reply(err(format!(
             "ERR wrong number of arguments for '{}' command",
-            if left { "blpop" } else { "brpop" }
+            name.to_lowercase()
         )));
     }
     let (keys, timeout_raw) = args.split_at(args.len() - 1);
@@ -1349,8 +1441,9 @@ fn blocking_pop(session: &Session, args: &[Vec<u8>], left: bool) -> Dispatch {
     }
     Dispatch::Block {
         keys: keys.iter().map(|k| scope(session, k)).collect(),
+        // Redis spells "wait forever" as timeout 0.
         timeout: (seconds > 0.0).then(|| std::time::Duration::from_secs_f64(seconds)),
-        left,
+        kind,
     }
 }
 
@@ -1436,6 +1529,33 @@ fn is_unknown_command(name: &str) -> bool {
         "ZRANGE",
         "ZRANGEBYSCORE",
         "ZRANK",
+        "ZREVRANGE",
+        "LPUSHX",
+        "RPUSHX",
+        "LINDEX",
+        "LSET",
+        "LTRIM",
+        "RPOPLPUSH",
+        "LMOVE",
+        "HSETNX",
+        "HSCAN",
+        "SPOP",
+        "SRANDMEMBER",
+        "SSCAN",
+        "ZREVRANK",
+        "ZMSCORE",
+        "ZCOUNT",
+        "ZINCRBY",
+        "ZREVRANGEBYSCORE",
+        "ZREMRANGEBYSCORE",
+        "ZREMRANGEBYRANK",
+        "ZPOPMIN",
+        "ZPOPMAX",
+        "ZSCAN",
+        "BLMOVE",
+        "BRPOPLPUSH",
+        "BZPOPMIN",
+        "BZPOPMAX",
     ];
     !KNOWN.contains(&name)
 }
@@ -2451,11 +2571,11 @@ mod tests {
             Dispatch::Block {
                 keys,
                 timeout,
-                left,
+                kind,
             } => {
                 assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
                 assert!(timeout.is_none(), "timeout 0 means wait forever");
-                assert!(left);
+                assert!(matches!(kind, BlockKind::Pop { left: true }));
             }
             other => panic!("expected a block, got {other:?}"),
         }
@@ -2469,9 +2589,12 @@ mod tests {
             .map(|a| a.as_bytes().to_vec())
             .collect();
         match dispatch(&e, &mut s, &args, &allow_all, true) {
-            Dispatch::Block { timeout, left, .. } => {
+            Dispatch::Block { timeout, kind, .. } => {
                 assert_eq!(timeout, Some(std::time::Duration::from_millis(250)));
-                assert!(!left, "BRPOP pops from the tail");
+                assert!(
+                    matches!(kind, BlockKind::Pop { left: false }),
+                    "BRPOP pops from the tail"
+                );
             }
             other => panic!("expected a block, got {other:?}"),
         }

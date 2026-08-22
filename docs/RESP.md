@@ -124,6 +124,30 @@ afecta, es mejor saberlo antes de migrar que descubrirlo en producción.
 | Suscriptor | Solo acepta un subconjunto de comandos | Acepta todos | Es un superconjunto; un `PING` de keepalive obtiene respuesta en vez de silencio |
 | Tamaño de estructura | Sin límite práctico | `MAX_STRUCTURE_ENTRIES` = 1 000 000 | Una mutación es read-modify-write de la estructura entera. Luma no es para colas de diez millones de mensajes residentes |
 
+### Divergencias de los comandos añadidos
+
+| Comando | Redis | Luma | Por qué |
+|---|---|---|---|
+| `SPOP`, `SRANDMEMBER` | Eligen miembros al azar | Los toman en el orden almacenado | El uso real de ambos es "dame cualquier miembro", y una respuesta determinista es verificable. Un cliente que dependa de la aleatoriedad para repartir carga no la obtendrá |
+| `HSCAN`, `SSCAN`, `ZSCAN` | Cursor sobre buckets de hash | Índice sobre el orden almacenado (un `BTreeMap`/`BTreeSet`, estable) | Da la garantía que los clientes usan de verdad — un elemento presente durante toda la iteración se devuelve al menos una vez — sin emular una tabla hash que no existe. Igual que el `SCAN` de primer nivel |
+| `HSCAN`/`SSCAN`/`ZSCAN` `COUNT` | Es una pista | Es un límite de página | Nunca devuelve más de lo pedido, y evita que un `COUNT 10` recorra un millón de entradas |
+| `LMOVE`, `RPOPLPUSH`, `BLMOVE`, `BRPOPLPUSH` | Atómicos | **No atómicos entre las dos claves** | Ver abajo |
+| `ZADD` con `+inf`/`-inf` | Se almacena | Se almacena | Fue un bug hasta que se arregló: JSON no tiene infinito y `serde_json` lo escribía como `null`, así que el `ZADD` decía OK y el sorted set entero quedaba ilegible. Los scores infinitos ahora se serializan como cadena; los finitos siguen siendo números y los datos existentes no cambian |
+
+#### La atomicidad de `LMOVE` y compañía
+
+El motor confirma **una clave por registro del WAL**, así que un movimiento
+entre dos claves es un pop seguido de un push, no una operación. Si el push
+falla, el elemento se devuelve a su lista de origen — hay un test que lo fija.
+Pero una muerte del proceso entre las dos operaciones pierde el elemento.
+
+Esto importa porque es exactamente la garantía que un cliente compra al usar
+`BRPOPLPUSH`: la cola de *unacked* de kombu existe para que una tarea no se
+pierda si el worker muere. Con Luma, la ventana es pequeña pero real. Cerrarla
+requiere un registro de WAL transaccional multiclave, que es un cambio de diseño
+del motor y no un detalle del protocolo; queda anotado como tal en vez de
+implícito aquí.
+
 ### Multi-tenancy
 
 `AUTH <api-key>` liga la conexión a la organización dueña de esa clave, y a
@@ -154,15 +178,8 @@ la base de datos después de que alguien haya revocado algo de verdad.
 
 Nada de esto está a medias: simplemente no está.
 
-**Bloqueantes:** `BLMOVE`, `BRPOPLPUSH`, `BZPOPMIN`, `BZPOPMAX`.
-
-**Listas:** `LINDEX`, `LSET`, `LTRIM`, `LPUSHX`, `RPUSHX`, `RPOPLPUSH`, `LMOVE`.
-
-**Hashes:** `HSETNX`, `HSCAN`. **Sets:** `SPOP`, `SRANDMEMBER`, `SSCAN`.
-
-**Sorted sets:** `ZMSCORE`, `ZCOUNT`, `ZINCRBY`, `ZREVRANGE*`, `ZREMRANGE*`,
-`ZREVRANK`, `ZPOPMIN`, `ZPOPMAX`, `ZSCAN`, y los modificadores `NX`/`XX`/`GT`/
-`LT`/`CH`/`INCR` de `ZADD`.
+El set de comandos de las fases 2 y 3 de `SPEC-resp.md` está completo
+(57/57), modificadores de `ZADD` y opciones de `ZRANGE` incluidos.
 
 **Fuera de alcance por decisión** (ver el backlog de `SPEC-resp.md`): protocolo
 de cluster (`MOVED`/`ASK`), replicación por protocolo Redis (`REPLICAOF`), Lua
