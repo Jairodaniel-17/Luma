@@ -88,6 +88,40 @@ lado de producirlo, y es la diferencia entre tener backups y creer que se tienen
 Un backup que no verifica se reporta como **error**, no como un backup correcto
 con una nota — quien lea los logs no puede interpretarlo como "hay backup".
 
+### Respaldo fuera del host (W1.3)
+
+Opt-in. Con `backup_remote_url` vacío no cambia nada; el backup local sigue igual.
+
+| Clave | Para qué |
+|---|---|
+| `backup_remote_url` | Destino, `s3://bucket/prefijo`. La ruta del URL es el prefijo dentro del bucket, así que varias instancias pueden compartirlo sin chocar |
+| `backup_remote_endpoint` | Endpoint propio: MinIO, R2 u otro compatible con S3. Vacío = AWS S3 real |
+| `backup_remote_region` | Región |
+| `backup_remote_allow_http` | Permite un endpoint en HTTP plano. Solo para un MinIO en red de confianza: los artefactos van cifrados, **las credenciales de la petición no** |
+
+Las credenciales salen de las variables AWS estándar, así que un instance
+profile, un `.env` o un secreto de Kubernetes funcionan sin fontanería propia de
+Luma.
+
+**Los artefactos se cifran antes de salir del host** con la master key, con la
+misma caja ChaCha20-Poly1305 del cifrado en reposo. Importa porque un bucket de
+backups suele ser la copia peor vigilada de un sistema: sobrevive a los hosts, se
+comparte con quien vaya a restaurar, y es lo primero que expone una policy mal
+puesta.
+
+Dos garantías de orden que evitan los fallos silenciosos típicos:
+
+- **El manifest se sube el último.** Una subida interrumpida deja un prefijo sin
+  manifest, y la descarga rechaza ese prefijo en vez de restaurar un backup
+  parcial que parece completo.
+- **La poda va después de una subida correcta**, nunca antes. Perder la copia
+  remota más nueva para hacer sitio a una que luego falla al subir es el peor
+  orden posible.
+
+Un fallo remoto se registra pero no es fatal: el backup local ya salió bien, y
+convertir un problema de red pasajero en una ejecución fallida tiraría una copia
+buena para nada.
+
 ## SSE tuning
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).

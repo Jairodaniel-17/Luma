@@ -396,14 +396,20 @@ pub fn spawn_backup_task(config: Config) {
             })
             .await;
             match result {
-                Ok(Ok((dest, manifest))) => tracing::info!(
-                    backup = %dest.display(),
-                    wal_segments = manifest.wal_segments,
-                    vector_collections = manifest.vector_collections,
-                    blob_files = manifest.blob_files,
-                    queue_files = manifest.queue_files,
-                    "scheduled backup verified"
-                ),
+                Ok(Ok((dest, manifest))) => {
+                    // Off-host copy, only after the local one verified: shipping
+                    // an unverified artifact would replicate a broken backup and
+                    // burn the retention slot of a good one.
+                    ship_if_configured(&config, &dest).await;
+                    tracing::info!(
+                        backup = %dest.display(),
+                        wal_segments = manifest.wal_segments,
+                        vector_collections = manifest.vector_collections,
+                        blob_files = manifest.blob_files,
+                        queue_files = manifest.queue_files,
+                        "scheduled backup verified"
+                    );
+                }
                 // A backup that fails verification is reported as an error, not
                 // as a successful backup with a note: an operator scanning logs
                 // must not read this as "we have a backup".
@@ -412,4 +418,25 @@ pub fn spawn_backup_task(config: Config) {
             }
         }
     });
+}
+
+/// Ship a verified backup off-host when a remote is configured.
+///
+/// A remote failure is logged, never fatal: the local backup already succeeded,
+/// and turning a transient network problem into a failed backup run would throw
+/// away a good local copy for nothing.
+async fn ship_if_configured(config: &Config, dest: &Path) {
+    let target = match crate::backup_remote::store_from_config(config) {
+        Ok(Some(target)) => target,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!("remote backup misconfigured, keeping local only: {e}");
+            return;
+        }
+    };
+    let secrets = crate::crypto::SecretBox::from_env();
+    match crate::backup_remote::ship(&target, dest, config.backup_retention, &secrets).await {
+        Ok(keys) => tracing::info!(objects = keys.len(), "backup shipped off-host"),
+        Err(e) => tracing::error!("off-host backup failed, local copy retained: {e}"),
+    }
 }

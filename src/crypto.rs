@@ -74,6 +74,42 @@ impl SecretBox {
         Self::from_master(&master)
     }
 
+    /// Encrypt raw bytes, returning `nonce || ciphertext`.
+    ///
+    /// Distinct from [`SecretBox::encrypt`] because that one is for *fields* —
+    /// it base64s and prefixes so a ciphertext can sit in a JSON string and be
+    /// recognised later. Backup artifacts are whole files, often large, and
+    /// wrapping them in base64 would inflate every one by a third for no gain:
+    /// the caller already knows the object is encrypted.
+    pub fn encrypt_bytes(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| anyhow!("encryption failed: {e}"))?;
+        let mut blob = Vec::with_capacity(12 + ciphertext.len());
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend_from_slice(&ciphertext);
+        Ok(blob)
+    }
+
+    /// Decrypt bytes produced by [`SecretBox::encrypt_bytes`].
+    ///
+    /// A failure here means the bytes are not what we wrote — wrong key, or a
+    /// tampered or truncated object — and the caller must abort rather than
+    /// carry on with whatever came back.
+    pub fn decrypt_bytes(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+        if sealed.len() < 12 {
+            return Err(anyhow!("ciphertext too short to contain a nonce"));
+        }
+        let (nonce_bytes, ciphertext) = sealed.split_at(12);
+        self.cipher
+            .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+            .map_err(|_| anyhow!("decryption failed: wrong key, or the data was modified"))
+    }
+
     /// Encrypt `plaintext`, returning a self-describing `enc:v2:...` token.
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
         let mut nonce_bytes = [0u8; 12];

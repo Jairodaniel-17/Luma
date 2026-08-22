@@ -17,6 +17,8 @@
 pub mod api;
 /// Consistent on-disk backups (SQLite + snapshot + WAL) and restore.
 pub mod backup;
+
+pub mod backup_remote;
 /// Configuration loading and defaults (`luma.toml` + environment overrides).
 pub mod config;
 /// Encryption-at-rest (AEAD) and password hashing (Argon2id).

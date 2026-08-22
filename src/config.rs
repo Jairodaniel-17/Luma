@@ -189,6 +189,24 @@ pub struct Config {
     /// Number of most-recent backups to retain; older ones are pruned (default 7).
     #[serde(default = "default_backup_retention")]
     pub backup_retention: usize,
+    /// Off-host backup destination as `s3://bucket/prefix`. Empty disables it.
+    ///
+    /// A backup on the same disk as the data protects against corruption and
+    /// accidental deletion, and against nothing else — losing the volume loses
+    /// both copies at once.
+    #[serde(default)]
+    pub backup_remote_url: String,
+    /// Custom S3 endpoint, for MinIO, R2 or another S3-compatible service.
+    /// Empty means real AWS S3.
+    #[serde(default)]
+    pub backup_remote_endpoint: String,
+    #[serde(default)]
+    pub backup_remote_region: String,
+    /// Allow a plain-HTTP endpoint. Only for a MinIO on a trusted network:
+    /// backup artifacts are encrypted before upload, but the credentials in the
+    /// request are not.
+    #[serde(default)]
+    pub backup_remote_allow_http: bool,
 }
 
 fn default_backup_dir() -> String {
@@ -316,6 +334,10 @@ impl Default for Config {
             backup_dir: default_backup_dir(),
             backup_interval_secs: default_backup_interval_secs(),
             backup_retention: default_backup_retention(),
+            backup_remote_url: String::new(),
+            backup_remote_endpoint: String::new(),
+            backup_remote_region: String::new(),
+            backup_remote_allow_http: false,
         }
     }
 }
@@ -837,6 +859,12 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(default_backup_retention),
+            backup_remote_url: std::env::var("BACKUP_REMOTE_URL").unwrap_or_default(),
+            backup_remote_endpoint: std::env::var("BACKUP_REMOTE_ENDPOINT").unwrap_or_default(),
+            backup_remote_region: std::env::var("BACKUP_REMOTE_REGION").unwrap_or_default(),
+            backup_remote_allow_http: std::env::var("BACKUP_REMOTE_ALLOW_HTTP")
+                .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+                .unwrap_or(false),
         })
     }
 }
