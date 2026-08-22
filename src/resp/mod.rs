@@ -8,4 +8,5 @@
 //! note from the SPEC's risk table, which belongs next to the code so it stays
 //! true.
 
+pub mod commands;
 pub mod protocol;
