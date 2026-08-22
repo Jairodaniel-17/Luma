@@ -38,6 +38,18 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Restore { path } => {
             cli::run_restore(&config, path)?;
         }
+        cli::Command::Promote => {
+            cli::run_promote(&config)?;
+        }
+        cli::Command::Demote => {
+            cli::run_demote(&config)?;
+        }
+        cli::Command::Role => {
+            cli::run_role(&config)?;
+        }
+        cli::Command::Help => {
+            println!("{}", cli::help_text());
+        }
     }
 
     Ok(())

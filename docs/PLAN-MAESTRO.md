@@ -485,11 +485,28 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
   **Sin verificar de verdad:** la publicación a GHCR y la firma solo se
   ejecutan al empujar un tag `v*`. La sintaxis está validada y los pasos son
   los estándar, pero nadie ha visto todavía este job pasar.
-- `[ ]` **W5.5 — documentación de producto:** reorganizar `docs/` en *Empezar*
-  / *Operar* (runbooks: backup/restore, promoción de réplica, rotación de
-  master key, upgrade) / *Integrar* (RESP, S3, CDC, SSE) / *Referencia*.
-  Aceptación real: **alguien externo monta Luma con réplica y backup remoto
-  solo con los docs.** Probarlo de verdad con una persona.
+- `[~]` **W5.5 - documentación de producto** (runbooks hechos; la
+  reorganización de carpetas y la prueba con una persona externa, pendientes).
+
+  `docs/RUNBOOKS.md`: respaldo/restore, montar y seguir una réplica, promoción,
+  rotación de master key, upgrade, y una tabla de síntoma → dónde mirar. Cada
+  comando ejecutado contra el binario real — un runbook con un flag inventado es
+  peor que ninguno, porque se descubre en el peor momento.
+
+  Escribirlo destapó dos huecos, ambos arreglados antes de publicarlo:
+
+  - **No había `luma --help`.** Cualquier subcomando mal escrito caía a `serve`,
+    así que `luma backupp` arrancaba un servidor en el puerto de producción.
+  - **No se podía crear una réplica.** `promote` existía y su par no:
+    `mark_replica` vivía en el crate y solo lo llamaban los tests. Una réplica
+    que nadie puede crear no es una funcionalidad. Ahora hay `luma demote`.
+
+  Y que el README afirmaba dos veces que RESP **no estaba implementado**, que
+  llevaba siendo falso desde el Bloque 6.
+
+  **Pendiente y no negociable para GA:** la aceptación real es *alguien externo
+  monta Luma con réplica y respaldo remoto solo con los docs*. Eso necesita una
+  persona y no se ha hecho. El documento lo dice de sí mismo en su encabezado.
 - `[ ]` **W5.6 — criterio GA:** W1 completo + W2.1 + W2.2 en verde 30 días en
   producción propia + RESP F1–F3 en GA + W5.1 + W5.5. Congelar API v1:
   rupturas ⇒ v2, nunca dentro de v1.

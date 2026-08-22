@@ -255,7 +255,7 @@ Luma no es solo un motor vectorial — es una capa de servicios de plataforma. C
 
 Todas las primitivas comparten WAL segmentado con checksums, snapshots, respaldos, cifrado en reposo y el aislamiento multi-tenant por organización.
 
-> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — tiene SPEC propio por fases en [`docs/SPEC-resp.md`](docs/SPEC-resp.md), y **todavía no está implementado**. Qué protegemos y de quién: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+> **Hoja de ruta de producto:** el plan maestro de endurecimiento — durabilidad verificada, réplica/WAL shipping, API S3-compatible, conector PostgreSQL por CDC, operabilidad y criterio de GA — está en [`docs/SPEC-producto.md`](docs/SPEC-producto.md), con el plan de ejecución en [`docs/PLAN-MAESTRO.md`](docs/PLAN-MAESTRO.md). El frente de **compatibilidad con el protocolo de Redis (RESP)** — que Celery, arq, redis-py o ioredis apunten a Luma **sin cambiar código** (`REDIS_URL=redis://luma:6379`) — está **implementado y experimental**: ver [`docs/RESP.md`](docs/RESP.md) para la matriz de comandos y las divergencias. Cómo operarlo: [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md). Qué protegemos y de quién: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ---
 
@@ -351,7 +351,7 @@ Cada colección/documento/blob queda asociado a la organización que la creó (*
 - **Cifrado en reposo** de campos sensibles con **ChaCha20-Poly1305** (AEAD), clave maestra derivada de `LUMA_MASTER_KEY`. Ciphertext auto-descriptivo `enc:v1:<b64(nonce||ct)>`.
 - **Cabeceras de seguridad** en todas las respuestas: `Content-Security-Policy` estricta (sin `unsafe-inline` para scripts; jsdelivr permitido para la doc Scalar), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` y **HSTS**.
 
-Política de reporte de vulnerabilidades: [`SECURITY.md`](SECURITY.md). Modelo de amenazas: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+Política de reporte de vulnerabilidades: [`SECURITY.md`](SECURITY.md). Modelo de amenazas: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). Inventario de `unsafe` (16 sitios, todos en el motor vectorial; el resto del crate lo prohíbe en tiempo de compilación): [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ---
 
@@ -525,7 +525,7 @@ Notas de honestidad:
 - El backend remoto **libSQL/Turso** solo se activa si `LIBSQL_URL` está definido; de lo contrario se usa el SQLite local.
 - La durabilidad depende de montar un volumen persistente para `data_dir` cuando se corre en contenedor.
 - La **comparativa contra Qdrant/Milvus** se hizo con scripts ad-hoc que **no están versionados** en el repo: las cifras son las observadas, pero hoy no se reejecutan con un comando del repositorio. Los benchmarks *internos* (`src/bin/bench.rs`) sí son reproducibles.
-- La **compatibilidad con el protocolo Redis (RESP)** está especificada en `docs/SPEC-resp.md` pero **no implementada** todavía.
+- La **compatibilidad con el protocolo Redis (RESP)** está implementada y marcada **experimental**: 57/57 comandos de las fases 2 y 3 del SPEC, verificados byte a byte contra un Redis 7 real (330 comandos, 0 divergencias) y con Celery, kombu, arq y redis-py reales — incluido un worker Celery que consume, ejecuta y devuelve el resultado. Sigue siendo experimental hasta que el nightly esté verde 7 días seguidos, que es el criterio del plan. Divergencias conocidas y qué **no** está: [`docs/RESP.md`](docs/RESP.md).
 
 ---
 
