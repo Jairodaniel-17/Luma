@@ -1,0 +1,6 @@
+{"version":2,"offset":1,"crc32":3631450787,"event":{"offset":1,"ts_ms":1787357333669,"type":"state_updated","data":{"expires_at_ms":null,"key":"golden-kv","revision":1,"value":{"marker":"kv-v4.24.0","n":1}}}}
+{"version":2,"offset":2,"crc32":4006928455,"event":{"offset":2,"ts_ms":1787357334387,"type":"vector_collection_created","data":{"collection":"golden","dim":4,"metric":"cosine"}}}
+{"version":2,"offset":3,"crc32":1155215763,"event":{"offset":3,"ts_ms":1787357334399,"type":"state_updated","data":{"expires_at_ms":null,"key":"vector:golden:manifest","revision":1,"value":{"collection":"golden","created_at_ms":1787357334399,"dim":4,"metric":"cosine","updated_at_ms":1787357334399}}}}
+{"version":2,"offset":4,"crc32":1603563005,"event":{"offset":4,"ts_ms":1787357334637,"type":"vector_upserted","data":{"collection":"golden","id":"golden-vec","meta":{"marker":"vector-v4.24.0"}}},"vec_b64":"zczMPc3MTD6amZk+zczMPg=="}
+{"version":2,"offset":5,"crc32":905966866,"event":{"offset":5,"ts_ms":1787357334870,"type":"state_updated","data":{"expires_at_ms":null,"key":"doc:golden:doc-1","revision":1,"value":{"marker":"doc-v4.24.0"}}}}
+{"version":2,"offset":6,"crc32":3174405591,"event":{"offset":6,"ts_ms":1787357334872,"type":"state_updated","data":{"expires_at_ms":null,"key":"docidx:golden:marker:doc-v4.24.0","revision":1,"value":{"ids":["doc-1"]}}}}

@@ -184,18 +184,18 @@ riesgo y deja el roadmap viejo a cero.
 El bloque del que dependen todos los demás. Construye el harness que F0.2
 también necesita (ver conflicto 2).
 
-- `[ ]` **W1.1 — matriz de crash-recovery.** Harness que mata el proceso en
+- `[x]` **W1.1 — matriz de crash-recovery.** Harness que mata el proceso en
   puntos aleatorios durante ráfagas de escritura de **cada** motor (KV, blob,
   colas, doc, vector, memoria, SQLite) y verifica al reinicio: prefijo
   confirmado íntegro, cero divergencia memoria↔redb. Diseñarlo **desde el
   inicio con tipos de registro extensibles**, porque el Bloque 2 le añade los
   de estructuras. Job nightly (no en el ciclo normal, por la regla 2).
-- `[ ]` **W1.2 — fsync por motor auditado.** Auditar la política extremo a
+- `[x]` **W1.2 — fsync por motor auditado.** Auditar la política extremo a
   extremo. Foco en los dos puntos débiles conocidos: las colas escriben JSON
   por mensaje (¿fsync del archivo *y* del directorio?) y blob (write + rename
   atómico + fsync). Entrega una tabla en `PROD_READINESS.md`: primitiva → qué
   garantiza cuando devuelve OK.
-- `[ ]` **Fixture dorado en CI** (política de compatibilidad, punto 4). Un
+- `[x]` **Fixture dorado en CI** (política de compatibilidad, punto 4). Un
   `data_dir` generado por la última release publicada, versionado; si la rama
   no lo lee íntegro, el build falla. Se regenera por release. Sin esto, la
   regla 4 es una intención y no un control.

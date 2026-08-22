@@ -3,7 +3,22 @@ use std::net::IpAddr;
 
 pub mod resolve;
 
+/// Instance configuration.
+///
+/// `#[serde(default)]` is applied at the **container** level on purpose. Without
+/// it, adding a single field makes every `luma.toml` written by an earlier
+/// version fail to parse — which is exactly what happened: the file checked into
+/// this repo stopped loading with `missing field
+/// diskann_auto_build_min_vectors`, so `luma serve` refused to start from the
+/// repo root.
+///
+/// Per-field defaults would work too, but they have to be remembered for every
+/// new field forever; the container attribute makes forward compatibility the
+/// default behaviour instead of a habit. This is rule 1 of the data
+/// compatibility policy in `docs/SPEC-producto.md`: version N reads what N-1
+/// wrote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub port: u16,
     pub bind_addr: IpAddr,
@@ -306,24 +321,67 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Load the instance configuration, honouring the documented precedence:
+    /// **CLI flags > environment > `luma.toml` > built-in defaults**.
+    ///
+    /// This used to return the parsed TOML almost verbatim, overlaying only the
+    /// four secret fields from the environment. Everything else — every env var
+    /// and every CLI flag — was silently discarded the moment a `luma.toml`
+    /// existed, which is always after the first run because the file is
+    /// auto-generated. The effect was that the shipped `docker-compose.yml`
+    /// sets `DATA_DIR`, `EMBEDDING_PROVIDER`, `RATE_LIMIT_RPS`, `TLS_*` and so
+    /// on, and none of them did anything; `--port` was parsed and thrown away.
+    /// Both the README and CLAUDE.md documented the opposite behaviour.
+    ///
+    /// The merge is done on `toml::Value` rather than field by field so a new
+    /// config field cannot be forgotten here — the same reason `#[serde(default)]`
+    /// sits on the struct rather than on each field.
     pub fn load() -> anyhow::Result<Self> {
         let path = std::path::Path::new("luma.toml");
-        if path.exists() {
-            let content = std::fs::read_to_string(path)?;
-            let mut config: Config = toml::from_str(&content)?;
-            // Secrets are never written to luma.toml (see `#[serde(skip_serializing)]`).
-            // Overlay them from the environment so they come from env at runtime only.
-            config.overlay_secrets_from_env();
+        if !path.exists() {
+            let config = Self::from_env()?;
+            if let Err(e) = config.save() {
+                tracing::warn!("Could not automatically generate luma.toml: {}", e);
+            } else {
+                tracing::info!("Auto-generated default luma.toml configuration file.");
+            }
             return Ok(config);
         }
 
-        let config = Self::from_env()?;
-        if let Err(e) = config.save() {
-            tracing::warn!("Could not automatically generate luma.toml: {}", e);
-        } else {
-            tracing::info!("Auto-generated default luma.toml configuration file.");
-        }
+        let content = std::fs::read_to_string(path)?;
+        let file: toml::Value = toml::from_str(&content)?;
+
+        // A field is treated as "set in the environment" when the env-derived
+        // config differs from the built-in default. Known corner: exporting a
+        // var to exactly its default value will not override a different value
+        // in luma.toml. Detecting genuine presence would mean naming all ~95
+        // vars in a second table that would drift from `from_env`; the CLI
+        // flags below, where precedence matters most, are handled by presence.
+        let defaults = toml::Value::try_from(Self::default())?;
+        let from_env = toml::Value::try_from(Self::from_env()?)?;
+
+        let mut merged = defaults.clone();
+        overlay(&mut merged, &file);
+        overlay_changed(&mut merged, &from_env, &defaults);
+
+        let mut config: Config = merged.try_into()?;
+        config.apply_cli_overrides();
+        config.overlay_secrets_from_env();
         Ok(config)
+    }
+
+    /// Apply the flags that can be detected by presence, so they win outright
+    /// rather than through the value-difference heuristic above.
+    fn apply_cli_overrides(&mut self) {
+        if let Some(port) = cli_port() {
+            self.port = port;
+        }
+        if let Some(dir) = resolve_data_dir_cli() {
+            self.data_dir = Some(dir);
+        }
+        if let Some(addr) = cli_bind_addr() {
+            self.bind_addr = addr;
+        }
     }
 
     /// Overlay secret fields from the environment, overwriting any values loaded
@@ -942,5 +1000,200 @@ mod tests {
     #[test]
     fn default_rate_limit_is_enabled() {
         assert_eq!(Config::default().rate_limit_rps, 100);
+    }
+}
+
+/// Copy every key present in `src` over `dst`, recursing into tables.
+fn overlay(dst: &mut toml::Value, src: &toml::Value) {
+    let (toml::Value::Table(dst_map), toml::Value::Table(src_map)) = (&mut *dst, src) else {
+        *dst = src.clone();
+        return;
+    };
+    for (key, value) in src_map {
+        match dst_map.get_mut(key) {
+            Some(existing) if existing.is_table() && value.is_table() => overlay(existing, value),
+            _ => {
+                dst_map.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// Copy keys from `src` over `dst`, but only where `src` differs from `base` —
+/// i.e. only where the environment actually said something.
+fn overlay_changed(dst: &mut toml::Value, src: &toml::Value, base: &toml::Value) {
+    let (toml::Value::Table(dst_map), toml::Value::Table(src_map), toml::Value::Table(base_map)) =
+        (&mut *dst, src, base)
+    else {
+        if src != base {
+            *dst = src.clone();
+        }
+        return;
+    };
+    for (key, value) in src_map {
+        let base_value = base_map.get(key);
+        match (dst_map.get_mut(key), base_value) {
+            (Some(existing), Some(base_value))
+                if existing.is_table() && value.is_table() && base_value.is_table() =>
+            {
+                overlay_changed(existing, value, base_value);
+            }
+            (_, Some(base_value)) if value == base_value => {}
+            _ => {
+                dst_map.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// `--port N`, when given. Presence-detected, so it beats both env and TOML.
+fn cli_port() -> Option<u16> {
+    cli_value(&["--port"]).and_then(|v| v.parse().ok())
+}
+
+/// `--data`, `--data-dir` or `--DATA_DIR`, when given.
+fn resolve_data_dir_cli() -> Option<String> {
+    cli_value(&["--data", "--data-dir", "--DATA_DIR"])
+}
+
+/// `--bind ADDR`, plus `--unsafe-bind` as a shorthand for 0.0.0.0.
+fn cli_bind_addr() -> Option<IpAddr> {
+    if let Some(value) = cli_value(&["--bind"]) {
+        if let Ok(addr) = value.parse::<IpAddr>() {
+            return Some(addr);
+        }
+        eprintln!("Valor invalido `{value}` para --bind. Ignorando flag.");
+    }
+    std::env::args()
+        .skip(1)
+        .any(|a| a == "--unsafe-bind")
+        .then(|| IpAddr::from([0, 0, 0, 0]))
+}
+
+/// First value following any of `flags` on the command line.
+fn cli_value(flags: &[&str]) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if flags.contains(&arg.as_str()) {
+            return args.next();
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::*;
+
+    fn table(pairs: &[(&str, toml::Value)]) -> toml::Value {
+        let mut map = toml::map::Map::new();
+        for (k, v) in pairs {
+            map.insert((*k).to_string(), v.clone());
+        }
+        toml::Value::Table(map)
+    }
+
+    #[test]
+    fn overlay_takes_every_key_present_in_the_source() {
+        let mut dst = table(&[
+            ("port", toml::Value::Integer(1234)),
+            ("index_kind", toml::Value::String("IVF_FLAT_Q8".into())),
+        ]);
+        let src = table(&[("port", toml::Value::Integer(9999))]);
+        overlay(&mut dst, &src);
+
+        assert_eq!(dst["port"].as_integer(), Some(9999));
+        // A key the source is silent about must survive.
+        assert_eq!(dst["index_kind"].as_str(), Some("IVF_FLAT_Q8"));
+    }
+
+    #[test]
+    fn overlay_changed_ignores_values_equal_to_the_base() {
+        // This is what makes "env overrides TOML" work without a second table of
+        // env var names: only fields the environment actually moved off their
+        // default get copied.
+        let base = table(&[
+            ("port", toml::Value::Integer(1234)),
+            ("rate_limit_rps", toml::Value::Integer(0)),
+        ]);
+        let mut dst = table(&[
+            ("port", toml::Value::Integer(9999)),
+            ("rate_limit_rps", toml::Value::Integer(0)),
+        ]);
+        let from_env = table(&[
+            // Same as the default: the environment said nothing, so the value
+            // already in dst (from luma.toml) must be left alone.
+            ("port", toml::Value::Integer(1234)),
+            // Moved off the default: the environment did speak.
+            ("rate_limit_rps", toml::Value::Integer(50)),
+        ]);
+        overlay_changed(&mut dst, &from_env, &base);
+
+        assert_eq!(
+            dst["port"].as_integer(),
+            Some(9999),
+            "an env value equal to the default must not clobber luma.toml"
+        );
+        assert_eq!(dst["rate_limit_rps"].as_integer(), Some(50));
+    }
+
+    #[test]
+    fn full_precedence_chain_defaults_then_file_then_env() {
+        let defaults = table(&[
+            ("port", toml::Value::Integer(1234)),
+            ("index_kind", toml::Value::String("IVF_FLAT_Q8".into())),
+            ("rate_limit_rps", toml::Value::Integer(0)),
+        ]);
+        let file = table(&[
+            ("port", toml::Value::Integer(9999)),
+            ("index_kind", toml::Value::String("HNSW".into())),
+        ]);
+        let from_env = table(&[
+            ("port", toml::Value::Integer(1234)),
+            ("index_kind", toml::Value::String("DiskANN".into())),
+            ("rate_limit_rps", toml::Value::Integer(50)),
+        ]);
+
+        let mut merged = defaults.clone();
+        overlay(&mut merged, &file);
+        overlay_changed(&mut merged, &from_env, &defaults);
+
+        // file only
+        assert_eq!(merged["port"].as_integer(), Some(9999));
+        // env beats file
+        assert_eq!(merged["index_kind"].as_str(), Some("DiskANN"));
+        // env beats default when the file is silent
+        assert_eq!(merged["rate_limit_rps"].as_integer(), Some(50));
+    }
+
+    #[test]
+    fn a_config_missing_fields_still_deserializes() {
+        // Rule 1 of the data compatibility policy: a luma.toml written by an
+        // earlier version must load. Before `#[serde(default)]` moved to the
+        // container, the file checked into this repo failed with
+        // `missing field diskann_auto_build_min_vectors` and the binary refused
+        // to start at all.
+        let minimal = "port = 4321\n";
+        let config: Config = toml::from_str(minimal).expect("a partial config must load");
+        assert_eq!(config.port, 4321);
+        assert_eq!(
+            config.index_kind,
+            Config::default().index_kind,
+            "unspecified fields must fall back to defaults"
+        );
+    }
+
+    #[test]
+    fn config_roundtrips_through_toml() {
+        let original = Config::default();
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.port, original.port);
+        assert_eq!(parsed.index_kind, original.index_kind);
+        // Secrets are `skip_serializing`, so they must not appear in the file.
+        assert!(
+            !text.contains("api_key ="),
+            "secrets must never be written to luma.toml"
+        );
     }
 }

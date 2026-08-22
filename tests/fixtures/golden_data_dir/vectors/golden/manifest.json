@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "dim": 4,
+  "metric": "cosine",
+  "applied_offset": 4,
+  "total_records": 1,
+  "live_count": 1,
+  "upsert_count": 1,
+  "file_len": 124,
+  "runs": [
+    {
+      "file": "run-000001.log",
+      "bytes": 124,
+      "records": 1,
+      "tombstones": 0
+    }
+  ],
+  "next_run_id": 2,
+  "run_target_bytes": 134217728,
+  "run_retention": 8,
+  "compaction_trigger_tombstone_ratio": 0.2,
+  "compaction_max_bytes_per_pass": 1073741824,
+  "centroid_count": 0,
+  "centroids_trained_at_ms": 0,
+  "ivf_clusters": 4096,
+  "ivf_nprobe": 16,
+  "q8_refine_topk": 512,
+  "ivf_min_train_vectors": 1024,
+  "ivf_retrain_min_vectors": 50000,
+  "ivf_last_trained_upsert": 0,
+  "disk_index": {
+    "kind": null,
+    "version": 0,
+    "last_built_ms": 0,
+    "graph_files": [],
+    "build_params": null
+  },
+  "diskann_last_built_upsert": 0,
+  "embedding_provider": null,
+  "embedding_model": null
+}

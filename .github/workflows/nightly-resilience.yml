@@ -1,0 +1,71 @@
+name: Nightly Resilience
+
+# W1.1 of docs/PLAN-MAESTRO.md. The regular CI run does two crash iterations per
+# engine, which is enough to catch a systematic durability bug. This job runs the
+# heavy version: many more iterations, so a kill lands at many more points in
+# each write path and timing-dependent losses have a chance to show up.
+#
+# It is deliberately separate from `ci.yml`: it takes minutes, not seconds, and a
+# flake here must not block a merge. The GA criterion in SPEC-producto is this
+# job green for a stretch of consecutive days, so it needs its own history.
+
+on:
+  schedule:
+    # 03:17 UTC — an odd minute, to stay off the top-of-hour runner rush.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Crash iterations per engine"
+        required: false
+        default: "100"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  crash-recovery:
+    name: Crash recovery matrix
+    runs-on: ubuntu-latest
+    # A hung server would otherwise sit here until the account default expires.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the binary under test
+        # The harness spawns the real `luma` binary, so it has to exist before
+        # the test starts rather than being built by it.
+        run: cargo build --bin luma --locked
+      - name: Crash recovery matrix
+        env:
+          LUMA_CRASH_ITERATIONS: ${{ github.event.inputs.iterations || '100' }}
+        # Two threads: each iteration runs a server process, and oversubscribing
+        # the runner makes health-check timeouts look like durability failures.
+        run: cargo test --test crash_recovery --locked -- --test-threads=2
+
+  durability-invariants:
+    name: Durability invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Blob and queue durability
+        run: cargo test --test durability_blob_queue --locked
+      - name: Path containment and atomic writes
+        run: cargo test --lib --locked pathsafe durability
+
+  forward-compatibility:
+    name: Reads what the last release wrote
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Golden data_dir fixture
+        # Rule 4 of the data compatibility policy: if this branch cannot read a
+        # data_dir produced by the last published release, the build fails.
+        run: cargo test --test golden_data_dir --locked
