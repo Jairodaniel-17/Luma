@@ -153,6 +153,42 @@ W2.2 (réplica de lectura). Esto es recuperación ante desastre: el bucket guard
 lo suficiente para reconstruir la instancia en otra máquina, con una pérdida
 máxima declarada.
 
+## Observabilidad (W5.1)
+
+`/v1/metrics` sirve formato Prometheus (`text/plain; version=0.0.4`), con
+contadores, gauges e histogramas de latencia por etapa.
+
+Stack de demostración listo para levantar:
+
+```bash
+docker compose -f docs/observability/docker-compose.yml up
+# Grafana en http://localhost:3000, sin login, con el dashboard ya cargado
+```
+
+Todo se aprovisiona desde ficheros, no se clica después: el criterio de
+aceptación es que arranque mostrando el dashboard **sin editar nada**.
+
+| Fichero | Qué es |
+|---|---|
+| `docs/observability/dashboard.json` | Dashboard: durabilidad, throughput, latencias por etapa, embeddings, SSE, RESP y capacidad |
+| `docs/observability/alerts.yml` | Reglas de alerta de Prometheus |
+| `docs/observability/prometheus.yml` | Scrape config (apúntalo a tu instancia) |
+
+### Por qué hay un test sobre esto
+
+`tests/observability.rs` comprueba que **cada métrica que nombran el dashboard y
+las alertas existe de verdad** en la salida del servidor.
+
+Un panel que dibuja la nada parece un sistema ocioso, y una regla de alerta
+sobre una métrica renombrada no salta nunca — que es indistinguible de que todo
+va bien. Las dos cosas son peores que no tenerlas. El test falla justo cuando
+alguien renombra una métrica sin tocar estas piezas, y está verificado que falla
+de verdad, no por vacuidad.
+
+También valida que la salida entera es texto Prometheus legal: Prometheus
+rechaza el scrape completo ante una sola línea malformada, así que una métrica
+rota se lleva por delante a todas las demás.
+
 ## SSE tuning
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).

@@ -1,0 +1,44 @@
+# Prometheus + Grafana pointed at a running Luma, with the dashboard and alert
+# rules already loaded.
+#
+# W5.1 of docs/PLAN-MAESTRO.md: the acceptance criterion is that this comes up
+# showing the dashboard with no editing, so everything is provisioned from files
+# rather than clicked in afterwards.
+#
+#   docker compose -f docs/observability/docker-compose.yml up
+#   # Grafana on http://localhost:3000 (anonymous, no login)
+#
+# Luma itself is not in here on purpose: you point this at the instance you
+# already have, which is the situation an operator is actually in.
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: luma-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+    # host.docker.internal resolves to the host on Docker Desktop; on Linux the
+    # extra_hosts entry below makes it work there too, so one file covers both.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: luma-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous admin: this is a local demo stack, and a login prompt is
+      # friction between an operator and the numbers they came to see.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana-datasource.yml:/etc/grafana/provisioning/datasources/luma.yml:ro
+      - ./grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/luma.yml:ro
+      - ./dashboard.json:/var/lib/grafana/dashboards/luma.json:ro
+    depends_on:
+      - prometheus

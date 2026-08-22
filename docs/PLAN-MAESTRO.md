@@ -322,7 +322,7 @@ alcance, no un bug.
 
 ### Bloque 7 — Operar con vista · `v4.32.0`
 
-- `[ ]` **W5.1 — métricas y trazas.** Parte del trabajo ya está hecho
+- `[~]` **W5.1 — métricas y dashboard** hechos; trazas OTLP pendientes. Parte del trabajo ya está hecho
   (`render_prometheus` existe): falta el `content-type` (Bloque 0),
   histogramas por endpoint y por motor, OTLP opt-in (`otel_endpoint`) y un
   dashboard Grafana commiteado + docker-compose de demo que lo levante sin

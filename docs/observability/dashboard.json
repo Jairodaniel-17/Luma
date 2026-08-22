@@ -1,0 +1,252 @@
+{
+  "title": "Luma",
+  "uid": "luma-overview",
+  "tags": ["luma"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Durability",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "Corrupt WAL records",
+      "description": "Any value above zero means confirmed writes may be missing. Verify the latest backup before restarting.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "targets": [{ "expr": "wal_replay_corrupt_total", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Failed snapshots",
+      "description": "Snapshots bound replay time. Failures usually mean the disk is full.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "targets": [{ "expr": "snapshot_failed_total", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "WAL replay outcomes",
+      "description": "Applied versus duplicate records. Duplicates are normal after a restart; a steady stream is not.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        { "expr": "rate(wal_replay_applied_total[5m])", "legendFormat": "applied/s", "refId": "A" },
+        { "expr": "rate(wal_replay_duplicates_total[5m])", "legendFormat": "duplicates/s", "refId": "B" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "WAL rotations",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
+      "targets": [{ "expr": "wal_rotation_total", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Snapshots taken",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 5 },
+      "targets": [{ "expr": "snapshot_total", "refId": "A" }]
+    },
+    {
+      "type": "row",
+      "title": "Throughput",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Key-value operations",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        { "expr": "rate(state_put_total[5m])", "legendFormat": "put/s", "refId": "A" },
+        { "expr": "rate(state_delete_total[5m])", "legendFormat": "delete/s", "refId": "B" },
+        { "expr": "rate(ttl_expired_total[5m])", "legendFormat": "ttl expired/s", "refId": "C" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Vector operations",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        { "expr": "rate(vector_ops_total[5m])", "legendFormat": "writes/s", "refId": "A" },
+        { "expr": "rate(vector_search_total[5m])", "legendFormat": "searches/s", "refId": "B" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Search latency percentiles",
+      "description": "p50 and p99 from the search histogram. The gap between them is what a user actually feels.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(search_duration_ms_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(search_duration_ms_bucket[5m]))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest and embedding latency",
+      "description": "Embedding is usually the dominant term; if ingest is slow and embed is not, the bottleneck is local.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(ingest_duration_ms_bucket[5m]))",
+          "legendFormat": "ingest p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(embed_duration_ms_bucket[5m]))",
+          "legendFormat": "embed p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Hybrid search stages",
+      "description": "Where a hybrid query spends its time: SQL pre-filter, vector search, then hydration.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(hybrid_sql_prefilter_duration_ms_bucket[5m]))",
+          "legendFormat": "sql prefilter p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(hybrid_vector_duration_ms_bucket[5m]))",
+          "legendFormat": "vector p99",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(hybrid_hydration_duration_ms_bucket[5m]))",
+          "legendFormat": "hydration p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Embeddings",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Embedding cache",
+      "description": "A low hit rate means every ingest pays the provider round trip.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "targets": [
+        { "expr": "rate(embed_cache_hits_total[5m])", "legendFormat": "hits/s", "refId": "A" },
+        { "expr": "rate(embed_cache_misses_total[5m])", "legendFormat": "misses/s", "refId": "B" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Embedding failures",
+      "description": "Ingestion and hybrid search both stop when the provider is down.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "targets": [{ "expr": "embed_failures_total", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Streaming and Redis protocol",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 }
+    },
+    {
+      "type": "timeseries",
+      "title": "SSE subscribers and gaps",
+      "description": "A gap means a subscriber missed events it can no longer replay.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
+      "targets": [
+        { "expr": "sse_clients", "legendFormat": "subscribers", "refId": "A" },
+        { "expr": "rate(wal_gap_total[5m])", "legendFormat": "gaps/s", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RESP connections and commands",
+      "description": "Absent entirely when the RESP listener is disabled, rather than showing a permanent zero.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
+      "targets": [
+        { "expr": "resp_connections_open", "legendFormat": "open", "refId": "A" },
+        { "expr": "rate(resp_commands_total[5m])", "legendFormat": "commands/s", "refId": "B" },
+        { "expr": "rate(resp_errors_total[5m])", "legendFormat": "errors/s", "refId": "C" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Capacity",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 }
+    },
+    {
+      "type": "stat",
+      "title": "Resident memory",
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 54 },
+      "targets": [{ "expr": "memory_rss_bytes", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Vectors stored",
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 54 },
+      "targets": [{ "expr": "total_vectors", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Collections",
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 54 },
+      "targets": [{ "expr": "active_collections", "refId": "A" }]
+    }
+  ]
+}

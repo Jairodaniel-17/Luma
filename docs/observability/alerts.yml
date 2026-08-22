@@ -1,0 +1,104 @@
+# Prometheus alert rules for Luma.
+#
+# W5.1 of docs/PLAN-MAESTRO.md. Every metric named here is asserted to exist by
+# `tests/observability.rs`, so a rule cannot quietly stop firing because a
+# metric was renamed — a silent alert is worse than no alert, since it is
+# indistinguishable from "everything is fine".
+#
+#   docker compose -f docs/observability/docker-compose.yml up
+
+groups:
+  - name: luma-durability
+    interval: 30s
+    rules:
+      - alert: LumaWalCorruptionDetected
+        # The WAL is the source of truth for every engine. Any corrupt record
+        # means the recovery story is already compromised, so this is not a
+        # rate — one is enough.
+        expr: increase(wal_replay_corrupt_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Corrupt WAL records detected during replay"
+          description: >-
+            Luma found records it could not read while replaying the WAL.
+            Confirmed writes may be missing. Verify the latest backup with
+            `luma backup --verify` before doing anything else, and do not
+            restart the process again until you have.
+
+      - alert: LumaSnapshotsFailing
+        # Snapshots bound replay time. Failing ones do not lose data on their
+        # own, but they make every restart slower until one succeeds — and they
+        # usually mean the disk is full.
+        expr: increase(snapshot_failed_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Snapshot writes are failing"
+          description: >-
+            Check free space on data_dir. Replay time grows with every failed
+            snapshot.
+
+      - alert: LumaNoSnapshotsTaken
+        # The opposite failure: nothing is erroring, nothing is happening
+        # either. Only meaningful once the instance has taken at least one.
+        expr: snapshot_total > 0 and increase(snapshot_total[6h]) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No snapshot in six hours"
+
+  - name: luma-embeddings
+    interval: 30s
+    rules:
+      - alert: LumaEmbeddingProviderFailing
+        expr: increase(embed_failures_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The embedding provider is rejecting requests"
+          description: >-
+            Ingestion and hybrid search both stop working when this persists.
+            Check the provider with `POST /v1/config/embedding/probe`.
+
+  - name: luma-streaming
+    interval: 30s
+    rules:
+      - alert: LumaSseClientsFallingBehind
+        # A gap means a subscriber missed events it can no longer replay from
+        # the buffer, so its view of the world is now incomplete.
+        expr: increase(wal_gap_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSE subscribers are being sent gap notifications"
+          description: >-
+            Consumers are slower than the event rate, or the buffer is too
+            small. Raise `live_broadcast_capacity` or slow the producers.
+
+  - name: luma-resp
+    interval: 30s
+    rules:
+      - alert: LumaRespAtConnectionLimit
+        # New clients are being refused outright. Almost always a leak in the
+        # client rather than genuine load.
+        expr: increase(resp_rejected_at_limit_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RESP connections are being refused at max_clients"
+
+      - alert: LumaRespAuthFailures
+        # A trickle is a misconfigured client; a flood is someone guessing.
+        expr: increase(resp_auth_failures_total[5m]) > 20
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Repeated failed RESP authentication attempts"
