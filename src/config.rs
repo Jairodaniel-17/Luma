@@ -252,6 +252,14 @@ pub struct Config {
     /// primary.
     #[serde(default = "default_replica_poll_interval_secs")]
     pub replica_poll_interval_secs: u64,
+    /// OTLP endpoint for trace export, e.g. `http://collector:4317`.
+    ///
+    /// Absent means no export. There is deliberately no default: guessing
+    /// `localhost:4317` would have every developer's process retrying a
+    /// connection to a collector that is not there, and the retries would be the
+    /// loudest thing in the log.
+    #[serde(default)]
+    pub otel_endpoint: Option<String>,
     /// Seconds between WAL shipping passes. 0 disables it.
     ///
     /// This interval **is** the recovery point objective: a host lost between
@@ -427,6 +435,7 @@ impl Default for Config {
             backup_remote_endpoint: String::new(),
             backup_remote_region: String::new(),
             backup_remote_allow_http: false,
+            otel_endpoint: None,
             wal_ship_interval_secs: 0,
             replica_poll_interval_secs: default_replica_poll_interval_secs(),
             resp_port: 0,
@@ -1020,6 +1029,9 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            // The standard variable name, so a collector's own documentation
+            // works without translating it into ours.
+            otel_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
             resp_port: std::env::var("RESP_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())

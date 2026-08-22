@@ -359,11 +359,21 @@ alcance, no un bug.
 
 ### Bloque 7 — Operar con vista · `v4.32.0`
 
-- `[~]` **W5.1 — métricas y dashboard** hechos; trazas OTLP pendientes. Parte del trabajo ya está hecho
-  (`render_prometheus` existe): falta el `content-type` (Bloque 0),
-  histogramas por endpoint y por motor, OTLP opt-in (`otel_endpoint`) y un
-  dashboard Grafana commiteado + docker-compose de demo que lo levante sin
-  editar nada.
+- `[x]` **W5.1 - métricas, dashboard y trazas.** `render_prometheus` con
+  `content-type` correcto, histogramas, dashboard Grafana commiteado con su
+  docker-compose de demo, y **trazas OTLP opt-in** (`otel_endpoint`, o la
+  variable estándar `OTEL_EXPORTER_OTLP_ENDPOINT`).
+
+  Sin endpoint por defecto: adivinar `localhost:4317` haría que el proceso de
+  cada desarrollador se pasara la vida reintentando una conexión a un colector
+  que no está, y los reintentos serían lo más ruidoso del log. Y si el
+  exportador no se puede construir, el servidor **arranca igual** con logging
+  local: negarse a arrancar porque falta un sidecar de telemetría convierte un
+  problema de observabilidad en una caída.
+
+  Efecto lateral deseado: el filtro por defecto pasa a ser `info`, así que un
+  `luma serve` a secas ya dice en qué puerto quedó. Antes no imprimía nada al
+  arrancar bien, y había que saber que existía `RUST_LOG` para averiguarlo.
 - `[x]` **W2.2 — réplica de lectura caliente.** El replay ya existe (arrancar
   *es* replay); convertirlo en replay continuo con offset expuesto. Alcance
   **congelado**: solo lecturas, promoción manual (`luma promote`), sin failover

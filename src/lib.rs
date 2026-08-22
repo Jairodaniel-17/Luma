@@ -71,6 +71,8 @@ pub mod search;
 /// Embedded SQLite access via the thread-safe async actor pattern.
 #[forbid(unsafe_code)]
 pub mod sqlite;
+#[forbid(unsafe_code)]
+pub mod telemetry;
 /// Vector store: segmented storage with HNSW, IVF-FLAT-Q8, and DiskANN indexing.
 pub mod vector;
 

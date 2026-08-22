@@ -7,14 +7,18 @@ mod server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // The command and config are read before tracing is installed: the OTLP
+    // endpoint lives in the config, and installing a subscriber twice is a
+    // panic. The cost is that a config error is reported without the pretty
+    // formatting, which is a fair trade for not guessing the endpoint.
+    let command = cli::parse_command()?;
+    let config = Config::load()?;
+    let mut telemetry = luma::telemetry::init(config.otel_endpoint.as_deref(), "luma");
+
     info!(
         "Starting Luma (powered by RustKissVDB) v{}",
         env!("CARGO_PKG_VERSION")
     );
-
-    let command = cli::parse_command()?;
-    let config = Config::load()?;
 
     match command {
         cli::Command::Serve => {
@@ -51,6 +55,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", cli::help_text());
         }
     }
+
+    // Flush pending spans before the process ends: the last spans before a
+
+    // shutdown are the interesting ones if it is shutting down badly.
+
+    telemetry.shutdown();
 
     Ok(())
 }
