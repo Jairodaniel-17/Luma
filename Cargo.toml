@@ -43,7 +43,7 @@ rayon = "1.8"
 sysinfo = "0.30"
 crc32fast = "1.4"
 time = { version = "0.3", features = ["formatting"] }
-lru = "0.12"
+lru = "0.18"
 rust-embed = "8.11.0"
 mime_guess = "2.0.5"
 tokio-util = { version = "0.7.18", features = ["rt"] }
@@ -75,6 +75,7 @@ tower_governor = { version = "0.4", features = ["axum"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = "0.10"
+object_store = { version = "0.14.1", features = ["aws"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = [
