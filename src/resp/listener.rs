@@ -665,51 +665,14 @@ fn try_serve(server: &RespServer, key: &str, tenant: Option<&str>, kind: &BlockK
             from_left,
             to_left,
         } => {
-            let popped = structures.mutate(key, Structure::empty_list, |s| {
-                if *from_left {
-                    s.lpop(1)
-                } else {
-                    s.rpop(1)
-                }
-            });
-            let element = match popped {
-                Ok(applied) => match applied.value.into_iter().next() {
-                    Some(bytes) => bytes,
-                    None => return Served::Empty,
-                },
-                Err(e) => return Served::Value(Value::Error(format!("WRONGTYPE {e}"))),
-            };
-            // Same non-atomicity as the synchronous `LMOVE`, and the same
-            // compensating push-back: see `docs/RESP.md`. Blocking makes the
-            // window no wider, but it does make it more likely to be hit,
-            // because the element arrives at an arbitrary moment.
-            let pushed = structures.mutate(destination, Structure::empty_list, |s| {
-                let values = vec![element.clone()];
-                if *to_left {
-                    s.lpush(values)
-                } else {
-                    s.rpush(values)
-                }
-            });
-            match pushed {
-                Ok(_) => Served::Value(Value::bulk(element)),
-                Err(e) => {
-                    let restore = structures.mutate(key, Structure::empty_list, |s| {
-                        let values = vec![element.clone()];
-                        if *from_left {
-                            s.lpush(values)
-                        } else {
-                            s.rpush(values)
-                        }
-                    });
-                    if let Err(restore_error) = restore {
-                        tracing::error!(
-                            source = %key,
-                            "BLMOVE lost an element: push failed ({e}) and restore failed ({restore_error})"
-                        );
-                    }
-                    Served::Value(Value::Error(format!("WRONGTYPE {e}")))
-                }
+            // Atomic across both keys, like the synchronous `LMOVE`. The
+            // blocking form is where it matters most: the element arrives at
+            // an arbitrary moment, so the window a pop-then-push leaves open
+            // is the one a dying worker is most likely to land in.
+            match structures.move_element(key, destination, *from_left, *to_left) {
+                Ok(Some(element)) => Served::Value(Value::bulk(element)),
+                Ok(None) => Served::Empty,
+                Err(e) => Served::Value(Value::Error(format!("WRONGTYPE {e}"))),
             }
         }
     }

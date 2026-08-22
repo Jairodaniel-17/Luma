@@ -930,12 +930,11 @@ fn ltrim(structures: &Structures<'_>, session: &Session, args: &[Vec<u8>]) -> Va
 
 /// `LMOVE src dst LEFT|RIGHT LEFT|RIGHT` and its older spelling `RPOPLPUSH`.
 ///
-/// **Not atomic across the two keys.** The engine commits one key per WAL
-/// record, so the move is a pop followed by a push. If the push fails, the
-/// element is pushed back where it came from — but a process death in the
-/// window loses it. Redis is atomic here, and clients that use `RPOPLPUSH` for
-/// reliable delivery (kombu's unacked queue) are buying exactly that guarantee,
-/// so the divergence is recorded in `docs/RESP.md` rather than left implied.
+/// Atomic across both keys: one WAL record, guarded by a compare-and-swap on
+/// each. It used to be a pop followed by a push with a compensating push-back
+/// on failure, which handled a rejected destination but not a process death in
+/// between — and losing the element there is the one thing a client using
+/// `RPOPLPUSH` for reliable delivery is paying to avoid.
 fn lmove(
     structures: &Structures<'_>,
     session: &Session,
@@ -951,68 +950,24 @@ fn lmove(
         if args.len() != 4 {
             return wrong_args("lmove");
         }
-        let from_left = match side(&args[2]) {
-            Some(left) => left,
-            None => return err("ERR syntax error"),
-        };
-        let to_left = match side(&args[3]) {
-            Some(left) => left,
-            None => return err("ERR syntax error"),
+        let (Some(from_left), Some(to_left)) = (side(&args[2]), side(&args[3])) else {
+            return err("ERR syntax error");
         };
         (&args[0], &args[1], from_left, to_left)
     };
 
-    let source_key = scoped(session, source);
-    let destination_key = scoped(session, destination);
-
-    let popped = structures.mutate(&source_key, Structure::empty_list, |s| {
-        if from_left {
-            s.lpop(1)
-        } else {
-            s.rpop(1)
-        }
-    });
-    let element = match popped {
-        Ok(applied) => match applied.value.into_iter().next() {
-            Some(bytes) => bytes,
-            // An empty source is a nil, and nothing was moved.
-            None => return Value::nil(),
-        },
-        Err(e) => return structure_error(e),
-    };
-
-    let pushed = structures.mutate(&destination_key, Structure::empty_list, |s| {
-        let values = vec![element.clone()];
-        if to_left {
-            s.lpush(values)
-        } else {
-            s.rpush(values)
-        }
-    });
-    match pushed {
-        Ok(_) => Value::bulk(element),
-        Err(e) => {
-            // Put it back. Losing the element on a WRONGTYPE destination would
-            // be a silent data loss triggered by a client's own type mistake.
-            let restore = structures.mutate(&source_key, Structure::empty_list, |s| {
-                let values = vec![element.clone()];
-                if from_left {
-                    s.lpush(values)
-                } else {
-                    s.rpush(values)
-                }
-            });
-            if let Err(restore_error) = restore {
-                tracing::error!(
-                    source = %source_key,
-                    "LMOVE lost an element: push failed ({e}) and restore failed ({restore_error})"
-                );
-            }
-            structure_error(e)
-        }
+    match structures.move_element(
+        &scoped(session, source),
+        &scoped(session, destination),
+        from_left,
+        to_left,
+    ) {
+        Ok(Some(element)) => Value::bulk(element),
+        // An empty source is a nil, and nothing was moved.
+        Ok(None) => Value::nil(),
+        Err(e) => structure_error(e),
     }
 }
-
 /// `LEFT` → true, `RIGHT` → false, anything else → a syntax error.
 fn side(raw: &[u8]) -> Option<bool> {
     if raw.eq_ignore_ascii_case(b"LEFT") {

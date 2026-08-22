@@ -189,22 +189,34 @@ dentro de una transacción, que es lo que los clientes usan.
 | `SPOP`, `SRANDMEMBER` | Eligen miembros al azar | Los toman en el orden almacenado | El uso real de ambos es "dame cualquier miembro", y una respuesta determinista es verificable. Un cliente que dependa de la aleatoriedad para repartir carga no la obtendrá |
 | `HSCAN`, `SSCAN`, `ZSCAN` | Cursor sobre buckets de hash | Índice sobre el orden almacenado (un `BTreeMap`/`BTreeSet`, estable) | Da la garantía que los clientes usan de verdad — un elemento presente durante toda la iteración se devuelve al menos una vez — sin emular una tabla hash que no existe. Igual que el `SCAN` de primer nivel |
 | `HSCAN`/`SSCAN`/`ZSCAN` `COUNT` | Es una pista | Es un límite de página | Nunca devuelve más de lo pedido, y evita que un `COUNT 10` recorra un millón de entradas |
-| `LMOVE`, `RPOPLPUSH`, `BLMOVE`, `BRPOPLPUSH` | Atómicos | **No atómicos entre las dos claves** | Ver abajo |
 | `ZADD` con `+inf`/`-inf` | Se almacena | Se almacena | Fue un bug hasta que se arregló: JSON no tiene infinito y `serde_json` lo escribía como `null`, así que el `ZADD` decía OK y el sorted set entero quedaba ilegible. Los scores infinitos ahora se serializan como cadena; los finitos siguen siendo números y los datos existentes no cambian |
 
 #### La atomicidad de `LMOVE` y compañía
 
-El motor confirma **una clave por registro del WAL**, así que un movimiento
-entre dos claves es un pop seguido de un push, no una operación. Si el push
-falla, el elemento se devuelve a su lista de origen — hay un test que lo fija.
-Pero una muerte del proceso entre las dos operaciones pierde el elemento.
+**Son atómicos.** Un movimiento entre dos claves escribe **un solo registro**
+de WAL con las dos mutaciones, protegido por un compare-and-swap sobre cada
+clave. Los registros llevan checksum y el replay se detiene en el primero
+corrupto, así que tras un corte el lote está entero o no está: no hay estado
+en el que el elemento esté en ninguna de las dos listas, ni en las dos.
 
-Esto importa porque es exactamente la garantía que un cliente compra al usar
+Importa porque es exactamente la garantía que un cliente compra al usar
 `BRPOPLPUSH`: la cola de *unacked* de kombu existe para que una tarea no se
-pierda si el worker muere. Con Luma, la ventana es pequeña pero real. Cerrarla
-requiere un registro de WAL transaccional multiclave, que es un cambio de diseño
-del motor y no un detalle del protocolo; queda anotado como tal en vez de
-implícito aquí.
+pierda si el worker muere a media entrega. Antes esto era un pop seguido de un
+push, con un push de compensación si el destino fallaba — cubría un destino del
+tipo equivocado, pero no una muerte del proceso en medio.
+
+`RPOPLPUSH mylist mylist`, el idiom de rotación, pasa por el mismo camino: una
+clave, una lectura, una escritura. Tratarlo como dos claves prepararía dos
+revisiones para la misma y la segunda escritura fallaría su propio
+compare-and-swap.
+
+Fijado en `tests/atomic_move.rs`, que **no** mata el proceso a propósito:
+acertar el microsegundo entre dos escrituras depende del reloj, y una ejecución
+verde no probaría nada. En su lugar demuestra el mecanismo — un registro, y un
+registro truncado que reproduce como si el movimiento nunca hubiera ocurrido.
+Escribir el arnés destapó de paso que la ruta de replay de la proyección redb
+no tenía rama para el registro de lote: cada movimiento se habría perdido en el
+primer arranque tras un corte.
 
 ### Multi-tenancy
 

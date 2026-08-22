@@ -262,6 +262,79 @@ impl StateDb {
         Ok(offset)
     }
 
+    /// Apply a `state_batch` record: every op in one write transaction.
+    ///
+    /// One transaction because this projection is durable. Committing the ops
+    /// separately would let a crash leave the projection holding half a move
+    /// with `applied_offset` already past it, and replay would not repair it.
+    pub fn apply_state_batch(&self, ev: &EventRecord) -> anyhow::Result<()> {
+        if ev.offset <= self.applied_offset()? {
+            return Ok(());
+        }
+        let ops = ev
+            .data
+            .get("ops")
+            .and_then(|v| v.as_array())
+            .context("state_batch without ops")?;
+
+        let mut wtx = self.db.begin_write()?;
+        {
+            let mut state = wtx.open_table(STATE)?;
+            let mut expires = wtx.open_table(EXPIRES)?;
+            for op in ops {
+                let key = op
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .context("batch op without key")?;
+
+                // Whatever the op, the previous expiry index entry goes: it
+                // points at a value that is about to be replaced or removed.
+                let previous = state
+                    .get(key.as_bytes())?
+                    .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok());
+                if let Some(previous) = &previous {
+                    if let Some(at) = previous.expires_at_ms {
+                        let idx = expires_key(at, key.as_bytes());
+                        let _ = expires.remove(idx.as_slice())?;
+                    }
+                }
+
+                if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
+                    let _ = state.remove(key.as_bytes())?;
+                    continue;
+                }
+
+                let revision = op.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
+                let expires_at_ms = op.get("expires_at_ms").and_then(|v| v.as_u64());
+                // Through `StoredVal` so a raw payload lands as bytes rather
+                // than as its marker object, exactly as the single-key path.
+                let value = op
+                    .get("value")
+                    .cloned()
+                    .map(serde_json::from_value::<crate::engine::stored::StoredVal>)
+                    .transpose()
+                    .unwrap_or(None)
+                    .unwrap_or_default();
+
+                let stored = StoredValue {
+                    value,
+                    revision,
+                    expires_at_ms,
+                };
+                state.insert(key.as_bytes(), serde_json::to_vec(&stored)?.as_slice())?;
+                if let Some(at) = expires_at_ms {
+                    let idx = expires_key(at, key.as_bytes());
+                    expires.insert(idx.as_slice(), 0u8)?;
+                }
+            }
+        }
+        set_applied_offset(&mut wtx, ev.offset)?;
+        // Same eventual durability as the single-key path: the WAL is the
+        // durable source of truth and this is a projection rebuilt from it.
+        wtx.set_durability(Durability::Eventual);
+        wtx.commit()?;
+        Ok(())
+    }
     pub fn apply_state_deleted(&self, ev: &EventRecord) -> anyhow::Result<()> {
         if ev.offset <= self.applied_offset()? {
             return Ok(());

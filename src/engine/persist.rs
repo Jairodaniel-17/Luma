@@ -488,6 +488,27 @@ fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore,
                 state.apply_wal_set(key.to_string(), value, revision, expires_at_ms);
             }
         }
+        // One record, several keys. Replaying it op by op is safe because
+        // the record itself is checksummed: replay stops at the first
+        // corrupt record, so a half-written batch is never seen at all.
+        "state_batch" => {
+            let ops = ev.data.get("ops").and_then(|v| v.as_array());
+            for op in ops.into_iter().flatten() {
+                let Some(key) = op.get("key").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
+                    let _ = state.delete(key);
+                    continue;
+                }
+                let value = op.get("value").cloned().unwrap_or(serde_json::Value::Null);
+                let value = serde_json::from_value::<crate::engine::stored::StoredVal>(value)
+                    .unwrap_or_default();
+                let revision = op.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
+                let expires_at_ms = op.get("expires_at_ms").and_then(|v| v.as_u64());
+                state.apply_wal_set(key.to_string(), value, revision, expires_at_ms);
+            }
+        }
         "state_deleted" => {
             if let Some(key) = ev.data.get("key").and_then(|v| v.as_str()) {
                 let _ = state.delete(key);

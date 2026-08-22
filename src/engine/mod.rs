@@ -66,6 +66,26 @@ const VECTOR_MANIFEST_PREFIX: &str = "vector:";
 const VECTOR_MANIFEST_SUFFIX: &str = ":manifest";
 const VECTOR_MANIFEST_SCAN_LIMIT: usize = 4096;
 
+/// One mutation inside an atomic batch.
+///
+/// Deliberately not a general transaction API: it exists so a two-key move can
+/// be one durable unit, and widening it invites callers to build transactions
+/// the storage layer does not otherwise promise.
+#[derive(Debug, Clone)]
+pub enum StateOp {
+    Put {
+        key: String,
+        value: stored::StoredVal,
+        ttl_ms: Option<u64>,
+        /// Compare-and-swap guard. Every guard in a batch is checked before
+        /// any op is written, so a mismatch on one key cannot leave another
+        /// half-applied.
+        if_revision: Option<u64>,
+    },
+    Delete {
+        key: String,
+    },
+}
 impl Engine {
     pub fn new(config: Config, shutdown: CancellationToken) -> anyhow::Result<Self> {
         // The in-RAM replay buffer retains full event payloads (a vector upsert
@@ -229,6 +249,14 @@ impl Engine {
                         }
                         "state_deleted" => {
                             db.apply_state_deleted(&ev)
+                                .map_err(|err| std::io::Error::other(err.to_string()))?;
+                        }
+                        // Without this arm a batch record replayed as nothing at
+                        // all, so every atomic move was lost on the first
+                        // restart after a crash -- the exact failure the batch
+                        // exists to prevent, reintroduced one layer down.
+                        "state_batch" => {
+                            db.apply_state_batch(&ev)
                                 .map_err(|err| std::io::Error::other(err.to_string()))?;
                         }
                         "vector_collection_created"
@@ -614,6 +642,108 @@ impl Engine {
     /// Takes `impl Into<StoredVal>` so the many existing callers that pass a
     /// `serde_json::Value` are unchanged, while a caller with raw bytes can hand
     /// over a `StoredVal::Raw` directly.
+    /// Apply several key mutations as one durable unit.
+    ///
+    /// ## Why this exists
+    ///
+    /// `RPOPLPUSH`/`LMOVE` and their blocking forms move an element between two
+    /// keys, and Redis makes that atomic. Doing it as a pop followed by a push
+    /// meant a process death in between lost the element — which is precisely
+    /// the guarantee a client buys by using `BRPOPLPUSH` for reliable delivery.
+    /// kombu's unacked queue is built on it.
+    ///
+    /// ## What makes it atomic
+    ///
+    /// One WAL record carries every op. Records are checksummed and replay
+    /// stops at the first corrupt one, so after a crash the batch is either
+    /// entirely present or entirely absent — there is no state in which half of
+    /// it was applied. The redb projection commits all ops in a single write
+    /// transaction for the same reason.
+    ///
+    /// Every revision is checked and allocated *before* anything is written.
+    /// `prepare_put_revision` is a pure read, so a failed compare-and-swap on
+    /// the second key leaves the first untouched.
+    ///
+    /// An empty batch is a no-op rather than an empty WAL record: replaying
+    /// nothing is not worth a checksum.
+    pub fn put_state_batch(&self, ops: Vec<StateOp>) -> Result<(), EngineError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let now = now_ms();
+
+        // Phase 1: validate and allocate. Nothing is written yet, so a
+        // rejection here leaves the store exactly as it was.
+        let mut prepared = Vec::with_capacity(ops.len());
+        for op in &ops {
+            match op {
+                StateOp::Put {
+                    key,
+                    value,
+                    ttl_ms,
+                    if_revision,
+                } => {
+                    let revision = if let Some(db) = &self.0.state_db {
+                        db.prepare_put_revision(key, *if_revision)?
+                    } else {
+                        self.0.state.prepare_put_revision(key, *if_revision)?
+                    };
+                    let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
+                    prepared.push(serde_json::json!({
+                        "op": "put",
+                        "key": key,
+                        "revision": revision,
+                        "value": value.clone(),
+                        "expires_at_ms": expires_at_ms,
+                    }));
+                }
+                StateOp::Delete { key } => {
+                    prepared.push(serde_json::json!({ "op": "delete", "key": key }));
+                }
+            }
+        }
+
+        // Phase 2: one record, one publish, one projection commit.
+        let append = self.0.events.append_guard();
+        let event = self.0.events.next_record(
+            "state_batch",
+            serde_json::json!({ "ops": prepared.clone() }),
+        );
+        if let Some(persist) = &self.0.persist {
+            persist.append_event(&event)?;
+        }
+        if let Some(db) = &self.0.state_db {
+            db.apply_state_batch(&event)?;
+        } else {
+            for (op, entry) in ops.iter().zip(prepared.iter()) {
+                match op {
+                    StateOp::Put { key, value, .. } => {
+                        let revision = entry["revision"].as_u64().unwrap_or(1);
+                        let expires_at_ms = entry["expires_at_ms"].as_u64();
+                        self.0.state.apply_put_with_revision(
+                            key.clone(),
+                            value.clone(),
+                            revision,
+                            expires_at_ms,
+                        );
+                    }
+                    StateOp::Delete { key } => {
+                        let _ = self.0.state.delete(key);
+                    }
+                }
+            }
+        }
+        self.0.events.publish_record(event);
+        drop(append);
+        self.metrics().inc_events();
+        for op in &ops {
+            if matches!(op, StateOp::Put { .. }) {
+                self.metrics().inc_state_put();
+            }
+        }
+        Ok(())
+    }
+
     pub fn put_state(
         &self,
         key: String,

@@ -884,6 +884,13 @@ fn normalize_index(index: i64, len: i64) -> i64 {
 /// the plain keyspace does not enumerate structures.
 pub const STRUCTURE_PREFIX: &str = "struct:";
 
+/// A compare-and-swap that lost; the caller re-reads and tries again.
+struct Retry;
+
+/// Serialize a structure for storage.
+fn encode(structure: &Structure) -> Result<serde_json::Value, StructureError> {
+    serde_json::to_value(structure).map_err(|_| StructureError::WrongType)
+}
 pub fn structure_key(key: &str) -> String {
     format!("{STRUCTURE_PREFIX}{key}")
 }
@@ -1015,6 +1022,148 @@ impl<'a> Structures<'a> {
     }
 
     /// Delete a structure. Returns whether it existed.
+    /// Move one element between two list keys as a single durable unit.
+    ///
+    /// This is `RPOPLPUSH`/`LMOVE` and their blocking forms. Redis makes the
+    /// move atomic, and clients buy exactly that guarantee: kombu's unacked
+    /// queue exists so a task is not lost when a worker dies mid-delivery.
+    /// Implemented as a pop followed by a push, a process death in between
+    /// dropped the element — the one failure the primitive is meant to
+    /// prevent.
+    ///
+    /// Both keys are read, the change is computed, and both are written in one
+    /// WAL record guarded by a compare-and-swap on each. A concurrent writer on
+    /// either key restarts the whole attempt rather than clobbering it.
+    ///
+    /// Returns the moved element, or `None` when the source is empty.
+    ///
+    /// `source == destination` is handled by the same path: the rotation idiom
+    /// `RPOPLPUSH mylist mylist` reads one structure, rotates it, and writes it
+    /// once. Treating it as two keys would prepare two revisions for the same
+    /// key and the second write would fail its own compare-and-swap.
+    pub fn move_element(
+        &self,
+        source: &str,
+        destination: &str,
+        from_left: bool,
+        to_left: bool,
+    ) -> Result<Option<Bytes>, StructureError> {
+        use crate::engine::StateOp;
+
+        const MAX_ATTEMPTS: usize = 16;
+        for _ in 0..MAX_ATTEMPTS {
+            let same_key = source == destination;
+
+            let (mut src, src_revision) = match self.load(source)? {
+                Some((structure, revision)) => (structure, Some(revision)),
+                // Nothing to move. Not an error: `RPOPLPUSH` on an empty
+                // source is a nil.
+                None => return Ok(None),
+            };
+
+            if same_key {
+                let popped = if from_left {
+                    src.lpop(1)?
+                } else {
+                    src.rpop(1)?
+                };
+                let Some(element) = popped.into_iter().next() else {
+                    return Ok(None);
+                };
+                let values = vec![element.clone()];
+                if to_left {
+                    src.lpush(values)?;
+                } else {
+                    src.rpush(values)?;
+                }
+                match self.write_one(source, &src, src_revision) {
+                    Ok(()) => return Ok(Some(element)),
+                    Err(Retry) => continue,
+                }
+            }
+
+            let (mut dst, dst_revision) = match self.load(destination)? {
+                Some((structure, revision)) => (structure, Some(revision)),
+                None => (Structure::empty_list(), None),
+            };
+
+            // The type check happens before anything is popped: a destination
+            // holding the wrong type must not cost the source its element.
+            dst.as_list()?;
+
+            let popped = if from_left {
+                src.lpop(1)?
+            } else {
+                src.rpop(1)?
+            };
+            let Some(element) = popped.into_iter().next() else {
+                return Ok(None);
+            };
+            let values = vec![element.clone()];
+            if to_left {
+                dst.lpush(values)?;
+            } else {
+                dst.rpush(values)?;
+            }
+
+            let mut ops = Vec::with_capacity(2);
+            // An emptied source is deleted, matching what `mutate` does and
+            // what Redis does: a list with no elements does not exist.
+            if src.is_empty() {
+                ops.push(StateOp::Delete {
+                    key: structure_key(source),
+                });
+            } else {
+                ops.push(StateOp::Put {
+                    key: structure_key(source),
+                    value: crate::engine::stored::StoredVal::Json(encode(&src)?),
+                    ttl_ms: None,
+                    if_revision: src_revision,
+                });
+            }
+            ops.push(StateOp::Put {
+                key: structure_key(destination),
+                value: crate::engine::stored::StoredVal::Json(encode(&dst)?),
+                ttl_ms: None,
+                if_revision: dst_revision,
+            });
+
+            match self.engine.put_state_batch(ops) {
+                Ok(()) => return Ok(Some(element)),
+                // Someone wrote to either key between our read and our write.
+                // Nothing was applied, so start over from their value.
+                Err(crate::engine::EngineError::State(
+                    crate::engine::StateError::RevisionMismatch,
+                )) => continue,
+                Err(_) => return Err(StructureError::WrongType),
+            }
+        }
+        Err(StructureError::TooManyEntries)
+    }
+
+    /// Write one structure back under a compare-and-swap, deleting it when it
+    /// came out empty.
+    fn write_one(
+        &self,
+        key: &str,
+        structure: &Structure,
+        expected: Option<u64>,
+    ) -> Result<(), Retry> {
+        if structure.is_empty() {
+            let _ = self.engine.delete_state(&structure_key(key));
+            return Ok(());
+        }
+        let Ok(encoded) = encode(structure) else {
+            return Err(Retry);
+        };
+        match self
+            .engine
+            .put_state(structure_key(key), encoded, None, expected)
+        {
+            Ok(_) => Ok(()),
+            Err(_) => Err(Retry),
+        }
+    }
     pub fn delete(&self, key: &str) -> bool {
         self.engine
             .delete_state(&structure_key(key))

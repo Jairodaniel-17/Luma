@@ -449,6 +449,17 @@ Defectos reales encontrados al pasar las puertas de verificación, que no
 pertenecen a ningún bloque y no se arreglan de paso para no ensanchar el
 alcance en silencio.
 
+- `[x]` **Atomicidad multiclave de `LMOVE`/`RPOPLPUSH`/`BLMOVE`/`BRPOPLPUSH`.**
+  Cerrado. El motor tiene ahora un registro de WAL multiclave
+  (`Engine::put_state_batch`) y el movimiento se aplica como un solo registro
+  con compare-and-swap sobre ambas claves. Era la garantía que kombu compra al
+  usar `BRPOPLPUSH` para su cola de *unacked*. Fijado en `tests/atomic_move.rs`.
+
+  Escribir el arnés destapó un segundo defecto: la ruta de replay de la
+  proyección redb no tenía rama para el registro de lote, así que cada
+  movimiento se habría perdido en el primer arranque tras un corte — el mismo
+  fallo que el lote existe para evitar, reintroducido una capa más abajo.
+
 - `[ ]` **IVF pierde el vecino correcto tras `retrain_ivf`.**
   `tests/vector_ivf.rs::ivf_large_dataset_retrain_consistent` (1M vectores,
   128 clústeres, `nprobe=8`) falla: el top-1 pasa de `vec-102857`
