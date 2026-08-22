@@ -73,6 +73,9 @@ def client(s3_url, access_key, secret_key):
 
 CHECKS = []
 
+# Filled in by main(), for the checks that need a second client.
+CREDENTIALS = (None, None)
+
 
 def check(fn):
     CHECKS.append(fn)
@@ -332,6 +335,8 @@ def main():
     args = parser.parse_args()
 
     access_key, secret_key = mint_credentials(args.admin, args.api_key, args.org)
+    global CREDENTIALS
+    CREDENTIALS = (access_key, secret_key)
     s3 = client(args.s3, access_key, secret_key)
 
     width = max(len(c.__name__) for c in CHECKS) + 2

@@ -180,6 +180,57 @@ jobs:
       - name: Server log on failure
         if: failure()
         run: cat luma.log
+  s3-e2e:
+    name: S3 API against boto3
+    runs-on: ubuntu-latest
+    # W3.2. This suite existed and was never wired into CI, which is how a
+    # check that passed *with the bug still present* went unnoticed: boto3
+    # declined to send a chunk-framed body, so the test exercised nothing.
+    # `s3_chunked.py` builds that request by hand for exactly that reason, and
+    # both suites run here so neither can rot again.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install boto3
+        run: pip install boto3
+      - name: Build Luma
+        run: cargo build --release --locked
+      - name: Start Luma with the S3 listener
+        run: |
+          cat > luma.toml <<'EOF'
+          port = 18080
+          bind_addr = "127.0.0.1"
+          data_dir = "s3-e2e-data"
+          s3_port = 19000
+          embedding_provider = "mock"
+          EOF
+          LUMA_MASTER_KEY=ci-s3-key ./target/release/luma serve > luma.log 2>&1 &
+          for _ in $(seq 1 40); do
+            if grep -q 'rk_live_' luma.log 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo 'Luma never printed its bootstrap key'; cat luma.log; exit 1
+      - name: Object operations, ETags and presigned URLs
+        run: |
+          KEY=$(grep -oE 'rk_live_[A-Za-z0-9_-]+' luma.log | head -1)
+          python tests/e2e/s3_client.py \
+            --admin http://127.0.0.1:18080 \
+            --s3 http://127.0.0.1:19000 \
+            --api-key "$KEY"
+      - name: Chunk-framed uploads
+        run: |
+          KEY=$(grep -oE 'rk_live_[A-Za-z0-9_-]+' luma.log | head -1)
+          python tests/e2e/s3_chunked.py \
+            --admin http://127.0.0.1:18080 \
+            --s3 http://127.0.0.1:19000 \
+            --api-key "$KEY"
+      - name: Server log on failure
+        if: failure()
+        run: cat luma.log
+
   ivf-recall:
     name: IVF recall at 1M vectors
     runs-on: ubuntu-latest
@@ -231,7 +282,7 @@ jobs:
           echo 'the committed bundle matches the source'
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, ivf-recall, admin-ui]
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, s3-e2e, ivf-recall, admin-ui]
     runs-on: ubuntu-latest
     if: always()
     steps:

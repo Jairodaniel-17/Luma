@@ -519,10 +519,28 @@ alcance, no un bug.
   tenía ningún guard de cuota**, así que subir los mismos bytes por partes se
   saltaba el límite que `PutObject` sí comprobaba. Ahora se cobra por parte.
 
-  **Lo que sigue abierto y dicho en voz alta:** las firmas por chunk de un cuerpo
-  *streaming* se aceptan sin verificar (la petición queda autenticada, el cuerpo
-  no) y no hay acceso anónimo, que es deliberado. Sin probar: cargas de tamaño
-  real y escritura concurrente sobre la misma clave.
+  *Cuerpos chunked.* Ya se desenmarcan y se verifica la firma de cada chunk. Y
+  aqui el plan se estaba enganando a si mismo: lo tenia declarado como «se
+  aceptan sin verificar», cuando no habia **ningun** parser. El marco de chunks
+  se guardaba dentro del objeto — no un cuerpo sin verificar, un objeto corrupto
+  con un 200 de respuesta. Como el marco hay que parsearlo de todas formas,
+  verificar cuesta un HMAC por chunk, y la cadena (cada chunk firma la firma
+  anterior) fija ademas su orden, que un digest por chunk no atraparia.
+
+  **Un verde falso, y como se detecto.** La primera version de la prueba usaba
+  boto3 con `payload_signing_enabled`, y **pasaba con el bug presente**: botocore
+  eligio una subida firmada normal, asi que la prueba no ejercitaba nada. Se
+  descubrio reintroduciendo el bug a proposito para ver si la prueba fallaba. No
+  fallo. Se sustituyo por `tests\e2e\s3_chunked.py`, que construye la peticion a
+  mano segun el formato documentado de AWS; con el parser quitado, sus tres
+  comprobaciones fallan y la primera dice el sintoma exacto: 600 bytes de payload
+  almacenados como 946.
+
+  Y la razon de que nada de esto saliera antes: **el suite de S3 no corria en
+  CI**. Ahora hay un job, `S3 API against boto3`, con las dos suites.
+
+  **Lo que sigue abierto, y es deliberado:** no hay acceso anonimo. Sin probar:
+  cargas de tamano real y escritura concurrente sobre la misma clave.
 - `[~]` **W3.3 - OpenAPI sin deriva** (la superficie de rutas está fijada; los
   esquemas siguen escritos a mano).
 

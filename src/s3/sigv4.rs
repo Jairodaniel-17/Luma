@@ -21,13 +21,16 @@
 //!    body. Requiring a hash would reject boto3's default for uploads over the
 //!    multipart threshold.
 //!
-//! ## What is deliberately not supported
+//! ## Chunk-framed bodies
 //!
-//! Chunked `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` bodies are recognised in the
-//! signature but the per-chunk signatures are not verified — the framing is
-//! accepted and the content is taken as-is. That is a real gap, stated here
-//! rather than left for someone to discover: it means a client using chunked
-//! upload gets authentication of the request but not of the body.
+//! `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` is unpacked and each chunk's signature
+//! is verified — see `dechunk_and_verify`.
+//!
+//! This was recorded as "recognised in the signature, per-chunk signatures not
+//! verified", which understated it. There was no parser at all, so the framing
+//! was stored **inside the object**: not an unverified body, a corrupt one, with
+//! a 200 in reply. `tests/e2e/s3_chunked.py` demonstrates it — with the parser
+//! removed, a 600-byte payload arrives as 946 bytes.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -271,6 +274,167 @@ fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.clone())
+}
+
+/// What a `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` request needs to be unpacked.
+///
+/// Everything here is already known once the request's own signature has been
+/// verified; it is grouped so the caller can hand it to `dechunk_and_verify`
+/// without re-deriving anything.
+pub struct StreamingContext {
+    /// The request signature, which seeds the chunk signature chain.
+    pub seed_signature: String,
+    pub amz_date: String,
+    pub scope: String,
+    pub signing_key: Vec<u8>,
+}
+
+impl StreamingContext {
+    /// Build the context from a request whose own signature already verified.
+    ///
+    /// Only meaningful after `verify` returned `Ok`: the seed of the chunk chain
+    /// **is** the request signature, so building this from an unverified request
+    /// would anchor the whole chain to a value an attacker chose.
+    pub fn from_verified(
+        credential: &Credential,
+        secret: &str,
+        headers: &[(String, String)],
+    ) -> Option<StreamingContext> {
+        Some(StreamingContext {
+            seed_signature: credential.signature.clone(),
+            amz_date: header_value(headers, "x-amz-date")?,
+            scope: format!(
+                "{}/{}/{}/aws4_request",
+                credential.date, credential.region, credential.service
+            ),
+            signing_key: signing_key(
+                secret,
+                &credential.date,
+                &credential.region,
+                &credential.service,
+            ),
+        })
+    }
+}
+
+/// Whether a payload hash says the body arrives chunk-framed.
+///
+/// Distinct from `is_unsigned_payload`: `UNSIGNED-PAYLOAD` means the body is
+/// exactly what it looks like and simply is not hashed, while `STREAMING-…`
+/// means the bytes on the wire are **not** the object — they carry framing that
+/// has to be removed. Treating the two the same is what stored the framing.
+pub fn is_streaming_payload(hash: &str) -> bool {
+    hash.starts_with("STREAMING-")
+}
+
+/// Unpack a chunk-framed body and verify each chunk's signature.
+///
+/// **The framing has to be removed whether or not it is verified**, and that is
+/// what makes this less optional than it looked. A chunked body arrives as
+/// `<hex-size>;chunk-signature=<sig>\r\n<data>\r\n` repeated, ending with a
+/// zero-length chunk. Storing what arrives — which is what happens with no
+/// parser — writes the size lines and the signatures *into the object*. Not an
+/// unverified body: a corrupt one, silently, with a 200 in reply.
+///
+/// Since the frame must be parsed anyway, verifying costs one HMAC per chunk.
+/// Each chunk signs the previous signature, so the chain also fixes the chunks'
+/// **order** — a reordered or dropped chunk breaks it, which a per-chunk digest
+/// alone would not catch.
+///
+/// AWS's string to sign, per chunk:
+///
+/// ```text
+/// AWS4-HMAC-SHA256-PAYLOAD \n date \n scope \n previous-signature \n
+/// sha256("") \n sha256(chunk-data)
+/// ```
+pub fn dechunk_and_verify(body: &[u8], ctx: &StreamingContext) -> Result<Vec<u8>, Verdict> {
+    let mut payload = Vec::with_capacity(body.len());
+    let mut previous = ctx.seed_signature.clone();
+    let mut at = 0usize;
+    let empty_hash = hex::encode(Sha256::digest(b""));
+    let mut saw_final = false;
+
+    while at < body.len() {
+        // The header line runs to CRLF: "<hex-size>;chunk-signature=<hex>".
+        let Some(line_end) = find(body, at, b"\r\n") else {
+            return Err(Verdict::Malformed("a chunk header had no CRLF"));
+        };
+        let header = &body[at..line_end];
+        at = line_end + 2;
+
+        let (size_part, signature) = match split_once(header, b';') {
+            Some((size, rest)) => {
+                let Some(sig) = rest.strip_prefix(b"chunk-signature=") else {
+                    return Err(Verdict::Malformed("a chunk header had no chunk-signature"));
+                };
+                (size, sig)
+            }
+            None => return Err(Verdict::Malformed("a chunk header had no signature field")),
+        };
+
+        let size_text = String::from_utf8_lossy(size_part);
+        let Ok(size) = usize::from_str_radix(size_text.trim(), 16) else {
+            return Err(Verdict::Malformed("a chunk size was not hexadecimal"));
+        };
+        // A size the body cannot contain is a truncated upload, not a big one.
+        if at + size > body.len() {
+            return Err(Verdict::Malformed(
+                "a chunk claimed more data than was sent",
+            ));
+        }
+        let data = &body[at..at + size];
+
+        let to_sign = format!(
+            "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+            ctx.amz_date,
+            ctx.scope,
+            previous,
+            empty_hash,
+            hex::encode(Sha256::digest(data))
+        );
+        let expected = hex::encode(hmac(&ctx.signing_key, to_sign.as_bytes()));
+        if !constant_time_eq(expected.as_bytes(), signature) {
+            return Err(Verdict::Mismatch);
+        }
+        previous = expected;
+
+        at += size;
+        // Every chunk, including the last, is followed by CRLF.
+        if size > 0 {
+            if body.get(at..at + 2) != Some(b"\r\n") {
+                return Err(Verdict::Malformed("a chunk was not terminated by CRLF"));
+            }
+            at += 2;
+            payload.extend_from_slice(data);
+        } else {
+            saw_final = true;
+            break;
+        }
+    }
+
+    // Without the terminating zero-length chunk the upload was cut short. Taking
+    // what arrived would store a truncated object and report success.
+    if !saw_final {
+        return Err(Verdict::Malformed(
+            "the body ended without its final zero-length chunk",
+        ));
+    }
+    Ok(payload)
+}
+
+fn find(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    if from >= haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
+}
+
+fn split_once(slice: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
+    let at = slice.iter().position(|&b| b == byte)?;
+    Some((&slice[..at], &slice[at + 1..]))
 }
 
 fn hmac(key: &[u8], message: &[u8]) -> Vec<u8> {
@@ -761,6 +925,150 @@ mod tests {
         // missing Authorization header would be read as an unsigned URL.
         assert!(parse_presigned("list-type=2&prefix=a").is_none());
         assert!(parse_presigned("").is_none());
+    }
+
+    // ── chunk-framed bodies ──────────────────────────────────────────────────
+
+    fn streaming_ctx() -> StreamingContext {
+        StreamingContext {
+            seed_signature: "seed0000".to_string(),
+            amz_date: "20260822T120000Z".to_string(),
+            scope: "20260822/us-east-1/s3/aws4_request".to_string(),
+            signing_key: signing_key("secret", "20260822", "us-east-1", "s3"),
+        }
+    }
+
+    /// Frame chunks the way AWS does, signing each against the previous.
+    ///
+    /// Built here rather than hardcoded so the test exercises the parser against
+    /// the real construction, and so a chunk can be tampered with afterwards.
+    fn frame(chunks: &[&[u8]], ctx: &StreamingContext) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut previous = ctx.seed_signature.clone();
+        let empty = hex::encode(Sha256::digest(b""));
+        let sign = |data: &[u8], previous: &mut String| -> String {
+            let to_sign = format!(
+                "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+                ctx.amz_date,
+                ctx.scope,
+                previous,
+                empty,
+                hex::encode(Sha256::digest(data))
+            );
+            let sig = hex::encode(hmac(&ctx.signing_key, to_sign.as_bytes()));
+            *previous = sig.clone();
+            sig
+        };
+        for data in chunks {
+            let sig = sign(data, &mut previous);
+            out.extend_from_slice(
+                format!("{:x};chunk-signature={}\r\n", data.len(), sig).as_bytes(),
+            );
+            out.extend_from_slice(data);
+            out.extend_from_slice(b"\r\n");
+        }
+        let sig = sign(b"", &mut previous);
+        out.extend_from_slice(format!("0;chunk-signature={sig}\r\n").as_bytes());
+        out
+    }
+
+    #[test]
+    fn a_chunked_body_yields_the_payload_without_its_framing() {
+        // The bug this closes: with no parser at all, the size lines and
+        // signatures were stored *inside the object*. Not an unverified body —
+        // a corrupt one, with a 200 in reply.
+        let ctx = streaming_ctx();
+        let framed = frame(&[b"hello ", b"world"], &ctx);
+        assert!(
+            framed
+                .windows(16)
+                .any(|w| w == b"chunk-signature=".as_ref()),
+            "the fixture must actually be framed"
+        );
+        assert_eq!(dechunk_and_verify(&framed, &ctx).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn a_tampered_chunk_is_refused() {
+        let ctx = streaming_ctx();
+        let mut framed = frame(&[b"hello ", b"world"], &ctx);
+        // Flip one byte of payload, leaving the framing intact.
+        let at = framed
+            .windows(5)
+            .position(|w| w == b"world")
+            .expect("the payload is in there");
+        framed[at] = b'W';
+        assert_eq!(dechunk_and_verify(&framed, &ctx), Err(Verdict::Mismatch));
+    }
+
+    #[test]
+    fn a_body_anchored_to_a_different_seed_is_refused() {
+        // The chain's seed is the request's own signature, so a body lifted from
+        // another request does not verify here even though every chunk is
+        // internally consistent.
+        let ctx = streaming_ctx();
+        let framed = frame(&[b"payload"], &ctx);
+        let other = StreamingContext {
+            seed_signature: "different".to_string(),
+            ..streaming_ctx()
+        };
+        assert_eq!(dechunk_and_verify(&framed, &other), Err(Verdict::Mismatch));
+    }
+
+    #[test]
+    fn a_truncated_body_is_refused_rather_than_stored_short() {
+        // Without the terminating zero-length chunk the upload was cut off.
+        // Keeping what arrived would store a short object and report success.
+        let ctx = streaming_ctx();
+        let framed = frame(&[b"hello ", b"world"], &ctx);
+        let cut = framed.len() - 20;
+        assert!(matches!(
+            dechunk_and_verify(&framed[..cut], &ctx),
+            Err(Verdict::Malformed(_))
+        ));
+
+        // And a chunk claiming more data than was sent.
+        let lying = b"ff;chunk-signature=deadbeef\r\nshort\r\n";
+        assert!(matches!(
+            dechunk_and_verify(lying, &ctx),
+            Err(Verdict::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_framing_is_an_error_not_a_panic() {
+        let ctx = streaming_ctx();
+        for body in [
+            &b""[..],
+            b"no-crlf",
+            b"5\r\nhello\r\n",                 // no signature field
+            b"5;nope=1\r\nhello\r\n",          // wrong field name
+            b"zz;chunk-signature=aa\r\nx\r\n", // size not hex
+        ] {
+            let _ = dechunk_and_verify(body, &ctx);
+        }
+    }
+
+    #[test]
+    fn an_empty_chunked_body_is_the_empty_object() {
+        // A zero-byte upload is legitimate, and it arrives as just the final
+        // chunk. Refusing it would make a 0-byte PUT fail.
+        let ctx = streaming_ctx();
+        let framed = frame(&[], &ctx);
+        assert_eq!(dechunk_and_verify(&framed, &ctx).unwrap(), b"");
+    }
+
+    #[test]
+    fn streaming_and_unsigned_are_not_the_same_question() {
+        // `UNSIGNED-PAYLOAD` means the body is exactly what it looks like and
+        // simply is not hashed. `STREAMING-…` means the wire bytes are not the
+        // object. Treating them alike is what stored the framing.
+        assert!(is_unsigned_payload("UNSIGNED-PAYLOAD"));
+        assert!(!is_streaming_payload("UNSIGNED-PAYLOAD"));
+        assert!(is_streaming_payload("STREAMING-AWS4-HMAC-SHA256-PAYLOAD"));
+        assert!(!is_streaming_payload(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
     }
 
     #[test]

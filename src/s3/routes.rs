@@ -108,6 +108,34 @@ type S3Result<T> = Result<T, S3Error>;
 /// The authenticated caller.
 struct Caller {
     org_id: String,
+    /// Present only when the body arrives chunk-framed
+    /// (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`). See `unframe_body`.
+    streaming: Option<sigv4::StreamingContext>,
+}
+
+/// The object's actual bytes, given what arrived on the wire.
+///
+/// For an ordinary request the two are the same. For a chunk-framed one they are
+/// not, and writing the wire bytes stores the chunk sizes and signatures *inside
+/// the object* — a corrupt object with a 200 in reply. So the framing is removed
+/// here, and since it has to be parsed anyway, each chunk's signature is checked
+/// on the way through.
+fn unframe_body(caller: &Caller, body: &Bytes) -> Result<Vec<u8>, S3Error> {
+    let Some(ctx) = &caller.streaming else {
+        return Ok(body.to_vec());
+    };
+    sigv4::dechunk_and_verify(body, ctx).map_err(|verdict| match verdict {
+        sigv4::Verdict::Mismatch => S3Error::access_denied("a chunk signature did not match"),
+        sigv4::Verdict::Malformed(reason) => {
+            S3Error::new(StatusCode::BAD_REQUEST, "InvalidRequest", reason)
+        }
+        // `dechunk_and_verify` returns only the two above on failure.
+        sigv4::Verdict::Ok => S3Error::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            "unreachable",
+        ),
+    })
 }
 
 /// Verify SigV4 and resolve the organization.
@@ -214,6 +242,17 @@ async fn authenticate(
     match verdict {
         sigv4::Verdict::Ok => Ok(Caller {
             org_id: found.org_id,
+            // Only built for a chunk-framed body, and only after the request's
+            // own signature verified — the chain's seed *is* that signature.
+            streaming: if sigv4::is_streaming_payload(&payload_hash) {
+                sigv4::StreamingContext::from_verified(
+                    &credential,
+                    &found.secret_access_key,
+                    &header_pairs,
+                )
+            } else {
+                None
+            },
         }),
         sigv4::Verdict::Mismatch => Err(S3Error::access_denied("the signature did not match")),
         sigv4::Verdict::Malformed(reason) => Err(S3Error::new(
@@ -624,6 +663,11 @@ pub async fn object_put(
     )
     .await?;
     own_bucket(&state, &caller, &bucket).await?;
+
+    // Before anything looks at the bytes: for a chunk-framed body the wire
+    // content is not the object, and every length, hash and write below has to
+    // see the unframed payload.
+    let body = Bytes::from(unframe_body(&caller, &body)?);
 
     // Multipart part upload arrives on the same path with these parameters.
     if let (Some(upload_id), Some(part)) = (params.get("uploadId"), params.get("partNumber")) {
