@@ -54,8 +54,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Blob and queue durability
         run: cargo test --test durability_blob_queue --locked
-      - name: Path containment and atomic writes
-        run: cargo test --lib --locked pathsafe durability
+      # Two invocations, not one: `cargo test` takes a single filter, and
+      # `cargo test --lib pathsafe durability` fails with "unexpected argument
+      # 'durability'". It did so on this job's very first run — the nightly had
+      # never actually executed, so a broken command line sat here unnoticed
+      # since the day it was written.
+      - name: Path containment
+        run: cargo test --lib --locked pathsafe
+      - name: Atomic and durable writes
+        run: cargo test --lib --locked durability
 
   forward-compatibility:
     name: Reads what the last release wrote
