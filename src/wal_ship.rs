@@ -98,6 +98,11 @@ impl ShipState {
 /// Result of one shipping pass.
 #[derive(Debug, Default, PartialEq)]
 pub struct ShipReport {
+    /// Set when this pass shipped nothing because another node owns the prefix.
+    ///
+    /// Distinct from "nothing to ship": the caller needs to tell a quiet node
+    /// from a fenced one, and an empty report would look identical.
+    pub fenced: bool,
     /// Segments uploaded this pass.
     pub uploaded: Vec<String>,
     /// Bytes uploaded this pass.
@@ -121,6 +126,29 @@ pub async fn ship_once(
 ) -> Result<ShipReport> {
     let prefix = prefix.trim_end_matches('/');
     let mut report = ShipReport::default();
+
+    // Before writing anything: if somebody promoted a replica, this node no
+    // longer owns the prefix. Two nodes shipping into one prefix interleave
+    // their segments, and replay then reads two histories spliced together —
+    // not a mess that can be untangled afterwards.
+    //
+    // Checked here rather than at startup because the promotion can happen at
+    // any moment, and the whole point is that a node which *was* the primary
+    // finds out.
+    match crate::fencing::standing(store, prefix, data_dir).await? {
+        crate::fencing::Standing::Current => {}
+        crate::fencing::Standing::Fenced { local, remote } => {
+            report.fenced = true;
+            tracing::error!(
+                local_epoch = local,
+                remote_epoch = remote,
+                "WAL shipping stopped: another node claimed a later epoch for this \
+                 prefix. This node must not write again — stop it, or re-seed it \
+                 from the new primary."
+            );
+            return Ok(report);
+        }
+    }
 
     let snapshot = data_dir.join("snapshot.json");
     if snapshot.exists() {

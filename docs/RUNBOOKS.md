@@ -22,7 +22,7 @@ momento.
 | Respaldo remoto (S3/R2/GCS/MinIO) | Implementado; **SigV4 contra MinIO real sin probar** |
 | Réplica de lectura | Verificada en tests; promoción manual |
 | Failover automático | **No existe.** W2.3 en el plan |
-| Fencing por epoch contra split-brain | **No existe.** Ver el aviso en §3 |
+| Fencing por epoch contra split-brain | Implementado. Ventana de un intervalo de envío, ver §3 |
 | Puerto RESP | Experimental. Ver `docs/RESP.md` |
 
 ---
@@ -150,11 +150,17 @@ Ese es el número que va en un SLA, no un promedio.
 
 ## 3. Promover una réplica
 
-> **Leer antes de ejecutar.** No hay fencing. Si el primario antiguo sigue vivo y
-> escribiendo al bucket, promover te deja **dos primarios** y el WAL se entrelaza.
-> Eso no se arregla solo. El fencing por epoch es W2.3 del plan y todavía no
-> existe, y por eso la promoción es manual: la decide una persona que puede
-> comprobar que el otro está parado.
+> **Hay fencing por epoch, y aun así para el primario antiguo primero.** Al
+> promover, el nodo nuevo reclama la siguiente *epoch* en el prefijo remoto. El
+> primario antiguo la lee en su siguiente pasada de envío y **deja de escribir**.
+>
+> La ventana es un intervalo de `wal_ship_interval_secs`, no cero. Dentro de esa
+> ventana los dos pueden escribir y sus segmentos se entrelazan, lo que no se
+> arregla después. Por eso el paso 1 sigue siendo pararlo: el fencing es la red,
+> no el plan.
+>
+> Cerrar la ventana del todo requiere un lease con quórum real, que es un sistema
+> de consenso; el plan lo mantiene en backlog con criterio de entrada explícito.
 
 ```bash
 # 1. PARA el primario antiguo. De verdad. Comprueba que el proceso murió.
@@ -169,8 +175,23 @@ luma promote
 luma role      # → primary
 luma serve
 
-# 4. Reapunta a los clientes.
+# 4. Comprueba que el nuevo primario se anuncia como tal.
+curl -s -o /dev/null -w '%{http_code}
+' localhost:1234/v1/health/primary
+# → 200 en un primario, 503 en una réplica
+
+# 5. Reapunta a los clientes.
 ```
+
+El paso 4 es el health-check que debe usar un proxy: responde con un **código de
+estado**, no con un campo dentro de un cuerpo, porque un balanceador puede rutar
+sobre eso sin parsear JSON. Una réplica contesta **503** y no 404: el endpoint
+existe y el nodo está sano, simplemente no es el que acepta escrituras — un 404
+se leería como un proxy mal configurado.
+
+Si `luma promote` no puede alcanzar el destino remoto, lo dice y **no falla**: la
+promoción local ya ocurrió, así que devolver un error sugeriría que nada cambió.
+En ese caso el primario antiguo NO está cercado y hay que pararlo a mano.
 
 `luma promote` sobre algo que ya es primario **falla**, no reporta éxito:
 

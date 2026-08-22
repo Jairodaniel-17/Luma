@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
             cli::run_restore(&config, path)?;
         }
         cli::Command::Promote => {
-            cli::run_promote(&config)?;
+            cli::run_promote(&config).await?;
         }
         cli::Command::Demote => {
             cli::run_demote(&config)?;

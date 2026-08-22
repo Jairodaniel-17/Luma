@@ -39,6 +39,14 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub uptime_secs: u64,
+    /// `primary` or `replica`. Included so a human checking one endpoint can see
+    /// which node they are talking to; a proxy should use
+    /// `/v1/health/primary`, which answers with a status code it can route on
+    /// without parsing a body.
+    pub role: String,
+    /// The fencing epoch this node believes it owns. 0 means it has never
+    /// claimed one.
+    pub epoch: u64,
 }
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
@@ -46,7 +54,51 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         status: state.engine.health().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: 0,
+        role: node_role(&state).name().to_string(),
+        epoch: node_epoch(&state),
     })
+}
+
+/// Which role this data directory holds.
+fn node_role(state: &AppState) -> crate::replica::Role {
+    match &state.config.data_dir {
+        Some(dir) => crate::replica::Role::from_data_dir(std::path::Path::new(dir)),
+        // No data directory means nothing persistent and nothing to replicate,
+        // so it is a primary by construction rather than by marker.
+        None => crate::replica::Role::default(),
+    }
+}
+
+fn node_epoch(state: &AppState) -> u64 {
+    match &state.config.data_dir {
+        Some(dir) => crate::fencing::local_epoch(std::path::Path::new(dir)),
+        None => 0,
+    }
+}
+
+/// `GET /v1/health/primary` — 200 only on a writable primary.
+///
+/// W2.3 of `docs/PLAN-MAESTRO.md`: the health check a proxy points at.
+///
+/// A status code rather than a field in a body, because that is what load
+/// balancers can act on without parsing JSON — and a proxy that has to parse a
+/// body to decide where writes go is a proxy that will one day route them by
+/// parsing it wrong.
+///
+/// A replica answers **503**, not 404: the endpoint exists and the node is
+/// healthy, it just is not the one that takes writes. A 404 would read as a
+/// misconfigured proxy.
+pub async fn health_primary(State(state): State<AppState>) -> impl IntoResponse {
+    let role = node_role(&state);
+    let body = axum::Json(serde_json::json!({
+        "role": role.name(),
+        "epoch": node_epoch(&state),
+    }));
+    if role.is_read_only() {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, body)
+    } else {
+        (axum::http::StatusCode::OK, body)
+    }
 }
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {

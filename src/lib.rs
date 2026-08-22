@@ -53,6 +53,8 @@ pub mod durability;
 /// Core engine: subsystem coordination, event sourcing, WAL, and persistence.
 #[forbid(unsafe_code)]
 pub mod engine;
+#[forbid(unsafe_code)]
+pub mod fencing;
 /// NS-Mem: the agent memory layer (episodic, semantic, procedural, working).
 #[forbid(unsafe_code)]
 pub mod memory;

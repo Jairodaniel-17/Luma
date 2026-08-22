@@ -273,6 +273,7 @@ pub fn router(deps: RouterDeps) -> Router<()> {
         .route("/index.html", get(routes_ui::handler))
         .merge(routes_docs::routes_docs())
         .route("/v1/health", get(routes_state::health))
+        .route("/v1/health/primary", get(routes_state::health_primary))
         .route("/v1/metrics", get(routes_state::metrics))
         // ---- Enterprise accounts: register / login are public; the rest need a token ----
         .route("/v1/auth/register", post(routes_accounts::register))

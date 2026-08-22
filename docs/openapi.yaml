@@ -2445,6 +2445,34 @@ components:
           example: Configuration saved to luma.toml. A server restart is required for changes to take effect.
 
 paths:
+  /v1/health/primary:
+    get:
+      tags:
+      - Meta
+      summary: 200 only on a writable primary
+      description: 'The health check a proxy points at. A status code rather than a
+        field in a body, because that is what load balancers act on without parsing
+        JSON.
+
+        A replica answers 503, not 404: the endpoint exists and the node is healthy,
+        it simply is not the one that takes writes.
+
+        '
+      responses:
+        '200':
+          description: This node is a primary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  epoch:
+                    type: integer
+                    format: int64
+        '503':
+          description: This node is a read-only replica
   /v1/health:
     get:
       tags:

@@ -436,9 +436,28 @@ alcance, no un bug.
 
 ### Bloque 9 — Adopción por protocolo · `v4.34.0`
 
-- `[ ]` **W2.3 — failover asistido.** Health-check para proxy, secuencia de
-  promoción documentada, fencing por epoch contra split-brain. Honesto: no es
-  HA automática.
+- `[x]` **W2.3 - failover asistido.** Health-check para proxy
+  (`GET /v1/health/primary`: 200 en un primario, 503 en una réplica), secuencia
+  de promoción en `docs/RUNBOOKS.md`, y **fencing por epoch** contra
+  split-brain. Honesto: no es HA automática — nada aquí elige nada.
+
+  Un objeto pequeño en el prefijo remoto lleva un contador. `luma promote`
+  reclama el siguiente. Cada pasada de envío lo lee primero, y un nodo cuya
+  epoch va por detrás **deja de enviar**. Sin eso, un primario antiguo que
+  siguiera vivo escribiría en el mismo prefijo que el nuevo y sus segmentos se
+  entrelazarían: el replay lee un solo stream, y ese stream serían dos
+  historias empalmadas — no un lío que se pueda desenredar después.
+
+  Un objeto y no un lock porque los object stores no ofrecen locks que
+  sobrevivan a la muerte de un cliente, y un lock que sobrevive a su dueño es
+  peor que ninguno. Un contador monótono no necesita liveness: gana quien lo
+  subió último, y el que pierde se entera leyendo.
+
+  **Ventana declarada:** un intervalo de envío, no cero. Dentro de esa ventana
+  los dos pueden escribir. Cerrarla requiere un lease con quórum real, que es
+  consenso — backlog con criterio de entrada explícito. Por eso el runbook
+  sigue diciendo que se pare el primario antiguo primero: el fencing es la red,
+  no el plan.
 - `[ ]` **W3.2 — API S3-compatible** sobre el blob store: `PUT/GET/HEAD/DELETE
   Object`, `ListObjectsV2`, buckets, multipart, presigned URLs, **SigV4**. XML
   idéntico al de S3. Entra **por spike con criterio de salida**: validar contra

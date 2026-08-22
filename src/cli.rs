@@ -118,16 +118,50 @@ pub fn help_text() -> String {
     .join("\n")
 }
 
-pub fn run_promote(config: &Config) -> anyhow::Result<()> {
+pub async fn run_promote(config: &Config) -> anyhow::Result<()> {
     let data_dir = config
         .data_dir
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no hay data_dir configurado"))?;
-    luma::replica::promote(std::path::Path::new(&data_dir))?;
-    println!(
-        "Promovido a primario: {data_dir}\n\
-         Asegúrate de que el primario anterior está detenido antes de que vuelva a escribir."
-    );
+    let path = std::path::Path::new(&data_dir);
+    luma::replica::promote(path)?;
+
+    // Claiming the next epoch is what actually stops the old primary. The
+    // marker only changes this node; the epoch changes what the *prefix* says,
+    // and the old primary reads it on its next shipping pass.
+    //
+    // Done after removing the marker, so a failure here leaves a node that is a
+    // primary locally and has fenced nobody — visible, and fixed by running the
+    // command again. The reverse order would fence the old primary while this
+    // one stayed read-only, which is an outage with no writer at all.
+    match luma::backup_remote::store_from_config(config) {
+        Ok(Some(target)) => {
+            let epoch = luma::fencing::claim_next_epoch(&target.store, &target.prefix).await?;
+            luma::fencing::set_local_epoch(path, epoch)?;
+            println!(
+                "Promovido a primario: {data_dir}\n\
+                 Epoch {epoch} reclamada en {}: el primario anterior dejará de \
+                 enviar en su próxima pasada.",
+                target.prefix
+            );
+        }
+        Ok(None) => {
+            println!(
+                "Promovido a primario: {data_dir}\n\
+                 Sin destino remoto configurado, así que no hay epoch que reclamar: \
+                 asegúrate tú de que el primario anterior está detenido."
+            );
+        }
+        Err(e) => {
+            // The local promotion already happened, so this is a warning rather
+            // than an error: returning `Err` would suggest nothing had changed.
+            println!(
+                "Promovido a primario: {data_dir}\n\
+                 ATENCIÓN: no se pudo reclamar la epoch remota ({e}). El primario \
+                 anterior NO está cercado; detenlo a mano."
+            );
+        }
+    }
     Ok(())
 }
 
