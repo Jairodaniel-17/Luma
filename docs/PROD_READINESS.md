@@ -54,6 +54,40 @@ su journaling de metadatos y no en un flush que hagamos nosotros.
 > exista, la tabla describe el código auditado, no un comportamiento verificado
 > bajo fallo.
 
+## Respaldos: qué cubren (W1.4)
+
+`luma backup` copia **todo** el estado persistente:
+
+| Contenido | Cómo se copia |
+|---|---|
+| SQLite | `VACUUM INTO` — copia consistente sin parar el actor |
+| `snapshot.json` | copia directa |
+| Segmentos del WAL | todos los `events-*.log` presentes |
+| `state.redb` | copia directa. Es reconstruible desde el WAL, pero copiarlo hace que un restore arranque servido en vez de replayando |
+| `vectors/` | árbol completo: manifest, runs y mmaps |
+| `blobs/` | árbol completo |
+| `queues/` | árbol completo |
+
+Cada backup lleva un `manifest.json` con la versión que lo escribió y los
+conteos de cada cosa. Sin él un restore es adivinar: no se distingue un backup
+vacío de uno cuyo directorio de vectores falló al copiarse en silencio.
+
+> **Histórico, por si aparece un backup viejo:** hasta esta versión el backup
+> copiaba solo SQLite + snapshot + WAL. Vectores, blobs y colas quedaban fuera.
+> Blobs y colas **no están en el WAL**, así que en un backup anterior a este
+> cambio esa pérdida es definitiva; los vectores solo se recuperarían si aún se
+> conservan los segmentos del WAL que los construyeron, cosa que
+> `wal_retention_segments` garantiza que no.
+
+### Verificación
+
+`luma backup --verify` restaura el backup, corre `PRAGMA integrity_check` sobre
+el SQLite y compara los conteos reales contra el manifest. La tarea de fondo
+verifica **cada** backup que toma: leer de vuelta lo recién escrito es barato al
+lado de producirlo, y es la diferencia entre tener backups y creer que se tienen.
+Un backup que no verifica se reporta como **error**, no como un backup correcto
+con una nota — quien lea los logs no puede interpretarlo como "hay backup".
+
 ## SSE tuning
 
 - `LIVE_BROADCAST_CAPACITY`: sube si hay bursts (default `4096`).

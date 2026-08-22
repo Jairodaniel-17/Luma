@@ -8,7 +8,7 @@ pub enum Command {
     DiskAnnBuild(crate::diskann::DiskAnnCli),
     DiskAnnTune(crate::diskann::DiskAnnCli),
     DiskAnnStatus { collection: String },
-    Backup,
+    Backup { verify: bool },
     Restore { path: String },
 }
 
@@ -23,7 +23,11 @@ pub fn parse_command() -> anyhow::Result<Command> {
         "serve" => Ok(Command::Serve),
         "vacuum" => parse_vacuum(&args[2..]),
         "diskann" => crate::diskann::parse_diskann(&args[2..]),
-        "backup" => Ok(Command::Backup),
+        "backup" => Ok(Command::Backup {
+            // A backup nobody has restored is a hypothesis, so `--verify`
+            // reads it back and checks it against its own manifest.
+            verify: args.iter().any(|a| a == "--verify"),
+        }),
         "restore" => {
             let path = args.get(2).cloned().ok_or_else(|| {
                 anyhow::anyhow!("restore requiere <path> al directorio de backup")
@@ -34,9 +38,21 @@ pub fn parse_command() -> anyhow::Result<Command> {
     }
 }
 
-pub fn run_backup(config: &Config) -> anyhow::Result<()> {
+pub fn run_backup(config: &Config, verify: bool) -> anyhow::Result<()> {
     let dest = luma::backup::run_backup(config)?;
     println!("Backup creado en {}", dest.display());
+    if verify {
+        let manifest = luma::backup::verify(&dest)?;
+        println!(
+            "Verificado: sqlite={} snapshot={} wal={} colecciones={} blobs={} mensajes={}",
+            manifest.sqlite,
+            manifest.snapshot,
+            manifest.wal_segments,
+            manifest.vector_collections,
+            manifest.blob_files,
+            manifest.queue_files
+        );
+    }
     Ok(())
 }
 
