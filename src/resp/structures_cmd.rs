@@ -636,6 +636,7 @@ mod tests {
             Dispatch::Reply(value) => value,
             Dispatch::Quit => panic!("unexpected quit"),
             Dispatch::Block { .. } => panic!("unexpected block"),
+            Dispatch::PubSub(_) => panic!("unexpected pubsub"),
         }
     }
 

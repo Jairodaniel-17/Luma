@@ -104,6 +104,25 @@ pub enum Dispatch {
         /// Pop from the head (`BLPOP`) or the tail (`BRPOP`).
         left: bool,
     },
+    /// A Pub/Sub command. Handled by the connection loop, which owns the
+    /// subscriber inbox and the socket it has to be pushed to.
+    PubSub(PubSubCommand),
+}
+
+/// A Pub/Sub request, parsed but not yet executed.
+#[derive(Debug)]
+pub enum PubSubCommand {
+    Subscribe(Vec<Vec<u8>>),
+    PSubscribe(Vec<Vec<u8>>),
+    /// `None` means every channel, which is what a bare UNSUBSCRIBE does.
+    Unsubscribe(Option<Vec<Vec<u8>>>),
+    PUnsubscribe(Option<Vec<Vec<u8>>>),
+    Publish {
+        channel: Vec<u8>,
+        payload: Vec<u8>,
+    },
+    Channels(Option<Vec<u8>>),
+    NumSub(Vec<Vec<u8>>),
 }
 
 /// Execute one command.
@@ -214,6 +233,46 @@ pub fn dispatch(
 
         // ── blocking reads ───────────────────────────────────────────────────
         "BLPOP" | "BRPOP" => blocking_pop(session, rest, name == "BLPOP"),
+
+        // ── pub/sub ──────────────────────────────────────────────────────────
+        "SUBSCRIBE" | "PSUBSCRIBE" => {
+            if rest.is_empty() {
+                return Dispatch::Reply(err(format!(
+                    "ERR wrong number of arguments for '{}' command",
+                    name.to_lowercase()
+                )));
+            }
+            Dispatch::PubSub(if name == "SUBSCRIBE" {
+                PubSubCommand::Subscribe(rest.to_vec())
+            } else {
+                PubSubCommand::PSubscribe(rest.to_vec())
+            })
+        }
+        "UNSUBSCRIBE" | "PUNSUBSCRIBE" => {
+            let targets = (!rest.is_empty()).then(|| rest.to_vec());
+            Dispatch::PubSub(if name == "UNSUBSCRIBE" {
+                PubSubCommand::Unsubscribe(targets)
+            } else {
+                PubSubCommand::PUnsubscribe(targets)
+            })
+        }
+        "PUBLISH" => {
+            if rest.len() != 2 {
+                return Dispatch::Reply(err("ERR wrong number of arguments for 'publish' command"));
+            }
+            Dispatch::PubSub(PubSubCommand::Publish {
+                channel: rest[0].clone(),
+                payload: rest[1].clone(),
+            })
+        }
+        "PUBSUB" => match rest.first().map(|a| command_name(a)).as_deref() {
+            Some("CHANNELS") => Dispatch::PubSub(PubSubCommand::Channels(rest.get(1).cloned())),
+            Some("NUMSUB") => Dispatch::PubSub(PubSubCommand::NumSub(rest[1..].to_vec())),
+            // NUMPAT is answered as 0 rather than refused: a dashboard that
+            // polls it should not see an error it cannot act on.
+            Some("NUMPAT") => Dispatch::Reply(Value::Integer(0)),
+            _ => Dispatch::Reply(err("ERR Unknown PUBSUB subcommand")),
+        },
         "EXPIREAT" => Dispatch::Reply(expire_at(engine, session, rest, 1000)),
         "PEXPIREAT" => Dispatch::Reply(expire_at(engine, session, rest, 1)),
         "RENAME" => Dispatch::Reply(rename(engine, session, rest, false)),
@@ -1119,6 +1178,11 @@ fn exec(
                 // with a zero timeout, so it behaves as its non-blocking twin.
                 replies.push(Value::Array(None));
             }
+            // Pub/Sub needs the connection's inbox, which EXEC does not have.
+            // Redis likewise refuses subscribe commands inside a transaction.
+            Dispatch::PubSub(_) => replies.push(Value::Error(
+                "ERR SUBSCRIBE is not allowed in transactions".into(),
+            )),
         }
     }
     Value::Array(Some(replies))
@@ -1276,6 +1340,7 @@ mod tests {
             // The test helper is synchronous; a blocking command is reported
             // rather than silently turned into something else.
             Dispatch::Block { .. } => Value::Simple("BLOCK".into()),
+            Dispatch::PubSub(_) => Value::Simple("PUBSUB".into()),
         }
     }
 
@@ -1394,6 +1459,7 @@ mod tests {
             Dispatch::Reply(v) => v,
             Dispatch::Quit => panic!(),
             Dispatch::Block { .. } => panic!("unexpected block"),
+            Dispatch::PubSub(_) => panic!("unexpected pubsub"),
         };
         assert!(matches!(reply, Value::Error(m) if m.starts_with("WRONGPASS")));
         assert!(!s.authenticated);

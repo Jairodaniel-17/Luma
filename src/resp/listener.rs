@@ -100,6 +100,12 @@ pub struct RespServer {
     /// Wakeups for blocking reads. Shared across connections, because the
     /// pusher and the waiter are different clients by definition.
     pub notifier: Arc<crate::engine::notify::KeyNotifier>,
+    /// Pub/Sub broker, likewise shared: publisher and subscriber are different
+    /// connections by definition.
+    pub pubsub: Arc<crate::resp::pubsub::PubSub>,
+    /// Inbox depth per subscriber. Bounded so one subscriber that stops reading
+    /// cannot grow a publisher's memory without limit.
+    pub pubsub_inbox: usize,
 }
 
 impl RespServer {
@@ -131,6 +137,8 @@ pub async fn spawn(
         max_buffer_bytes: config.resp_max_buffer_bytes.max(1024),
         allow_flush: config.resp_allow_flush,
         notifier: Arc::new(crate::engine::notify::KeyNotifier::new()),
+        pubsub: Arc::new(crate::resp::pubsub::PubSub::new()),
+        pubsub_inbox: config.resp_pubsub_inbox.max(1),
     });
 
     tracing::info!(
@@ -189,7 +197,8 @@ pub async fn spawn(
                     .metrics
                     .connections_total
                     .fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = serve_connection(&server, stream).await {
+                let outcome = serve_connection(&server, stream).await;
+                if let Err(e) = outcome {
                     tracing::debug!(%peer, "RESP connection ended: {e}");
                 }
                 server
@@ -204,7 +213,25 @@ pub async fn spawn(
     Ok(Some(bound))
 }
 
-async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io::Result<()> {
+/// Serve one connection to completion.
+///
+/// Deregisters any Pub/Sub subscription on the way out — every return path,
+/// including the error ones, which is why the body is wrapped rather than
+/// having a `drop_connection` call before each `return`.
+async fn serve_connection(server: &RespServer, stream: TcpStream) -> std::io::Result<()> {
+    let mut subscriber: Option<crate::resp::pubsub::Subscriber> = None;
+    let result = serve_inner(server, stream, &mut subscriber).await;
+    if let Some(sub) = subscriber {
+        server.pubsub.drop_connection(sub.id);
+    }
+    result
+}
+
+async fn serve_inner(
+    server: &RespServer,
+    mut stream: TcpStream,
+    subscriber: &mut Option<crate::resp::pubsub::Subscriber>,
+) -> std::io::Result<()> {
     // Nagle batches small writes, which for a request/response protocol means
     // adding latency to every reply for no throughput gain.
     let _ = stream.set_nodelay(true);
@@ -272,6 +299,11 @@ async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io
                             let value = blocking_pop(server, &keys, timeout, left).await;
                             value.encode(&mut out);
                         }
+                        Dispatch::PubSub(command) => {
+                            for reply in handle_pubsub(server, &session, subscriber, command) {
+                                reply.encode(&mut out);
+                            }
+                        }
                         Dispatch::Reply(value) => {
                             if matches!(value, Value::Error(_)) {
                                 server.metrics.errors_total.fetch_add(1, Ordering::Relaxed);
@@ -316,11 +348,41 @@ async fn serve_connection(server: &RespServer, mut stream: TcpStream) -> std::io
             return Ok(());
         }
 
-        let read = match tokio::time::timeout(server.idle_timeout, stream.read(&mut chunk)).await {
-            Ok(result) => result?,
-            // An idle connection is closed rather than held open forever, which
-            // is what keeps max_clients from being consumed by dead peers.
-            Err(_) => return Ok(()),
+        // Once subscribed the connection has two sources: the socket and the
+        // inbox. A plain read would hold a published message until the client
+        // happened to send something, which for a subscriber is never.
+        let read = match subscriber.as_mut() {
+            Some(sub) => {
+                let mut pushed = Vec::new();
+                let outcome = tokio::select! {
+                    result = tokio::time::timeout(server.idle_timeout, stream.read(&mut chunk)) => {
+                        Some(result)
+                    }
+                    Some(message) = sub.receiver.recv() => {
+                        encode_delivery(message).encode(&mut pushed);
+                        None
+                    }
+                };
+                if !pushed.is_empty() {
+                    stream.write_all(&pushed).await?;
+                }
+                match outcome {
+                    Some(Ok(result)) => result?,
+                    // A subscribed connection is never idle-closed: it is
+                    // waiting for messages by design, which is exactly what an
+                    // idle timeout would otherwise punish.
+                    Some(Err(_)) => return Ok(()),
+                    None => continue,
+                }
+            }
+            None => {
+                match tokio::time::timeout(server.idle_timeout, stream.read(&mut chunk)).await {
+                    Ok(result) => result?,
+                    // An idle connection is closed rather than held open forever,
+                    // which keeps max_clients from being consumed by dead peers.
+                    Err(_) => return Ok(()),
+                }
+            }
         };
         if read == 0 {
             return Ok(());
@@ -440,5 +502,144 @@ fn unscope(server: &RespServer, key: &str) -> String {
         // keeps them.
         Some((_, rest)) if key.starts_with(rest) => key.to_string(),
         _ => key.to_string(),
+    }
+}
+
+/// Execute a Pub/Sub command for this connection.
+///
+/// Lives in the listener rather than the command module because it needs the
+/// connection's subscriber id and inbox, which only exist here.
+fn handle_pubsub(
+    server: &RespServer,
+    session: &Session,
+    subscriber: &mut Option<crate::resp::pubsub::Subscriber>,
+    command: crate::resp::commands::PubSubCommand,
+) -> Vec<Value> {
+    use crate::resp::commands::PubSubCommand as P;
+
+    // Registering lazily means a connection that never subscribes costs no
+    // inbox — most connections are plain command clients.
+    let id = match subscriber {
+        Some(existing) => existing.id,
+        None => {
+            let new = server.pubsub.register(server.pubsub_inbox);
+            let id = new.id;
+            *subscriber = Some(new);
+            id
+        }
+    };
+    let tenant = session.tenant.as_deref();
+
+    match command {
+        P::Subscribe(channels) => channels
+            .into_iter()
+            .map(|channel| {
+                let count = server.pubsub.subscribe(id, tenant, &channel);
+                // Redis confirms each subscription individually, in order, so a
+                // client that subscribed to three channels reads three replies.
+                Value::Array(Some(vec![
+                    Value::bulk("subscribe"),
+                    Value::bulk(channel),
+                    Value::Integer(count as i64),
+                ]))
+            })
+            .collect(),
+        P::PSubscribe(patterns) => patterns
+            .into_iter()
+            .map(|pattern| {
+                let count = server.pubsub.psubscribe(id, tenant, &pattern);
+                Value::Array(Some(vec![
+                    Value::bulk("psubscribe"),
+                    Value::bulk(pattern),
+                    Value::Integer(count as i64),
+                ]))
+            })
+            .collect(),
+        P::Unsubscribe(targets) => match targets {
+            Some(channels) => channels
+                .into_iter()
+                .map(|channel| {
+                    let count = server.pubsub.unsubscribe(id, tenant, Some(&channel));
+                    Value::Array(Some(vec![
+                        Value::bulk("unsubscribe"),
+                        Value::bulk(channel),
+                        Value::Integer(count as i64),
+                    ]))
+                })
+                .collect(),
+            None => {
+                let count = server.pubsub.unsubscribe(id, tenant, None);
+                vec![Value::Array(Some(vec![
+                    Value::bulk("unsubscribe"),
+                    Value::nil(),
+                    Value::Integer(count as i64),
+                ]))]
+            }
+        },
+        P::PUnsubscribe(targets) => match targets {
+            Some(patterns) => patterns
+                .into_iter()
+                .map(|pattern| {
+                    let count = server.pubsub.punsubscribe(id, tenant, Some(&pattern));
+                    Value::Array(Some(vec![
+                        Value::bulk("punsubscribe"),
+                        Value::bulk(pattern),
+                        Value::Integer(count as i64),
+                    ]))
+                })
+                .collect(),
+            None => {
+                let count = server.pubsub.punsubscribe(id, tenant, None);
+                vec![Value::Array(Some(vec![
+                    Value::bulk("punsubscribe"),
+                    Value::nil(),
+                    Value::Integer(count as i64),
+                ]))]
+            }
+        },
+        P::Publish { channel, payload } => {
+            // The count is receivers *in this tenant*: a global one would leak
+            // the existence of other tenants' subscribers.
+            let delivered = server.pubsub.publish(tenant, &channel, &payload);
+            vec![Value::Integer(delivered as i64)]
+        }
+        P::Channels(pattern) => vec![Value::Array(Some(
+            server
+                .pubsub
+                .channels(tenant, pattern.as_deref())
+                .into_iter()
+                .map(Value::bulk)
+                .collect(),
+        ))],
+        P::NumSub(channels) => {
+            let mut out = Vec::with_capacity(channels.len() * 2);
+            for channel in channels {
+                let count = server.pubsub.subscriber_count(tenant, &channel);
+                out.push(Value::bulk(channel));
+                out.push(Value::Integer(count as i64));
+            }
+            vec![Value::Array(Some(out))]
+        }
+    }
+}
+
+/// Encode a delivered message in the shape the subscriber expects.
+///
+/// A pattern delivery carries four elements rather than three, and the extra
+/// one is the pattern — a client that subscribed to several patterns needs it
+/// to route the message.
+fn encode_delivery(message: crate::resp::pubsub::Delivery) -> Value {
+    match message.pattern {
+        Some(pattern) => Value::Array(Some(vec![
+            Value::bulk("pmessage"),
+            Value::bulk(pattern),
+            Value::bulk(message.channel),
+            Value::bulk(message.payload),
+        ])),
+        None => Value::Array(Some(vec![
+            Value::bulk("message"),
+            Value::bulk(message.channel),
+            Value::bulk(message.payload),
+        ])),
     }
 }

@@ -223,6 +223,10 @@ pub struct Config {
     /// Hard cap on one connection's read buffer.
     #[serde(default = "default_resp_max_buffer_bytes")]
     pub resp_max_buffer_bytes: usize,
+    /// Inbox depth per Pub/Sub subscriber. When full, that subscriber's
+    /// message is dropped rather than stalling the publisher.
+    #[serde(default = "default_resp_pubsub_inbox")]
+    pub resp_pubsub_inbox: usize,
     /// Permit FLUSHDB/FLUSHALL over RESP. Off by default: an accidental flush
     /// from a misconfigured client is unrecoverable without a restore.
     #[serde(default)]
@@ -235,6 +239,9 @@ pub struct Config {
     pub wal_ship_interval_secs: u64,
 }
 
+fn default_resp_pubsub_inbox() -> usize {
+    1_024
+}
 fn default_resp_max_clients() -> usize {
     10_000
 }
@@ -381,6 +388,7 @@ impl Default for Config {
             resp_idle_timeout_secs: default_resp_idle_timeout_secs(),
             resp_max_buffer_bytes: default_resp_max_buffer_bytes(),
             resp_allow_flush: false,
+            resp_pubsub_inbox: default_resp_pubsub_inbox(),
         }
     }
 }
@@ -931,6 +939,10 @@ impl Config {
             resp_allow_flush: std::env::var("RESP_ALLOW_FLUSH")
                 .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            resp_pubsub_inbox: std::env::var("RESP_PUBSUB_INBOX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_resp_pubsub_inbox),
         })
     }
 }

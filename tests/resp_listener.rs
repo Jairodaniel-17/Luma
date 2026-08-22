@@ -458,3 +458,172 @@ async fn a_transaction_round_trips_over_the_socket() {
     );
     server.shutdown.cancel();
 }
+
+// ─── block 6: pub/sub over a real socket ─────────────────────────────────────
+
+#[tokio::test]
+async fn a_subscriber_is_pushed_a_published_message() {
+    // The property that makes it Pub/Sub rather than polling: the message
+    // arrives without the subscriber sending anything.
+    let server = start(|_| {}).await;
+    let mut subscriber = connect(&server).await;
+    let reply = exchange(&mut subscriber, b"*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nnews\r\n").await;
+    assert_eq!(
+        text(&reply),
+        "*3\r\n$9\r\nsubscribe\r\n$4\r\nnews\r\n:1\r\n"
+    );
+
+    let mut publisher = connect(&server).await;
+    let count = exchange(
+        &mut publisher,
+        b"*3\r\n$7\r\nPUBLISH\r\n$4\r\nnews\r\n$5\r\nhello\r\n",
+    )
+    .await;
+    assert_eq!(text(&count), ":1\r\n", "PUBLISH reports receivers");
+
+    let mut chunk = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(3), subscriber.read(&mut chunk))
+        .await
+        .expect("the subscriber should be pushed the message")
+        .unwrap();
+    assert_eq!(
+        text(&chunk[..n]),
+        "*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$5\r\nhello\r\n"
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_pattern_subscriber_gets_a_pmessage_with_four_elements() {
+    // A pmessage carries the pattern as well, so a client subscribed to several
+    // patterns can route what it receives.
+    let server = start(|_| {}).await;
+    let mut subscriber = connect(&server).await;
+    exchange(
+        &mut subscriber,
+        b"*2\r\n$10\r\nPSUBSCRIBE\r\n$6\r\nnews.*\r\n",
+    )
+    .await;
+
+    let mut publisher = connect(&server).await;
+    exchange(
+        &mut publisher,
+        b"*3\r\n$7\r\nPUBLISH\r\n$10\r\nnews.sport\r\n$4\r\ngoal\r\n",
+    )
+    .await;
+
+    let mut chunk = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(3), subscriber.read(&mut chunk))
+        .await
+        .expect("should be pushed")
+        .unwrap();
+    assert_eq!(
+        text(&chunk[..n]),
+        "*4\r\n$8\r\npmessage\r\n$6\r\nnews.*\r\n$10\r\nnews.sport\r\n$4\r\ngoal\r\n"
+    );
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_fanout_reaches_every_worker() {
+    // Celery's fanout exchange: every worker gets the message, not one of them.
+    let server = start(|_| {}).await;
+    let mut first = connect(&server).await;
+    let mut second = connect(&server).await;
+    for worker in [&mut first, &mut second] {
+        exchange(worker, b"*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nfany\r\n").await;
+    }
+
+    let mut publisher = connect(&server).await;
+    let count = exchange(
+        &mut publisher,
+        b"*3\r\n$7\r\nPUBLISH\r\n$4\r\nfany\r\n$2\r\nhi\r\n",
+    )
+    .await;
+    assert_eq!(text(&count), ":2\r\n");
+
+    for worker in [&mut first, &mut second] {
+        let mut chunk = [0u8; 256];
+        let n = tokio::time::timeout(Duration::from_secs(3), worker.read(&mut chunk))
+            .await
+            .expect("every subscriber must receive it")
+            .unwrap();
+        assert!(
+            text(&chunk[..n]).contains("message"),
+            "{}",
+            text(&chunk[..n])
+        );
+    }
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn unsubscribing_stops_delivery() {
+    let server = start(|_| {}).await;
+    let mut subscriber = connect(&server).await;
+    exchange(&mut subscriber, b"*2\r\n$9\r\nSUBSCRIBE\r\n$1\r\nc\r\n").await;
+    let reply = exchange(&mut subscriber, b"*2\r\n$11\r\nUNSUBSCRIBE\r\n$1\r\nc\r\n").await;
+    assert!(text(&reply).contains("unsubscribe"), "{}", text(&reply));
+
+    let mut publisher = connect(&server).await;
+    let count = exchange(
+        &mut publisher,
+        b"*3\r\n$7\r\nPUBLISH\r\n$1\r\nc\r\n$1\r\nx\r\n",
+    )
+    .await;
+    assert_eq!(text(&count), ":0\r\n", "nobody is listening any more");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn pubsub_channels_lists_only_live_channels() {
+    let server = start(|_| {}).await;
+    let mut subscriber = connect(&server).await;
+    exchange(&mut subscriber, b"*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nlive\r\n").await;
+
+    let mut admin = connect(&server).await;
+    let reply = exchange(&mut admin, b"*2\r\n$6\r\nPUBSUB\r\n$8\r\nCHANNELS\r\n").await;
+    assert_eq!(text(&reply), "*1\r\n$4\r\nlive\r\n");
+
+    let reply = exchange(
+        &mut admin,
+        b"*3\r\n$6\r\nPUBSUB\r\n$6\r\nNUMSUB\r\n$4\r\nlive\r\n",
+    )
+    .await;
+    assert_eq!(text(&reply), "*2\r\n$4\r\nlive\r\n:1\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_disconnected_subscriber_is_forgotten() {
+    // Otherwise the registry accumulates one dead entry per disconnect and a
+    // long-lived server leaks steadily.
+    let server = start(|_| {}).await;
+    {
+        let mut subscriber = connect(&server).await;
+        exchange(&mut subscriber, b"*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\ngone\r\n").await;
+        // Dropping the stream closes the socket.
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut publisher = connect(&server).await;
+    let count = exchange(
+        &mut publisher,
+        b"*3\r\n$7\r\nPUBLISH\r\n$4\r\ngone\r\n$1\r\nx\r\n",
+    )
+    .await;
+    assert_eq!(text(&count), ":0\r\n");
+    server.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_subscribed_connection_still_answers_commands() {
+    // Redis restricts a subscriber to a subset; keeping ordinary commands
+    // working is a superset, and a client that sends PING to keep the
+    // connection alive must get a reply rather than silence.
+    let server = start(|_| {}).await;
+    let mut client = connect(&server).await;
+    exchange(&mut client, b"*2\r\n$9\r\nSUBSCRIBE\r\n$1\r\nc\r\n").await;
+    assert_eq!(text(&exchange(&mut client, b"PING\r\n").await), "+PONG\r\n");
+    server.shutdown.cancel();
+}

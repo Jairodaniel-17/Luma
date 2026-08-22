@@ -304,7 +304,7 @@ ampliada a estructuras.
   `revision` del `StateStore` y el contador por clave que el Bloque 2 dejó en
   las estructuras. Test de carrera: 100 clientes incrementando la misma clave
   → suma exacta.
-- `[ ]` **F3.3 — Pub/Sub** sobre el `EventBus` existente, canal interno
+- `[x]` **F3.3 — Pub/Sub** sobre el `EventBus` existente, canal interno
   `resp:{org}:{canal}`. `PUBLISH` devuelve receptores **del tenant**, no
   globales.
 - `[ ]` **F3.4 — E2E de los clientes objetivo.** `tests/resp/e2e_arq/` y
