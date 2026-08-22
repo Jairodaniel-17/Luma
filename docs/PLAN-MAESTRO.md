@@ -434,6 +434,26 @@ alcance, no un bug.
   **Criterio para quitar el flag "experimental" del listener RESP: nightly
   verde 7 días seguidos.**
 
+  **El nightly nunca se habia ejecutado.** El fichero estaba escrito y su
+  `schedule` era correcto, pero GitHub no dispara un `schedule` en un repositorio
+  hasta que existe en la rama por defecto y pasa la primera medianoche
+  aplicable; el historial estaba vacio, asi que el contador de siete noches no
+  podia ni empezar — y este plan lo daba por hecho al marcar F4.5 completo.
+
+  Lanzado a mano por primera vez el 2026-08-22. La primera ejecucion **fallo**,
+  y no por el producto: el job de durabilidad tenia la linea de comando rota
+  (`cargo test --lib pathsafe durability` — `cargo test` acepta un filtro, no
+  dos). Llevaba ahi desde el dia en que se escribio, invisible porque el job no
+  corria.
+
+  Corregido, la segunda ejecucion pasa los **9 jobs**: matriz crash-recovery,
+  atomicidad multiclave, fuzzing del parser, diferencial extendido contra Redis
+  7, E2E de clientes en los dos objetivos, lectura del `data_dir` de la ultima
+  release, y advisories.
+
+  Eso es **noche 1 de 7**, no el criterio cumplido. Lo que cambia es que ahora
+  el contador existe.
+
 ### Bloque 9 — Adopción por protocolo · `v4.34.0`
 
 - `[x]` **W2.3 - failover asistido.** Health-check para proxy
