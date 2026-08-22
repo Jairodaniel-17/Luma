@@ -283,9 +283,48 @@ fn ivf_large_dataset_retrain_consistent() {
             allowed_ids: None,
         },
     };
-    let before = store.search("big", query.clone()).unwrap();
-    assert!(!before.is_empty());
-    store.retrain_ivf("big", true).unwrap();
-    let after = store.search("big", query).unwrap();
-    assert_eq!(before.first().map(|h| &h.id), after.first().map(|h| &h.id));
+    // Recall against the exact answer, not identity of the top hit.
+    //
+    // The assertion used to be `before.first().id == after.first().id`, and it
+    // was both too weak and too strong. Too strong because 100 vectors here tie
+    // at the exact best cosine, so the id can change while the answer is
+    // perfect. Too weak because it says nothing about *how good* either answer
+    // is — and when it did fail, the reason turned out to be that the retrained
+    // index returned cosine 0.867 instead of 0.9999, which is a different
+    // complaint entirely.
+    //
+    // The bug it was pointing at: `search_ivf_flat` pre-ranked q8 candidates by
+    // raw dot on a Cosine collection, so the high-magnitude vectors 30° off the
+    // query filled all 128 refine slots and the real answers were never scored
+    // exactly. `recall@5` measured 0/5. See `q8::cosine_slices`.
+    let exact_best = (0..total)
+        .map(|i| {
+            let v = [
+                ((i % 10_000) as f32) / 10_000.0,
+                (((i * 7) % 10_000) as f32) / 10_000.0,
+            ];
+            let dot = 0.123 * v[0] + 0.456 * v[1];
+            let norms =
+                (0.123f32 * 0.123 + 0.456 * 0.456).sqrt() * (v[0] * v[0] + v[1] * v[1]).sqrt();
+            if norms == 0.0 {
+                0.0
+            } else {
+                dot / norms
+            }
+        })
+        .fold(f32::MIN, f32::max);
+
+    for phase in ["before retrain", "after retrain"] {
+        if phase == "after retrain" {
+            store.retrain_ivf("big", true).unwrap();
+        }
+        let hits = store.search("big", query.clone()).unwrap();
+        assert!(!hits.is_empty(), "{phase}: no hits at all");
+        let best = hits.iter().map(|h| h.score).fold(f32::MIN, f32::max);
+        assert!(
+            best >= exact_best - 1e-4,
+            "{phase}: best hit scored {best}, the exact answer is {exact_best} — the index is \
+             discarding the right candidates before scoring them"
+        );
+    }
 }

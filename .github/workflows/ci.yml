@@ -180,6 +180,23 @@ jobs:
       - name: Server log on failure
         if: failure()
         run: cat luma.log
+  ivf-recall:
+    name: IVF recall at 1M vectors
+    runs-on: ubuntu-latest
+    # This suite is behind the `ivf_stress_tests` feature, and the `test` job
+    # runs `cargo test --locked` without `--all-features`. So it never ran here,
+    # and a recall bug that emptied the top-5 after a retrain sat undetected: the
+    # q8 candidate pre-ranking used raw dot on a Cosine collection, discarding
+    # the right answers before anything scored them exactly.
+    #
+    # Its own job because it needs the feature flag, and in release because that
+    # is the difference between 12 seconds and about 200.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run the IVF stress suite
+        run: cargo test --release --locked --features ivf_stress_tests --test vector_ivf
+
   admin-ui:
     name: Admin panel is in sync
     runs-on: ubuntu-latest
@@ -214,7 +231,7 @@ jobs:
           echo 'the committed bundle matches the source'
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, admin-ui]
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, ivf-recall, admin-ui]
     runs-on: ubuntu-latest
     if: always()
     steps:

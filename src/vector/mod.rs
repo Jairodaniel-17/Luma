@@ -2841,13 +2841,25 @@ impl Collection {
                 let Some((qscale, qcodes)) = self.get_q8_codes(id) else {
                     continue;
                 };
-                let approx = q8ops::dot_slices(
-                    qcodes,
-                    qscale,
-                    &q_query.data,
-                    q_query.scale,
-                    self.settings.simd_enabled,
-                );
+                // Ranked by the collection's own metric, not by raw dot. This
+                // pre-ranking decides which candidates ever get scored exactly,
+                // so getting it wrong does not shift the order — it discards the
+                // right answers before they are looked at. See
+                // `q8ops::cosine_slices`.
+                let approx = match self.metric {
+                    Metric::Cosine => {
+                        q8ops::cosine_slices(qcodes, &q_query.data, self.settings.simd_enabled)
+                    }
+                    // Dot vectors are stored L2-normalized (see
+                    // `normalize_if_needed`), so raw dot already is the cosine.
+                    Metric::Dot => q8ops::dot_slices(
+                        qcodes,
+                        qscale,
+                        &q_query.data,
+                        q_query.scale,
+                        self.settings.simd_enabled,
+                    ),
+                };
                 scored.push((id.clone(), approx));
             }
         }

@@ -726,25 +726,42 @@ alcance en silencio.
   movimiento se habría perdido en el primer arranque tras un corte — el mismo
   fallo que el lote existe para evitar, reintroducido una capa más abajo.
 
-- `[ ]` **IVF pierde el vecino correcto tras `retrain_ivf`.**
-  `tests/vector_ivf.rs::ivf_large_dataset_retrain_consistent` (1M vectores,
-  128 clústeres, `nprobe=8`) falla: el top-1 pasa de `vec-102857`
-  (coseno ≈ 0.9999 contra la query) a `vec-109999` (coseno ≈ 0.87). No es un
-  desempate entre resultados equivalentes — es recall que se cae después de
-  reentrenar.
+- `[x]` **IVF perdia el vecino correcto tras `retrain_ivf`** — arreglado.
 
-  **No es una regresión de este plan:** `src/vector/ivf.rs` no se ha tocado
-  desde `v3.0.0`, y el único cambio en `src/vector/mod.rs` que roza la ruta
-  Q8 es `!A && !B` reescrito como early-return, equivalente.
+  **La causa no era la que apuntaba este plan.** La hipotesis era que la
+  asignacion a cluster y el ranking usaban metricas distintas; no era eso —
+  `train_centroids`, `assign_vector` y `select_probes` ya usaban los tres
+  `centroid_score` con la metrica de la coleccion.
 
-  **Por qué llevaba tiempo oculto:** el test está tras la feature
-  `ivf_stress_tests` y CI corre `cargo test --locked`, sin `--all-features`.
-  Nunca se ejecutó en CI. Tarda ~200 s en debug.
+  Era una etapa mas abajo. `search_ivf_flat` pre-rankeaba los candidatos q8 con
+  `q8ops::dot_slices`, un producto punto **crudo**, aunque la metrica fuera
+  coseno. En este dataset los vecinos correctos tienen coseno 0.9999 con norma
+  ~1.04, y los vectores a 30 grados del query tienen norma ~1.41: su producto
+  punto es mayor, ganaban el pre-ranking, llenaban las 128 plazas de refinado, y
+  los verdaderos nunca llegaban a puntuarse exacto.
 
-  Cuando se aborde, la pregunta a responder primero es si la asignación a
-  clúster y el ranking usan la misma métrica: con `Metric::Cosine`, unos
-  centroides entrenados por distancia L2 sobre vectores sin normalizar
-  probarían los clústeres equivocados, que es exactamente esta forma de fallo.
+  Es la misma clase de fallo que ya se habia corregido para los centroides — el
+  comentario en `ivf.rs` lo dice: *«antes esto usaba dot crudo sin mirar la
+  metrica»*. Se arreglo ahi y no aqui. Ahora la decision vive en un solo sitio,
+  `q8::cosine_slices`, con las escalas canceladas.
+
+  **Medido, no razonado.** Con un test de diagnostico que calcula la respuesta
+  exacta por fuerza bruta: `recall@5` pasaba de 5/5 antes de reentrenar a **0/5**
+  despues. Con el arreglo, 5/5 en los dos casos. Tambien salio que 100 vectores
+  empatan en el optimo exacto, asi que la asercion original —que el id del top-1
+  no cambie— era a la vez demasiado fuerte (el id puede cambiar con la respuesta
+  perfecta) y demasiado debil (no decia nada de la calidad). Ahora se comprueba
+  un suelo de recall contra la respuesta exacta.
+
+  **Por que llevaba tanto oculto, y por que ya no.** El test esta tras la feature
+  `ivf_stress_tests` y CI corria `cargo test --locked` sin `--all-features`: no
+  se ejecuto nunca. Hay un job propio, `IVF recall at 1M vectors`, en release —
+  la diferencia entre 12 segundos y unos 200.
+
+  **Sin arreglar y dicho en voz alta:** DiskANN rankea con `q8::dot` en cinco
+  sitios, incluido su constructor, con el mismo patron. Para una coleccion coseno
+  esta igual de mal, pero cambiar el constructor cambia el grafo en disco, asi
+  que entra por su propio cambio y no de rebote en este.
 
 ---
 ## Decisiones de negocio pendientes (no bloquean código)

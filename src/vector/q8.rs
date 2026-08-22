@@ -58,6 +58,36 @@ pub fn dot_slices(a: &[i8], a_scale: f32, b: &[i8], b_scale: f32, simd_enabled: 
     raw * (a_scale * b_scale)
 }
 
+/// Approximate **cosine** of two q8 vectors, from their codes.
+///
+/// The one place that decides how a q8 candidate is ranked under
+/// `Metric::Cosine`, mirroring what `ivf::centroid_score` does for centroids.
+///
+/// Ranking candidates by raw dot when the collection metric is cosine is a
+/// recall bug, not a rounding difference. It cost the IVF path its top-5
+/// entirely: on a dataset where the true nearest neighbours sit at cosine
+/// 0.9999 with norm ≈ 1.04, the vectors at 30° off the query but norm ≈ 1.41
+/// scored a *higher* dot, filled every one of the 128 refine slots, and the
+/// real answers were never scored exactly. `recall@5` measured 0/5.
+///
+/// Both scales cancel: `dot = raw_ab · sa · sb`, `|a| = sa · sqrt(raw_aa)`,
+/// `|b| = sb · sqrt(raw_bb)`, so the quotient is `raw_ab / sqrt(raw_aa · raw_bb)`
+/// — three integer dots and one square root, no scale arithmetic to get wrong.
+pub fn cosine_slices(a: &[i8], b: &[i8], simd_enabled: bool) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let ab = dot_i8_inner(a, b, simd_enabled) as f32;
+    let aa = dot_i8_inner(a, a, simd_enabled) as f32;
+    let bb = dot_i8_inner(b, b, simd_enabled) as f32;
+    let denom = (aa * bb).sqrt();
+    if denom <= f32::EPSILON {
+        // A zero vector has no direction. 0.0 rather than NaN, which would sort
+        // unpredictably and take the whole candidate list with it.
+        0.0
+    } else {
+        ab / denom
+    }
+}
+
 fn dot_i8_inner(a: &[i8], b: &[i8], simd_enabled: bool) -> i32 {
     // The i32 accumulator can only wrap past MAX_SAFE_DIM (~133k dims); catch
     // that in debug builds rather than returning a silently corrupted score.
