@@ -239,3 +239,167 @@ fn the_axum_to_openapi_path_translation_is_right() {
         "/v1/memory/{namespace}/beliefs/{fact_key}/history"
     );
 }
+
+// ── schemas ──────────────────────────────────────────────────────────────────
+//
+// W3.3 asked for the spec to be *generated* from the code. It is not, and
+// annotating ~100 handlers with utoipa is a large mechanical change that buys
+// the goal indirectly. The goal is "no drift", and generation was one proposed
+// means. These check the same thing against the document itself, which is
+// cheaper and catches the failures a reader actually hits.
+//
+// What they still do not check: that a response's *values* match its documented
+// schema. That needs a running server and a fixture per endpoint, and it is the
+// honest remaining gap.
+
+/// The spec, parsed properly rather than line by line.
+fn spec() -> serde_yaml::Value {
+    let text = std::fs::read_to_string(repo("docs/openapi.yaml")).expect("spec must be readable");
+    serde_yaml::from_str(&text).expect("the spec must be valid YAML")
+}
+
+/// Every `$ref` in the document, as the schema name it points at.
+fn collect_refs(node: &serde_yaml::Value, out: &mut Vec<String>) {
+    match node {
+        serde_yaml::Value::Mapping(map) => {
+            for (key, value) in map {
+                if key.as_str() == Some("$ref") {
+                    if let Some(target) = value.as_str() {
+                        out.push(target.to_string());
+                    }
+                } else {
+                    collect_refs(value, out);
+                }
+            }
+        }
+        serde_yaml::Value::Sequence(items) => {
+            for item in items {
+                collect_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn defined_schemas(spec: &serde_yaml::Value) -> BTreeSet<String> {
+    spec.get("components")
+        .and_then(|c| c.get("schemas"))
+        .and_then(|s| s.as_mapping())
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn every_ref_in_the_spec_resolves() {
+    // A dangling `$ref` is not a cosmetic problem: every OpenAPI client
+    // generator fails outright on one, so a single bad reference makes the whole
+    // document unusable rather than partly wrong.
+    let spec = spec();
+    let defined = defined_schemas(&spec);
+    let mut refs = Vec::new();
+    collect_refs(&spec, &mut refs);
+    assert!(
+        refs.len() > 50,
+        "only {} refs found — the walker is not reaching the document",
+        refs.len()
+    );
+
+    let mut dangling: BTreeSet<String> = BTreeSet::new();
+    for target in &refs {
+        let Some(name) = target.strip_prefix("#/components/schemas/") else {
+            // Anything else is a form this spec does not use, and silently
+            // accepting it would let a typo through as "not a schema ref".
+            dangling.insert(format!("{target} (unsupported ref form)"));
+            continue;
+        };
+        if !defined.contains(name) {
+            dangling.insert(target.clone());
+        }
+    }
+    assert!(
+        dangling.is_empty(),
+        "these $refs point at schemas that do not exist:\n  {}",
+        dangling.into_iter().collect::<Vec<_>>().join("\n  ")
+    );
+}
+
+#[test]
+fn every_defined_schema_is_used() {
+    // An orphaned schema is documentation nothing points at, so nothing keeps it
+    // honest: it is the piece that drifts first and is noticed last.
+    let spec = spec();
+    let defined = defined_schemas(&spec);
+    let mut refs = Vec::new();
+    collect_refs(&spec, &mut refs);
+    let used: BTreeSet<String> = refs
+        .iter()
+        .filter_map(|r| r.strip_prefix("#/components/schemas/").map(str::to_string))
+        .collect();
+
+    let orphans: Vec<&String> = defined
+        .iter()
+        .filter(|name| !used.contains(*name))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "these schemas are defined and never referenced: {orphans:?}"
+    );
+}
+
+#[test]
+fn every_documented_response_body_has_a_schema() {
+    // A documented `200` with a content type and no schema tells a client
+    // nothing at all, while looking in an index exactly like one that does.
+    let spec = spec();
+    let mut missing: Vec<String> = Vec::new();
+
+    let Some(paths) = spec.get("paths").and_then(|p| p.as_mapping()) else {
+        panic!("the spec has no paths");
+    };
+    for (path, operations) in paths {
+        let Some(operations) = operations.as_mapping() else {
+            continue;
+        };
+        for (verb, operation) in operations {
+            let Some(verb) = verb.as_str() else { continue };
+            if !VERBS.contains(&verb) {
+                continue;
+            }
+            let Some(responses) = operation.get("responses").and_then(|r| r.as_mapping()) else {
+                missing.push(format!(
+                    "{} {} has no responses at all",
+                    verb.to_uppercase(),
+                    path.as_str().unwrap_or("?")
+                ));
+                continue;
+            };
+            for (status, response) in responses {
+                let Some(content) = response.get("content").and_then(|c| c.as_mapping()) else {
+                    // No body documented is fine — a 204 or a 401 need none.
+                    continue;
+                };
+                for (media_type, body) in content {
+                    if body.get("schema").is_none() {
+                        missing.push(format!(
+                            "{} {} → {} ({}) declares a body with no schema",
+                            verb.to_uppercase(),
+                            path.as_str().unwrap_or("?"),
+                            status.as_str().unwrap_or("?"),
+                            media_type.as_str().unwrap_or("?")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} documented bodies have no schema:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}

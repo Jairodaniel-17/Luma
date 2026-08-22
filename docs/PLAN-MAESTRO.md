@@ -552,12 +552,33 @@ alcance, no un bug.
   - `DELETE /v1/vector/{collection}` — una operación real, sin documentar.
   - `GET /v1/admin/resp` — añadido días antes y nunca escrito.
 
-  **Lo que NO es:** el plan pedía el spec *generado* desde el código. Esto no lo
-  es: los esquemas de petición y respuesta siguen a mano y nadie los compara con
-  nada. La generación completa (anotaciones utoipa en ~100 handlers) es un
-  cambio grande y mecánico y **no está hecho**; este guarda es lo que hace de
-  sustituto, y decirlo es mejor que dejar que la casilla insinúe más de lo que
-  cubre.
+  **Los esquemas ya no están sin comprobar.** Tres guardas más, en el mismo
+  fichero:
+
+  - **Cada `$ref` resuelve.** No es cosmético: todo generador de clientes de
+    OpenAPI falla de golpe con una referencia colgada, así que una sola mala hace
+    el documento inservible en vez de parcialmente incorrecto.
+  - **Cada esquema definido se referencia.** Un esquema huérfano es documentación
+    a la que nada apunta, así que nada lo mantiene honesto: es la pieza que
+    deriva primero y se nota la última.
+  - **Cada cuerpo documentado tiene esquema.** Un `200` con tipo de contenido y
+    sin esquema no le dice nada a un cliente, y en un índice se ve igual que uno
+    que sí.
+
+  Las tres pasaron a la primera, así que no encontraron nada — son guardas de
+  regresión, no hallazgos, y se comprobó que funcionan rompiendo una referencia a
+  propósito y viendo fallar dos de ellas.
+
+  **Lo que sigue sin hacer, y por qué:** el plan pedía el spec *generado* desde
+  el código. No lo está. Anotar ~100 handlers con utoipa es un cambio grande y
+  mecánico que persigue el objetivo —«que no haya deriva»— de forma indirecta;
+  las guardas lo persiguen contra el documento mismo, que es más barato y atrapa
+  los fallos que un lector encuentra de verdad. **Esa es una desviación
+  deliberada del plan, no un olvido**, y queda para decisión de producto.
+
+  **El hueco honesto que queda:** nadie compara los *valores* de una respuesta
+  real con su esquema documentado. Eso necesita un servidor arriba y un fixture
+  por endpoint, y hacerlo para tres endpoints sería teatro.
 
   Las 5 rutas que no son API (el panel y el visor de docs) están en una lista de
   exclusión explícita, con un test que impide que algo bajo `/v1/` entre en ella.
