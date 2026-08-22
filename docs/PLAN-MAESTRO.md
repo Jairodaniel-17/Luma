@@ -104,8 +104,8 @@ frentes a la vez y no cerrar ninguno.
 | # | Bloque | Release | Contenido | Tamaño |
 |---:|---|---|---|---|
 | 0 | ✅ Barrido de deuda del roadmap | `v4.25.0` | M3.2, M3.4, M4.1, M3.3 + fix de `content-type` en métricas | S |
-| 1 | **Durabilidad demostrada** | `v4.26.0` | W1.1 (harness compartido), W1.2, fixture dorado en CI | M |
-| 2 | Cimientos del motor RESP | `v4.27.0` | F0.1 `StoredVal`, F0.2 estructuras, F0.3 notificadores | **XL** |
+| 1 | ✅ **Durabilidad demostrada** | `v4.26.0` | W1.1 (harness compartido), W1.2, fixture dorado en CI | M |
+| 2 | ✅ Cimientos del motor RESP | `v4.27.0` | F0.1 `StoredVal`, F0.2 estructuras, F0.3 notificadores | **XL** |
 | 3 | RPO prometible | `v4.28.0` | W1.3 backup remoto, W1.4 verificación, W2.1 WAL shipping | L |
 | 4 | Listener RESP + strings/keys | `v4.29.0` | F1.1–F1.4 + **F4.1** (ver D-1) | L |
 | 5 | Estructuras por RESP | `v4.30.0` | F2.1 listas, F2.2 hashes, F2.3 sets, F2.4 zsets | L |
@@ -213,7 +213,7 @@ Sin RESP todavía. Todo lo de aquí sirve también a la API HTTP.
   versionado; **los registros legados se leen como `Json` y no se
   reinterpretan nunca**. Property test: cualquier `Vec<u8>` sobrevive
   put→crash→replay→get idéntico.
-- `[ ]` **F0.2 — motor de estructuras** (`engine/structures.rs`): list, hash,
+- `[x]` **F0.2 — motor de estructuras** (`engine/structures.rs`): list, hash,
   set, zset con semántica Redis, durables por el mismo WAL + redb. Decisiones
   que se toman aquí y no se parchean después:
   - zset con `BTreeMap<(score, member)>` — el orden lexicográfico en empates
@@ -225,6 +225,8 @@ Sin RESP todavía. Todo lo de aquí sirve también a la API HTTP.
 - `[x]` **F0.3 — notificadores por clave.** `tokio::sync::Notify` por clave
   para los bloqueantes de F3.1. Un `LPUSH` despierta exactamente un `BLPOP`
   (sin thundering herd); limpieza al quedar sin waiters.
+
+**Puerta de verificación 2 — verde.** 338 tests, clippy 0 findings, fixture dorado incluido.
 
 **Puerta de verificación 2:** fmt + clippy + `cargo test` + harness del Bloque 1
 extendido a los registros nuevos.
