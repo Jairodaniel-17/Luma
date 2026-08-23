@@ -770,10 +770,40 @@ conecta a él. Postgres sigue siendo la fuente de verdad transaccional.
 
 No se cancelan; quedan fuera del ciclo hasta que se reactiven los benchmarks.
 
-- `[~]` **F4.4 — benchmark honesto vs Redis** (`redis-benchmark`, SET/GET/
-  LPUSH/ZADD con y sin pipelining). Es puramente medición. **Nota:** cuando se
-  reactive, publicar también dónde Redis gana — es lo que hace creíble la tabla
-  vectorial del README.
+- `[x]` **F4.4 - benchmark honesto vs Redis.** `scripts/resp-benchmark.sh`.
+
+  Honesto quiere decir tres cosas que el script obliga: el mismo cliente mide
+  los dos, **PING se mide como control** (cruza la misma red y no hace trabajo,
+  asi que separa «Luma es lento» de «esta red es lenta»), y SET se mide con y
+  sin pipelining — si el pipelining no ayuda, el techo es una serializacion
+  dentro del servidor y no latencia de ida y vuelta.
+
+  | | |
+  |---|---|
+  | PING (control) | 33 613/s |
+  | GET | 33 112/s |
+  | SET, `per_write` | **785/s** |
+  | SET, `group` | 1 625/s |
+  | SET, `-P 16` | 1 747/s |
+  | Redis 7, SET | 138 888/s |
+
+  **Y el hallazgo importante no es el total, es la causa.** La hipotesis era el
+  fsync, y estaba equivocada: quitarlo entero (modo `group`) compro 2x, y el
+  pipelining no compro nada. Las lecturas siguen al control, asi que leer es
+  gratis. El techo de escritura es ~1 700/s y lo pone **una transaccion de
+  escritura de redb por operacion, serializada tras el mutex global de append**
+  que mantiene el orden de offsets igual al orden del WAL.
+
+  Eso descarta el arreglo que iba a hacer. Group commit de verdad —donde varios
+  escritores comparten un fsync— no tiene nada que agrupar aqui, porque ese
+  mutex garantiza que nunca hay dos escritores dentro del WAL a la vez. Habria
+  sido un rediseño del camino de durabilidad para ganar 2x.
+
+  Lo que si lo subiria es un **indice en memoria con redb como proyeccion
+  durable**, que es un cambio de arquitectura, no una tuerca de configuracion.
+  Entra solo si una carga real necesita mas de ~1 700 escrituras/s: para un
+  broker de Celery de un ERP, que mueve decenas o cientos de tareas por segundo,
+  hay entre 10x y 100x de margen.
 - `[~]` **W5.4 — suite de carga sostenida** por primitiva (KV ops/s,
   enqueue/dequeue 1 h, blob MB/s, SSE con 5k suscriptores) en el perfil de
   máquina objetivo. Su cláusula de "regresión >15 % rompe el nightly" queda
