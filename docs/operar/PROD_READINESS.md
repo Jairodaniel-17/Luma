@@ -21,7 +21,7 @@ Leyenda de "confirmado":
 
 | Primitiva | Al devolver OK | Riesgo real de una caída |
 |---|---|---|
-| **WAL de eventos** (`events-NNNNNN.log`) — respalda todas las mutaciones | **fsync** por defecto: `wal_sync_mode = "per_write"` | Ninguna. `wal_sync_mode = "group"` sigue disponible y abre una ventana de un lote (64) o 10 ms, a cambio de ~2,3× de throughput |
+| **WAL de eventos** (`events-NNNNNN.log`) — respalda todas las mutaciones | **fsync** por defecto: `wal_sync_mode = "per_write"` | Ninguna. En el camino KV/state el group commit hace fsync una vez por lote **siempre**, así que ahí `wal_sync_mode = "group"` casi no cambia nada: 1 497/s contra 1 399/s, un 7%, cuando antes era 2,3×. Para los caminos que aún añaden evento a evento —vector, doc, blob, colas— `group` sigue abriendo una ventana de un lote (64) o 10 ms a cambio de throughput |
 | **Blob** (`/v1/blob`) | **fsync** del fichero, luego del directorio tras el rename | Ninguno en Linux. En Windows la entrada de directorio depende del journaling de NTFS |
 | **Colas** (`/v1/queue`) | **fsync** del fichero del mensaje, luego del directorio | Igual que blob. Un `enqueue` confirmado no se pierde |
 | **Manifest de colección vectorial** | **fsync** del temporal, rename, fsync del directorio | Igual que blob |
@@ -47,9 +47,16 @@ de ellos era falso:
    garantía**: sus viajes HTTP tardan más que el flush de fondo de 10 ms, así
    que todo estaba en disco cuando mataba el proceso.
 
-   Coste medido del default honesto: 1 964 → 848 escrituras/s
-   (`tests/wal_sync_cost.rs`). `group` sigue disponible para quien prefiera
-   throughput sabiendo lo que compra.
+   Coste medido del default honesto **cuando se tomó la decisión**: 1 964 → 848
+   escrituras/s (`tests/wal_sync_cost.rs`). Ese precio **ya no se paga**: el group
+   commit del WAL comparte un fsync entre los escritores que caen en el mismo
+   lote, y con eso la misma medición da 1 399/s en `per_write` contra 1 497/s en
+   `group`: **un 7% donde antes había un 2,3×**. La durabilidad honesta salió
+   casi gratis, que es exactamente para lo que sirve el group commit.
+
+   El desglose completo de dónde se fue el resto (785 → 22.989 `SET`/s por RESP en
+   SSD NVMe, 29×, con Redis 7 en 28.517 por la misma ruta) está en
+   [`docs/referencia/BENCHMARKS.md`](../referencia/BENCHMARKS.md#camino-de-escritura-kv--resp).
 
 2. **SQLite ya corre con `synchronous = FULL`.** Y la matriz de crash-recovery
    dejó de excluirlo: corría con `SQLITE_ENABLED=false` porque su durabilidad

@@ -127,7 +127,18 @@ pub struct Config {
     pub hnsw_segment_compaction_threshold: f32,
     /// Interval for checking HNSW compaction candidates.
     pub hnsw_segment_compaction_interval_secs: u64,
-    /// PR5: WAL sync mode: "per_write" (fsync each write) or "group" (buffered flush).
+    /// WAL sync mode: "per_write" (fsync each write) or "group" (buffered flush).
+    ///
+    /// **It no longer applies to KV/state writes**, and that is worth knowing
+    /// before setting it: those go through `Engine::commit_event`, whose group
+    /// commit always fsyncs once per batch (`Persist::write_batch_synced`). So on
+    /// that path `group` buys almost nothing: 1 497/s against `per_write`'s
+    /// 1 399/s in `tests/wal_sync_cost.rs`, about 7%. It used to be 2.3x. Group
+    /// commit is what closed the gap, which is the whole point of it.
+    ///
+    /// It still governs every path that appends one event at a time
+    /// (`Persist::append_event`): vector, doc, blob and queue mutations. There
+    /// `group` still trades a window of one batch (64) or 10 ms for throughput.
     pub wal_sync_mode: String,
     /// PR5: Group commit flush interval in ms. Default 10.
     pub wal_flush_interval_ms: u64,

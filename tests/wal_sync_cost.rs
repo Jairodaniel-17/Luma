@@ -98,7 +98,7 @@ async fn where_the_write_cost_actually_is() {
     let elapsed = started.elapsed();
     println!(
         "{:<30} {n} writes in {:?} = {:.0}/s",
-        "in-memory only (no WAL, no redb)",
+        "in-memory only (no WAL, no projection)",
         elapsed,
         n as f64 / elapsed.as_secs_f64()
     );

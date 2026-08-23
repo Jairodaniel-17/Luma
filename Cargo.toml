@@ -136,6 +136,10 @@ harness = false
 # `panic` se queda en `unwind` a proposito: `abort` recortaria mas, pero los
 # tests que comprueban que un panic en una tarea no se lleva el proceso dejarian
 # de comprobar nada.
+#
+# Y solo `strip`. `lto = "thin"` con `codegen-units = 1` estuvo aqui y se midio:
+# **0 bytes** de diferencia —en MSVC la informacion de depuracion va en un .pdb
+# aparte, no en el .exe, asi que no habia nada que recortar— a cambio de 1,1 GiB
+# de rustc en una sola unidad de codegen y builds de release notablemente mas
+# lentos. Un knob que no se midio no se queda; uno que se midio en cero, menos.
 strip = true
-lto = "thin"
-codegen-units = 1

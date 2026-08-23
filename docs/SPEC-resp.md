@@ -245,11 +245,22 @@ guía "migrar de Redis a Luma en 5 minutos" (Celery, arq, redis-py, ioredis),
 qué NO soporta y por qué. README enlaza la matriz.
 **Aceptación:** un dev externo configura Celery contra Luma solo con el doc.
 
-### 4.4 `[ ]` Benchmark honesto vs Redis  · impacto MEDIO · esfuerzo BAJO
+### 4.4 `[x]` Benchmark honesto vs Redis  · impacto MEDIO · esfuerzo BAJO
 `redis-benchmark` (SET/GET/LPUSH/ZADD, pipelining on/off) Luma vs Redis 7 en la
 misma máquina, mismo formato que los benchmarks vectoriales del README:
 tablas medidas, sin cifras vagas, publicando también donde Redis gana.
 **Aceptación:** sección en `docs/referencia/BENCHMARKS.md` + resumen en README.
+**Hecho.** `scripts/resp-benchmark.sh` conduce los dos motores con el mismo
+cliente y por la misma ruta de red, que es la parte fácil de saltarse: medido por
+loopback de su propio contenedor Redis da 147.783 `SET`/s, y cruzando la NAT
+—por donde se llega a Luma— da 28.517. Resultado con 256 clientes: Luma 22.989
+`SET`/s y 25.685 `GET`/s contra 28.517 y 27.298 de Redis, o sea el 81% de su
+escritura y el 94% de su lectura, haciendo fsync de cada escritura confirmada que
+Redis por defecto no hace. Y donde Redis gana, publicado: escritura pura y
+latencia p50. Dos cosas que el benchmark descubrió y que ninguna lectura del
+código habría dado: el control de PING (26.178/s) dice que en esta ruta `SET` ya
+va al 88% del techo del transporte, y `data_dir` en disco mecánico hunde el
+`SET` a 3.142/s sin mover el `GET`.
 
 ### 4.5 `[ ]` Pruebas de resiliencia continuas  · impacto ALTO · esfuerzo MEDIO
 Harness permanente en CI: crash-recovery matrix (kill -9 durante escritura de

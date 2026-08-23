@@ -530,6 +530,7 @@ Notas de honestidad:
 - La durabilidad depende de montar un volumen persistente para `data_dir` cuando se corre en contenedor.
 - La **comparativa contra Qdrant/Milvus** se hizo con scripts ad-hoc que **no están versionados** en el repo: las cifras son las observadas, pero hoy no se reejecutan con un comando del repositorio. Los benchmarks *internos* (`src/bin/bench.rs`) sí son reproducibles.
 - La **compatibilidad con el protocolo Redis (RESP)** está implementada y marcada **experimental**: 57/57 comandos de las fases 2 y 3 del SPEC, verificados byte a byte contra un Redis 7 real (330 comandos, 0 divergencias) y con Celery, kombu, arq y redis-py reales — incluido un worker Celery que consume, ejecuta y devuelve el resultado. Sigue siendo experimental hasta que el nightly esté verde 7 días seguidos, que es el criterio del plan. Divergencias conocidas y qué **no** está: [`docs/integrar/RESP.md`](docs/integrar/RESP.md).
+- **Escrituras por el listener RESP: 22.989 `SET`/s** (25.685 `GET`/s) en SSD NVMe, medidas con `redis-benchmark` a 256 clientes y **sin bajar ninguna garantía de durabilidad** (`wal_sync_mode = "per_write"`): son 29× el punto de partida de 785/s. Por el **mismo camino de red** y con el mismo cliente, Redis 7 da 28.517 `SET`/s y 27.298 `GET`/s — o sea Luma al 81% de su escritura y al 94% de su lectura, **haciendo fsync de cada escritura confirmada, que Redis por defecto no hace**. Dos advertencias que importan más que los totales: el control de PING (26.178/s Luma, 28.763/s Redis) dice que en esta ruta los dos van contra el techo del transporte, y en **disco mecánico** el `SET` de Luma cae a 3.142/s. Desglose capa por capa y los dos diseños que se midieron y se descartaron: [`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md#camino-de-escritura-kv--resp).
 
 ---
 
@@ -549,7 +550,7 @@ Notas de honestidad:
 | [`docs/integrar/RESP.md`](docs/integrar/RESP.md) | Compatibilidad con el protocolo de Redis: comandos, divergencias y cómo validarla |
 | [`docs/integrar/NS_MEM.md`](docs/integrar/NS_MEM.md) | Memoria de agentes (API completa) |
 | [`docs/empezar/SDK_PYTHON.md`](docs/empezar/SDK_PYTHON.md) | Guía del SDK Python |
-| [`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md) | Comparativa vs Qdrant/Milvus + benchmarks internos |
+| [`docs/referencia/BENCHMARKS.md`](docs/referencia/BENCHMARKS.md) | Comparativa vs Qdrant/Milvus, camino de escritura KV/RESP (el 29×, capa por capa, y el contraste con Redis 7) y benchmarks internos |
 | [`docs/referencia/BENCH.md`](docs/referencia/BENCH.md) | Cómo correr el binario de bench |
 | [`docs/empezar/FEATURES.md`](docs/empezar/FEATURES.md) | Inventario de funcionalidades |
 | [`docs/operar/SECURITY.md`](docs/operar/SECURITY.md) · [`docs/operar/THREAT_MODEL.md`](docs/operar/THREAT_MODEL.md) | Seguridad y modelo de amenazas |

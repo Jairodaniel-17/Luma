@@ -1,9 +1,10 @@
 # Benchmarks
 
-Dos familias de mediciones distintas:
+Tres familias de mediciones distintas:
 
 1. **[Comparativa contra Qdrant y Milvus](#comparativa-contra-qdrant-y-milvus-50k--768)** — Luma frente a otros motores, misma máquina y mismo dataset.
-2. **[Benchmarks internos reproducibles](#benchmarks-internos-reproducibles)** — el binario `src/bin/bench.rs` para comparar modos de índice entre sí.
+2. **[Camino de escritura KV / RESP](#camino-de-escritura-kv--resp)** — de dónde salió el 29× de escrituras por segundo, capa por capa, contra un Redis 7 real, y por qué se eligió un LSM.
+3. **[Benchmarks internos reproducibles](#benchmarks-internos-reproducibles)** — el binario `src/bin/bench.rs` para comparar modos de índice entre sí.
 
 ---
 
@@ -91,6 +92,202 @@ El upsert por lote insertaba al grafo HNSW **de uno en uno**. Se paralelizó (`a
 
 - **Ingesta**: 926 (HNSW) / 807 (DiskANN) vec/s siguen por debajo de Qdrant/Milvus (1.284–1.859). Lo que resta es el bookkeeping por registro (WAL, mmap, cuantización) que aún es serial; lotes más grandes lo acercan más.
 - **Throughput de consulta HNSW** a igual recall: `hnsw_rs` es algo más lento que el HNSW propio de Qdrant. La ventaja neta de Luma sigue siendo **RAM (DiskANN, 133 MB)** y **precisión a igual latencia**.
+
+---
+
+## Camino de escritura KV / RESP
+
+Esta sección existe porque una cifra sola no dice nada: el interés está en **qué
+capa costaba qué**, y en las dos veces que la medición mató un arreglo que ya
+estaba a punto de escribirse.
+
+Punto de partida: 785 `SET`/s por el listener RESP. Punto de llegada: **22.989**
+en SSD NVMe, con Redis 7 en **28.517** por la misma ruta y el mismo cliente. El
+diagnóstico que abrió todo fue que **quitar el fsync entero solo compraba 2×** y
+que el pipelining (`-P 16`) no compraba nada — dos hechos que juntos dicen que el
+techo no era el disco ni la red, sino una serialización dentro del servidor.
+
+### Cada capa, medida
+
+| # | Cambio | `SET`/s por RESP | Factor acumulado | Qué era el techo antes de este cambio |
+|---|---|---:|---:|---|
+| 0 | Punto de partida (`wal_sync_mode = per_write`) | **785** | 1× | Un fsync por escritura *y* una transacción de la proyección por escritura, en serie |
+| 1 | **Group commit** del WAL (líder/seguidor) | **4.648** | 5,9× | El fsync ya se comparte por lote, pero la proyección sigue abriendo una transacción por registro |
+| 2 | La proyección aplica **el lote entero** en una transacción | **8.893** | 11,3× | Plano con 32, 128 y 256 clientes mientras la latencia subía lineal — cola con servicio fijo |
+| 3 | **`block_in_place`** en el dispatch RESP | **22.989** | **29,3×** | **El camino de red.** El control (PING, que cruza la misma red y no hace trabajo) da 26.178/s, así que `SET` ya va al 88% de lo que el transporte permite |
+| 4 | Proyección KV **redb → LSM (fjall)** | *no se separa aquí* | — | — |
+
+Ninguno de los cuatro toca una garantía de durabilidad: `wal_sync_mode` sigue en
+`per_write`, y el fsync no desapareció, se **comparte** entre los escritores que
+coinciden en el mismo lote — el mismo patrón que usan Postgres y MySQL.
+
+> **La fila 4 dice «no se separa» a propósito, y es una corrección.** Una versión
+> anterior de esta tabla le atribuía al LSM un salto de 24.242 a 26.178 `SET`/s.
+> Las dos cifras estaban mal: 26.178 es el **control de PING**, no un `SET`, y
+> tras el paso 3 el listener ya está contra el techo del transporte, así que un
+> cambio en la proyección no puede aparecer aquí ni debería. Donde sí aparece es
+> en proceso, sin red de por medio: **26.379 → 35.622 escrituras/s** con 128
+> escritores. El error salió al reejecutar el benchmark en vez de al releerlo,
+> que es la única forma en que salen estos.
+
+### El número que más cambia el resultado no es ninguno de los cuatro
+
+Es **en qué disco vive `data_dir`**. Mismo binario, misma configuración, mismo
+cliente, misma máquina — solo cambia la unidad:
+
+| `data_dir` en | `SET`/s | `GET`/s |
+|---|---:|---:|
+| Un disco duro mecánico (HDD SATA, 7200 rpm) | 3.142 | 24.671 |
+| Un SSD NVMe | **22.989** | 25.685 |
+
+**7,3× de diferencia en escritura y ninguna en lectura**, que es exactamente la
+firma de un camino dominado por la latencia de fsync: las lecturas se sirven de
+memoria, no tocan el disco, y no se mueven ni un 4%. Un fsync en un plato que
+gira cuesta un cuarto de vuelta; en NVMe cuesta un viaje al controlador.
+
+Dos consecuencias prácticas:
+
+1. **No pongas `data_dir` en un disco mecánico.** No es una recomendación de
+   estilo: son 3.142 escrituras/s contra 22.989 en la misma máquina.
+2. **Cualquier cifra de escritura sin decir en qué dispositivo se midió no
+   significa nada.** Las de esta sección son NVMe salvo donde diga lo contrario.
+
+### Contra Redis 7, por el mismo camino de red
+
+Comparar contra Redis honestamente exige una cosa que es fácil de saltarse: que
+el cliente llegue a los dos **por la misma ruta**. Medido desde dentro de su
+propio contenedor, Redis da 147.783 `SET`/s; medido cruzando la NAT de Docker
+hacia el host —que es por donde se llega a Luma— da 28.517. La diferencia es el
+transporte, no el motor, y el control de PING lo prueba: 150.754 contra 28.763.
+
+Así que ambos por la misma ruta, mismo `redis-benchmark`, 30.000 operaciones,
+256 clientes:
+
+| | PING (control) | `SET` | `SET` como % de su propio control | `GET` |
+|---|---:|---:|---:|---:|
+| **Redis 7** | 28.763 | **28.517** | 99% | 27.298 |
+| **Luma** | 26.178 | **22.989** | 88% | 25.685 |
+
+- **Luma está al 81% del `SET` de Redis y al 94% de su `GET`.**
+- **Y hace fsync de cada escritura confirmada, que Redis por defecto no hace.**
+  Redis con la configuración de fábrica responde OK antes de que el dato esté en
+  el medio (`appendfsync everysec` o solo RDB); Luma no vuelve de un `SET` hasta
+  que su lote está en disco. Comparar 22.989 durables contra 28.517 no durables
+  favorece a Redis, no a Luma, y así hay que leerlo.
+- **Los dos están contra el techo del transporte en esta ruta**, al 99% y al 88%
+  de su propio control. El motor de Luma da 35.622 escrituras/s en proceso, por
+  encima de lo que esta red deja pasar, así que en una ruta más rápida la brecha
+  la decide otra cosa.
+
+Dónde gana Redis, dicho sin adornos: en escritura pura sigue por delante, y su
+latencia p50 por loopback (0,78 ms) está en otra liga que cualquier cosa que
+cruce una NAT. Lo que Luma ofrece a cambio no es velocidad, es que la escritura
+que confirmó está en disco y que el mismo binario también es el vectorial, el
+SQL, el S3 y la memoria de agentes.
+
+### Los dos hallazgos que solo aparecen midiendo
+
+**El paso 3 no era un problema de base de datos.** Tras group commit el motor
+daba 21.616 escrituras/s *en proceso* y por RESP salían 8.893, plano con 32, 128
+y 256 clientes. `dispatch` es síncrono y hace trabajo bloqueante de verdad (el
+fsync del WAL, la transacción de la proyección), así que llamarlo directo desde
+la tarea async **bloqueaba un worker de Tokio**: como máximo había tantos
+comandos en vuelo como workers, 20 en esta máquina. Y group commit no puede
+agrupar escritores que nunca llegan, así que el lote nunca pasaba de 20 aunque
+hubiera 256 clientes esperando. `block_in_place` entrega las otras tareas de ese
+worker a un hilo de reemplazo y deja que este bloquee.
+
+**Un «group commit de verdad» no habría comprado nada.** Estaba planificado y se
+descartó al medir: el `append_guard` global significa que nunca hay dos
+escritores dentro del WAL a la vez, así que no había nada que agrupar que no
+estuviera ya agrupado.
+
+### Por qué un LSM, y por qué no las otras dos opciones
+
+Se midieron tres diseños antes de elegir. Los ejes son los que se pidieron:
+velocidad, **no gastar RAM sino disco**, y todo en Rust en un binario.
+
+| | **1+2** redb por lotes | **3** WAL como store + índice en RAM | **5** LSM (fjall) — *elegida* |
+|---|---|---|---|
+| Inserción en rol de proyección | 11.401/s | — | **432.764/s** |
+| 128 escritores concurrentes | 235.679/s (por lotes) | 54.514/s | **208.944/s** |
+| Con fsync cada 32 | — | — | 72.096/s |
+| RAM | Acotada por la caché de páginas | **150 bytes por clave, para siempre** — 15 GiB con 100M claves | Acotada por el memtable: **+18,3 MiB** en 50k inserciones |
+| Amplificación de escritura | **16 KiB para un valor de 30 bytes** (B-tree copy-on-write: reescribe el camino de páginas de la hoja a la raíz) | Ninguna: el valor ya está en el WAL | La del volcado de memtable, amortizada |
+| Iteración ordenada (`KEYS`, `SCAN`, `list_range`) | Sí | **No, a ningún precio**, con índice hash; el mapa ordenado que sí puede es el que cuesta 150 B/clave | Sí, nativa: un LSM está ordenado. Escaneo por prefijo de 100 claves en **34 µs** |
+| Compactación | No aplica | **Hay que escribirla** — es el núcleo riesgoso de esta opción | Ya escrita y probada por alguien más |
+| Migración de datos | — | Ninguna | **Ninguna** |
+| Todo en Rust | Sí | Sí | Sí, `fjall` es Rust puro |
+
+Dos cosas de esta tabla merecen decirse en voz alta:
+
+- **La opción 3 se descartó por la RAM, que es justo lo que se pidió no gastar.**
+  Su índice hash de 37 bytes por clave era el número atractivo, pero un hash de
+  la clave no se puede recorrer en el orden de la clave, y `KEYS`, `SCAN` y
+  `list_range` lo necesitan. El mapa ordenado que sí sirve cuesta 150 bytes por
+  clave para siempre: 15 GiB con 100M claves.
+- **El LSM no tenía migración, y eso es lo que lo hizo viable.** Se había
+  descartado antes por «una dependencia nueva y una migración de datos». La
+  dependencia es real; la migración no existía: la proyección **no guarda datos
+  propios**, es una proyección del WAL que el replay reconstruye desde
+  `applied_offset`. Cambiarla es borrar un fichero y reproducir.
+
+  Y eso no es un argumento, es un test: `tests/golden_data_dir.rs` arranca el
+  binario actual sobre un `data_dir` grabado por v4.24.0 —que contiene
+  `state.redb`— y lee de vuelta `kv.value.marker == "kv-v4.24.0"`. Pasa.
+
+### Escalado con clientes, tras los cuatro cambios
+
+| Clientes | `SET`/s |
+|---:|---:|
+| 32 | 12.804 |
+| 128 | 23.981 |
+| 256 | **24.242** |
+
+Que escale con los clientes es el punto: antes del paso 3 era plano (8.893 /
+7.755 / 8.180), que es la firma de una cola con servicio fijo y no de un límite
+de red. Y que se aplane *después* de 128 clientes ya sí es el transporte: el
+motor en proceso da **35.622/s** con 128 escritores, por encima de lo que esta
+ruta deja pasar.
+
+### Lo que ata ahora
+
+El coste por escritura sube con el tamaño del valor, y el LSM ya aplanó la
+parte que le tocaba:
+
+| Tamaño del valor | Con redb | Con el LSM |
+|---:|---:|---:|
+| 10 bytes | 15.185/s | 13.569/s |
+| 200 bytes | 12.991/s | 11.406/s |
+| 2.000 bytes | 8.945/s | **10.418/s** |
+
+El caso que mejora es el del valor **grande**, que es justo el que un B-tree
+copy-on-write castigaba reescribiendo páginas; en valores pequeños el LSM queda
+un pelo por debajo y no compensa perseguirlo. Lo que queda de la pendiente apunta
+al formato del evento y no al almacenamiento: el payload es un
+`serde_json::Value` que se clona a la cola, se clona otra vez para el lote, se
+codifica a JSON para el WAL, se decodifica por `StoredVal` y se re-codifica para
+la proyección. La proyección ya no es el límite —hace 432.764 inserciones/s, un
+orden de magnitud más que el motor entero— y el motor en proceso escala limpio:
+1.453 → 4.792 → 16.367 → **35.622/s** con 1, 8, 32 y 128 escritores.
+
+### Reproducir
+
+```bash
+# El camino RESP completo, contra un Redis 7 real como referencia
+scripts/resp-benchmark.sh <puerto-resp> <api-key>
+
+# Los diagnósticos por capa (ignorados por defecto)
+cargo test --release --test wal_sync_cost       -- --ignored --nocapture --test-threads=1
+cargo test --release --test redb_ceiling        -- --ignored --nocapture --test-threads=1
+cargo test --release --test lsm_ceiling         -- --ignored --nocapture --test-threads=1
+cargo test --release --test wal_index_prototype -- --ignored --nocapture
+cargo test --release --test ram_cost            -- --ignored --nocapture
+```
+
+Los cinco diagnósticos siguen en el repo a propósito: son la evidencia de por qué
+el diseño es el que es, y de las dos opciones que se descartaron con números en
+vez de con opiniones.
 
 ---
 
