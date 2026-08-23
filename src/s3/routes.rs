@@ -43,6 +43,12 @@ pub struct S3Error {
     pub code: &'static str,
     message: String,
     resource: String,
+    /// Headers the error itself has to carry.
+    ///
+    /// Only one error needs this today, and it genuinely needs it: a `416` must
+    /// answer with `Content-Range: bytes */{size}` so the client learns the
+    /// actual length instead of having to guess and retry.
+    headers: Vec<(axum::http::HeaderName, String)>,
 }
 
 impl S3Error {
@@ -52,11 +58,17 @@ impl S3Error {
             code,
             message: message.into(),
             resource: String::new(),
+            headers: Vec::new(),
         }
     }
 
     fn at(mut self, resource: impl Into<String>) -> Self {
         self.resource = resource.into();
+        self
+    }
+
+    fn with_header(mut self, name: axum::http::HeaderName, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
         self
     }
 
@@ -94,12 +106,18 @@ impl S3Error {
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
         let body = xml::error(self.code, &self.message, &self.resource);
-        (
+        let mut response = (
             self.status,
             [(axum::http::header::CONTENT_TYPE, "application/xml")],
             body,
         )
-            .into_response()
+            .into_response();
+        for (name, value) in self.headers {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+                response.headers_mut().insert(name, value);
+            }
+        }
+        response
     }
 }
 
@@ -143,6 +161,15 @@ fn unframe_body(caller: &Caller, body: &Bytes) -> Result<Vec<u8>, S3Error> {
 /// Anonymous access is not supported at all: S3 allows it for public buckets,
 /// and a multi-tenant store where a missing signature means "public" is one
 /// misconfiguration away from being an open bucket.
+/// `method` must be the method that **arrived**, never a literal chosen by the
+/// route.
+///
+/// SigV4 signs the method as part of the canonical request, so signing "GET" for
+/// a request the client sent as "HEAD" produces a mismatch and a 403 that reads
+/// exactly like a wrong secret. Every handler used to pass a constant, which was
+/// fine only while each route served one method — and axum answers HEAD with the
+/// GET handler when there is no HEAD route, which is precisely what `HeadBucket`
+/// does. MinIO's mint suite failed on its first test because of it.
 async fn authenticate(
     state: &AppState,
     method: &str,
@@ -368,6 +395,40 @@ fn iso8601(time: std::time::SystemTime) -> String {
     )
 }
 
+/// An HTTP date, which is **not** the same shape as the one S3 puts in XML.
+///
+/// `Last-Modified` is an HTTP header, so RFC 9110 fixes its format:
+/// `Sun, 06 Nov 1994 08:49:37 GMT`, always GMT, always those English
+/// abbreviations. This server sent the ISO 8601 string it uses inside the
+/// listing XML instead, and the two are not interchangeable — a listing that
+/// said `2026-08-23T17:29:14.000Z` in a header made minio-py fail with "time
+/// data does not match HTTP header format" on its first `PutObject`. boto3 does
+/// not parse the header, which is why 16 checks against it never noticed.
+///
+/// The XML uses [`iso8601`] and keeps doing so; only the header changed.
+fn http_date(time: std::time::SystemTime) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let secs = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let time_of_day = secs % 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    // 1970-01-01 was a Thursday, which is index 4 with Sunday at 0.
+    let weekday = DAYS[((days + 4) % 7) as usize];
+    let month_name = MONTHS[(month as usize).saturating_sub(1).min(11)];
+    format!(
+        "{weekday}, {day:02} {month_name} {year:04} {:02}:{:02}:{:02} GMT",
+        time_of_day / 3600,
+        (time_of_day % 3600) / 60,
+        time_of_day % 60
+    )
+}
+
 /// Days since the epoch to a calendar date (Howard Hinnant's algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -423,9 +484,10 @@ fn multipart_etag(part_bodies: &[Vec<u8>]) -> String {
 
 pub async fn list_buckets(
     State(state): State<AppState>,
+    method: axum::http::Method,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let caller = authenticate(&state, "GET", "/", "", &headers).await?;
+    let caller = authenticate(&state, method.as_str(), "/", "", &headers).await?;
     let Some(accounts) = state.accounts.clone() else {
         return Ok(xml_response(StatusCode::OK, xml::list_buckets(&[])));
     };
@@ -453,6 +515,7 @@ pub async fn list_buckets(
 
 pub async fn bucket_get(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path(bucket): Path<String>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
@@ -460,7 +523,14 @@ pub async fn bucket_get(
     refuse_unsupported(&params)?;
     safe_segment(&bucket)?;
     let query = raw_query(&params);
-    let caller = authenticate(&state, "GET", &format!("/{bucket}"), &query, &headers).await?;
+    let caller = authenticate(
+        &state,
+        method.as_str(),
+        &format!("/{bucket}"),
+        &query,
+        &headers,
+    )
+    .await?;
     own_bucket(&state, &caller, &bucket).await?;
 
     let directory = blobs_root(&state).join(&bucket);
@@ -545,13 +615,14 @@ pub async fn bucket_get(
 
 pub async fn bucket_put(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path(bucket): Path<String>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     refuse_unsupported(&params)?;
     safe_segment(&bucket)?;
-    let caller = authenticate(&state, "PUT", &format!("/{bucket}"), "", &headers).await?;
+    let caller = authenticate(&state, method.as_str(), &format!("/{bucket}"), "", &headers).await?;
     own_bucket(&state, &caller, &bucket).await?;
 
     std::fs::create_dir_all(blobs_root(&state).join(&bucket)).map_err(|e| {
@@ -566,11 +637,12 @@ pub async fn bucket_put(
 
 pub async fn bucket_delete(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path(bucket): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     safe_segment(&bucket)?;
-    let caller = authenticate(&state, "DELETE", &format!("/{bucket}"), "", &headers).await?;
+    let caller = authenticate(&state, method.as_str(), &format!("/{bucket}"), "", &headers).await?;
     own_bucket(&state, &caller, &bucket).await?;
 
     let directory = blobs_root(&state).join(&bucket);
@@ -646,8 +718,193 @@ fn object_path(state: &AppState, bucket: &str, key: &str) -> S3Result<PathBuf> {
     Ok(blobs_root(state).join(bucket).join(key))
 }
 
+/// Where the composite ETag of a multipart object is remembered.
+///
+/// A parallel tree rather than a sidecar next to the object: listings walk the
+/// blob directory, so a `key.etag` file living beside `key` would show up as an
+/// object of its own, and reserving a suffix would make `report.etag` an
+/// unstorable key name.
+fn etag_sidecar(state: &AppState, bucket: &str, key: &str) -> S3Result<PathBuf> {
+    safe_segment(bucket)?;
+    if key.is_empty() || key.contains("..") || key.contains('\0') {
+        return Err(S3Error::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "the key contains characters this server refuses",
+        ));
+    }
+    let data_dir = state
+        .config
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| "data".into());
+    Ok(PathBuf::from(data_dir)
+        .join("s3-meta")
+        .join("etags")
+        .join(bucket)
+        .join(key))
+}
+
+/// What this server remembers about an object beyond its bytes.
+///
+/// Persisted as JSON beside the object tree (not inside it — listings walk the
+/// blob directory, so a sidecar living next to `key` would show up as an object
+/// of its own).
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ObjectMeta {
+    /// `md5(concat(part digests))-N` for a multipart object; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    composite_etag: Option<String>,
+    /// The `Content-Type` the caller sent, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    /// `x-amz-meta-*`, with the prefix stripped and the name lowercased.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    user: BTreeMap<String, String>,
+    /// The MD5 of the bytes this record describes.
+    ///
+    /// What makes the record **self-validating**: it is believed only while the
+    /// object still hashes to this. The alternative was to invalidate it from
+    /// every path that can write an object, and those are not all in this file —
+    /// the same bytes are reachable through the native `/v1/blob` API, which
+    /// knows nothing about S3 metadata. A check that cannot be forgotten beats a
+    /// list of call sites that can.
+    guard: String,
+}
+
+/// Read the metadata record for an object, if it still describes these bytes.
+fn read_meta(state: &AppState, bucket: &str, key: &str, bytes: &[u8]) -> Option<ObjectMeta> {
+    let path = meta_sidecar(state, bucket, key).ok()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let meta: ObjectMeta = serde_json::from_str(&text).ok()?;
+    (meta.guard == etag_of(bytes)).then_some(meta)
+}
+
+/// The ETag to report for an object that already exists on disk.
+///
+/// S3's multipart ETag is `md5(concat(part digests))-N`, and it is **stable**:
+/// what `CompleteMultipartUpload` returns is what every later `HEAD` and `GET`
+/// returns. This server computed the composite at completion, returned it, and
+/// then threw it away — so the same object answered with a composite ETag once
+/// and with the plain MD5 of its bytes forever after.
+///
+/// That is not a cosmetic difference. `aws s3 sync`, rclone and every cache that
+/// validates on ETag would see the object change on every check, and re-transfer
+/// it. It survived because the check that covers this
+/// (`a_multipart_etag_has_the_dash_and_part_count`) only ever read the ETag out
+/// of the completion *response* and never asked the server again.
+///
+/// A missing record falls back to the MD5 of the bytes, which is both correct
+/// for single-part objects and exactly the previous behaviour — so data written
+/// by an older build, or restored from a backup taken before the sidecar
+/// existed, keeps answering as it did instead of failing.
+fn stored_etag(state: &AppState, bucket: &str, key: &str, bytes: &[u8]) -> String {
+    read_meta(state, bucket, key, bytes)
+        .and_then(|m| m.composite_etag)
+        .unwrap_or_else(|| etag_of(bytes))
+}
+
+/// The headers an object answers with beyond its ETag: its content type and any
+/// `x-amz-meta-*` the caller stored with it.
+fn stored_headers(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    bytes: &[u8],
+) -> (String, BTreeMap<String, String>) {
+    match read_meta(state, bucket, key, bytes) {
+        Some(meta) => (
+            meta.content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            meta.user,
+        ),
+        // S3's own default for an object stored without one.
+        None => ("application/octet-stream".to_string(), BTreeMap::new()),
+    }
+}
+
+/// The `Content-Type` a request carried, if it named one worth keeping.
+///
+/// Clients that send no body type still send `application/octet-stream`, and
+/// recording that is the same as recording nothing — it is already the default.
+fn content_type_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty() && *v != "application/octet-stream")
+        .map(|v| v.to_string())
+}
+
+/// Write the stored `x-amz-meta-*` back onto a response.
+fn put_user_metadata(headers: &mut HeaderMap, user: &BTreeMap<String, String>) {
+    for (name, value) in user {
+        let full = format!("x-amz-meta-{name}");
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(full.as_str()),
+            axum::http::HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+}
+
+/// The `x-amz-meta-*` headers of a request, prefix stripped and names lowercased.
+///
+/// Lowercased because HTTP header names are case-insensitive while a JSON map's
+/// keys are not: a client that sends `X-Amz-Meta-Testing` and reads back
+/// `x-amz-meta-testing` must find it.
+fn user_metadata(headers: &HeaderMap) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (name, value) in headers {
+        let name = name.as_str().to_ascii_lowercase();
+        if let Some(rest) = name.strip_prefix("x-amz-meta-") {
+            if let Ok(text) = value.to_str() {
+                out.insert(rest.to_string(), text.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Where an object's metadata record lives.
+fn meta_sidecar(state: &AppState, bucket: &str, key: &str) -> S3Result<PathBuf> {
+    etag_sidecar(state, bucket, key)
+}
+
+/// Write an object's metadata record, or remove it.
+///
+/// `None` clears it, which every write that replaces an object must do: the old
+/// content type, user metadata and composite ETag all describe bytes that are no
+/// longer there, and a stale record would be worse than none.
+fn remember_meta(state: &AppState, bucket: &str, key: &str, meta: Option<ObjectMeta>) {
+    let Ok(path) = meta_sidecar(state, bucket, key) else {
+        return;
+    };
+    match meta {
+        Some(meta) => {
+            // Nothing worth remembering: skip the file rather than leave an
+            // empty record for every ordinary PUT.
+            if meta.composite_etag.is_none() && meta.content_type.is_none() && meta.user.is_empty()
+            {
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(text) = serde_json::to_string(&meta) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 pub async fn object_put(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
@@ -656,13 +913,31 @@ pub async fn object_put(
     refuse_unsupported(&params)?;
     let caller = authenticate(
         &state,
-        "PUT",
+        method.as_str(),
         &format!("/{bucket}/{key}"),
         &raw_query(&params),
         &headers,
     )
     .await?;
     own_bucket(&state, &caller, &bucket).await?;
+
+    // `CopyObject` is a `PUT` with a header and no body, so without this it fell
+    // through to the ordinary write path and **stored an empty object** —
+    // answering 200 with an XML-less body while destroying the destination. An
+    // `aws s3 cp` between two keys lost the data and reported success.
+    if let Some(source) = headers.get("x-amz-copy-source") {
+        let source = source
+            .to_str()
+            .map_err(|_| {
+                S3Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "x-amz-copy-source is not valid text",
+                )
+            })?
+            .to_string();
+        return copy_object(&state, &caller, &bucket, &key, &source, &headers).await;
+    }
 
     // Before anything looks at the bytes: for a chunk-framed body the wire
     // content is not the object, and every length, hash and write below has to
@@ -710,6 +985,20 @@ pub async fn object_put(
                 e.to_string(),
             )
         })?;
+    // Replaces whatever was remembered: an ordinary PUT is not multipart, so any
+    // composite ETag is retired, and the content type and user metadata are the
+    // ones this request carried.
+    remember_meta(
+        &state,
+        &bucket,
+        &key,
+        Some(ObjectMeta {
+            composite_etag: None,
+            content_type: content_type_of(&headers),
+            user: user_metadata(&headers),
+            guard: etag_of(&body),
+        }),
+    );
     crate::api::quotas::record_blob_delta(
         state.sqlite.as_ref(),
         &ctx,
@@ -750,15 +1039,153 @@ async fn enforcing_context(state: &AppState, caller: &Caller) -> crate::api::Ten
     ctx
 }
 
+/// `CopyObject`: server-side copy, which is also how a client changes an
+/// object's metadata without re-uploading it.
+///
+/// The metadata directive is the part that is easy to get wrong. `COPY` (the
+/// default) carries the source's content type and `x-amz-meta-*` across;
+/// `REPLACE` takes them from this request. Treating every copy as `REPLACE`
+/// would silently strip metadata on the operation clients use precisely to
+/// preserve it.
+async fn copy_object(
+    state: &AppState,
+    caller: &Caller,
+    bucket: &str,
+    key: &str,
+    source: &str,
+    headers: &HeaderMap,
+) -> Result<Response, S3Error> {
+    let (src_bucket, src_key) = parse_copy_source(source).ok_or_else(|| {
+        S3Error::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "x-amz-copy-source must be /bucket/key",
+        )
+    })?;
+
+    // The source bucket is checked too: a copy reads it, so letting it through
+    // unchecked would be a cross-tenant read wearing a write's clothing.
+    own_bucket(state, caller, &src_bucket).await?;
+
+    let src_path = object_path(state, &src_bucket, &src_key)?;
+    let bytes = std::fs::read(&src_path)
+        .map_err(|_| S3Error::no_such_key(&format!("/{src_bucket}/{src_key}")))?;
+
+    let replace = headers
+        .get("x-amz-metadata-directive")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("REPLACE"));
+
+    // Copying a key onto itself is only meaningful when it changes something,
+    // which is what S3 says too.
+    if src_bucket == bucket && src_key == key && !replace {
+        return Err(S3Error::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+            "the source and destination are the same and no metadata is being replaced",
+        ));
+    }
+
+    let dst_path = object_path(state, bucket, key)?;
+    if let Some(parent) = dst_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let replacing = std::fs::metadata(&dst_path).map(|m| m.len()).unwrap_or(0);
+    crate::durability::write_atomic(&dst_path, &bytes)
+        .await
+        .map_err(|e| {
+            S3Error::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                e.to_string(),
+            )
+        })?;
+
+    let source_meta = read_meta(state, &src_bucket, &src_key, &bytes);
+    let (content_type, user) = if replace {
+        (content_type_of(headers), user_metadata(headers))
+    } else {
+        match &source_meta {
+            Some(m) => (m.content_type.clone(), m.user.clone()),
+            None => (None, BTreeMap::new()),
+        }
+    };
+    // A copy of a multipart object is a fresh single object: its ETag is the MD5
+    // of the bytes, which is what S3 reports too. Carrying the composite across
+    // would describe part boundaries the copy does not have.
+    remember_meta(
+        state,
+        bucket,
+        key,
+        Some(ObjectMeta {
+            composite_etag: None,
+            content_type,
+            user,
+            guard: etag_of(&bytes),
+        }),
+    );
+
+    crate::api::quotas::record_blob_delta(
+        state.sqlite.as_ref(),
+        &tenant_context(caller),
+        bytes.len() as i64 - replacing as i64,
+    )
+    .await;
+
+    let modified = std::fs::metadata(&dst_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    Ok(xml_response(
+        StatusCode::OK,
+        xml::copy_object(&etag_of(&bytes), &iso8601(modified)),
+    ))
+}
+
+/// Split `x-amz-copy-source` into bucket and key.
+///
+/// The header is percent-encoded and may or may not have a leading slash, and it
+/// may carry a `?versionId=` this server has no versions for. Accepting only one
+/// of those shapes would reject clients that are behaving correctly.
+fn parse_copy_source(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim().trim_start_matches('/');
+    let without_version = trimmed.split('?').next().unwrap_or(trimmed);
+    let (bucket, key) = without_version.split_once('/')?;
+    if bucket.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((percent_decode(bucket), percent_decode(key)))
+}
+
+/// Decode `%XX` escapes, leaving anything malformed as written.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub async fn object_get(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     let caller = authenticate(
         &state,
-        "GET",
+        method.as_str(),
         &format!("/{bucket}/{key}"),
         &raw_query(&params),
         &headers,
@@ -770,64 +1197,174 @@ pub async fn object_get(
     let bytes =
         std::fs::read(&path).map_err(|_| S3Error::no_such_key(&format!("/{bucket}/{key}")))?;
     let meta = std::fs::metadata(&path).ok();
-    let etag = etag_of(&bytes);
+    let etag = stored_etag(&state, &bucket, &key, &bytes);
     let modified = meta
         .and_then(|m| m.modified().ok())
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
-    Ok((
-        StatusCode::OK,
+    let total = bytes.len() as u64;
+    let range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| parse_range(raw, total));
+
+    // `Some(None)` is a syntactically valid range that this object cannot
+    // satisfy, which S3 answers with 416 and a `Content-Range` naming the size
+    // — not with the whole object, and not with an empty 206.
+    if range == Some(None) {
+        return Err(S3Error::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "InvalidRange",
+            "The requested range is not satisfiable",
+        )
+        .at(format!("/{bucket}/{key}"))
+        .with_header(
+            axum::http::header::CONTENT_RANGE,
+            format!("bytes */{total}"),
+        ));
+    }
+
+    // Resolved before the body is moved out: the metadata record is keyed on the
+    // hash of the *whole* object, so it has to be read while all of it is still
+    // here, not from whatever slice a range request asked for.
+    let (content_type, user) = stored_headers(&state, &bucket, &key, &bytes);
+
+    let (status, body, content_range) = match range.flatten() {
+        Some((first, last)) => (
+            StatusCode::PARTIAL_CONTENT,
+            bytes[first as usize..=last as usize].to_vec(),
+            Some(format!("bytes {first}-{last}/{total}")),
+        ),
+        None => (StatusCode::OK, bytes, None),
+    };
+    let mut response = (
+        status,
         [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/octet-stream".to_string(),
-            ),
+            (axum::http::header::CONTENT_TYPE, content_type),
             (axum::http::header::ETAG, format!("\"{etag}\"")),
-            (axum::http::header::LAST_MODIFIED, iso8601(modified)),
+            (axum::http::header::LAST_MODIFIED, http_date(modified)),
+            (axum::http::header::ACCEPT_RANGES, "bytes".to_string()),
         ],
-        bytes,
+        body,
     )
-        .into_response())
+        .into_response();
+    put_user_metadata(response.headers_mut(), &user);
+    if let Some(value) = content_range {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::CONTENT_RANGE, value);
+        }
+    }
+    Ok(response)
+}
+
+/// Parse one HTTP byte range against a known object size.
+///
+/// Three-valued on purpose, because the three cases have three different
+/// answers and collapsing any two of them is a bug:
+///
+/// - `None` — not a range this server acts on, so serve the whole object with
+///   `200`. That covers a malformed header (RFC 9110 says to ignore one) and a
+///   multi-range request, which real S3 also answers with the entire object
+///   rather than a multipart body.
+/// - `Some(None)` — well formed, unsatisfiable: `416`.
+/// - `Some(Some((first, last)))` — inclusive, clamped, and never empty: `206`.
+///
+/// Before this existed the `Range` header was not read at all, so every ranged
+/// `GET` returned `200` and the whole body. That is worse than refusing the
+/// header: boto3 downloads a large object as concurrent ranged `GET`s and
+/// writes each reply at its own offset, so an ignored `Range` does not fail —
+/// it writes the whole object into every slot and hands the caller a corrupt
+/// file with no error anywhere. `tests/e2e/s3_scale.py` is what caught it.
+fn parse_range(raw: &str, total: u64) -> Option<Option<(u64, u64)>> {
+    let spec = raw.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    let (start, end) = (start.trim(), end.trim());
+
+    let (first, last) = if start.is_empty() {
+        // `bytes=-N`: the final N bytes. A suffix of zero asks for nothing,
+        // which is unsatisfiable rather than an empty success; a suffix larger
+        // than the object simply means the whole object.
+        let suffix: u64 = end.parse().ok()?;
+        if suffix == 0 {
+            return Some(None);
+        }
+        (total.saturating_sub(suffix), total.saturating_sub(1))
+    } else {
+        let first: u64 = start.parse().ok()?;
+        // An open end, and an end past the object, both mean "to the last byte".
+        let last = if end.is_empty() {
+            total.saturating_sub(1)
+        } else {
+            end.parse::<u64>().ok()?.min(total.saturating_sub(1))
+        };
+        (first, last)
+    };
+
+    if total == 0 || first >= total || first > last {
+        return Some(None);
+    }
+    Some(Some((first, last)))
 }
 
 pub async fn object_head(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let caller = authenticate(&state, "HEAD", &format!("/{bucket}/{key}"), "", &headers).await?;
+    let caller = authenticate(
+        &state,
+        method.as_str(),
+        &format!("/{bucket}/{key}"),
+        "",
+        &headers,
+    )
+    .await?;
     own_bucket(&state, &caller, &bucket).await?;
 
     let path = object_path(&state, &bucket, &key)?;
     let meta =
         std::fs::metadata(&path).map_err(|_| S3Error::no_such_key(&format!("/{bucket}/{key}")))?;
-    let etag = std::fs::read(&path)
-        .map(|b| etag_of(&b))
-        .unwrap_or_default();
+    // Read once and derive both: HEAD must answer with the same ETag, content
+    // type and user metadata as GET, and deriving them from different reads is
+    // how the two drift.
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    let etag = stored_etag(&state, &bucket, &key, &bytes);
+    let (content_type, user) = stored_headers(&state, &bucket, &key, &bytes);
 
-    Ok((
+    let mut response = (
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_LENGTH, meta.len().to_string()),
+            (axum::http::header::CONTENT_TYPE, content_type),
             (axum::http::header::ETAG, format!("\"{etag}\"")),
             (
                 axum::http::header::LAST_MODIFIED,
-                iso8601(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)),
+                http_date(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)),
             ),
+            (axum::http::header::ACCEPT_RANGES, "bytes".to_string()),
         ],
     )
-        .into_response())
+        .into_response();
+    put_user_metadata(response.headers_mut(), &user);
+    Ok(response)
 }
 
 pub async fn object_delete(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     let caller = authenticate(
         &state,
-        "DELETE",
+        method.as_str(),
         &format!("/{bucket}/{key}"),
         &raw_query(&params),
         &headers,
@@ -852,6 +1389,9 @@ pub async fn object_delete(
         )
         .await;
     }
+    // Unconditionally, not only when the object was there: a record left behind
+    // would hand a later object at the same key the previous one's metadata.
+    remember_meta(&state, &bucket, &key, None);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -868,6 +1408,7 @@ fn multipart_dir(state: &AppState, upload_id: &str) -> PathBuf {
 
 pub async fn object_post(
     State(state): State<AppState>,
+    method: axum::http::Method,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
@@ -875,7 +1416,7 @@ pub async fn object_post(
 ) -> Result<Response, S3Error> {
     let caller = authenticate(
         &state,
-        "POST",
+        method.as_str(),
         &format!("/{bucket}/{key}"),
         &raw_query(&params),
         &headers,
@@ -885,13 +1426,27 @@ pub async fn object_post(
 
     if params.contains_key("uploads") {
         let upload_id = uuid::Uuid::new_v4().simple().to_string();
-        std::fs::create_dir_all(multipart_dir(&state, &upload_id)).map_err(|e| {
+        let dir = multipart_dir(&state, &upload_id);
+        std::fs::create_dir_all(&dir).map_err(|e| {
             S3Error::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "InternalError",
                 e.to_string(),
             )
         })?;
+        // S3 takes a multipart object's content type and `x-amz-meta-*` from
+        // this request, not from the parts and not from the completion call, so
+        // they have to survive until then. `meta.json` cannot collide with a
+        // part file: those are named by zero-padded part number.
+        let pending = ObjectMeta {
+            composite_etag: None,
+            content_type: content_type_of(&headers),
+            user: user_metadata(&headers),
+            guard: String::new(),
+        };
+        if let Ok(text) = serde_json::to_string(&pending) {
+            let _ = std::fs::write(dir.join("meta.json"), text);
+        }
         return Ok(xml_response(
             StatusCode::OK,
             xml::initiate_multipart(&bucket, &key, &upload_id),
@@ -1038,6 +1593,12 @@ async fn complete_multipart(
                 e.to_string(),
             )
         })?;
+    // Before the directory goes: this is where CreateMultipartUpload left the
+    // content type and `x-amz-meta-*` that S3 takes from the initiating request.
+    let initiated: ObjectMeta = std::fs::read_to_string(directory.join("meta.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
     let _ = std::fs::remove_dir_all(&directory);
 
     crate::api::quotas::record_blob_delta(
@@ -1048,6 +1609,17 @@ async fn complete_multipart(
     .await;
 
     let etag = multipart_etag(&part_bodies);
+    remember_meta(
+        state,
+        bucket,
+        key,
+        Some(ObjectMeta {
+            composite_etag: Some(etag.clone()),
+            content_type: initiated.content_type,
+            user: initiated.user,
+            guard: etag_of(&assembled),
+        }),
+    );
     Ok(xml_response(
         StatusCode::OK,
         xml::complete_multipart(&format!("/{bucket}/{key}"), bucket, key, &etag),
@@ -1065,6 +1637,63 @@ mod tests {
         // exactly these bytes.
         assert_eq!(etag_of(b""), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(etag_of(b"hello world"), "5eb63bbbe01eeed093cb22bb8f5acdc3");
+    }
+
+    #[test]
+    fn the_last_modified_header_is_an_http_date_not_the_xml_one() {
+        // Two formats, two places, and they are not interchangeable: RFC 9110
+        // fixes the header's shape, S3 fixes the listing's. Sending the listing
+        // shape in the header is what made minio-py refuse a PutObject reply
+        // with "time data does not match HTTP header format".
+        let epoch = std::time::UNIX_EPOCH;
+        assert_eq!(http_date(epoch), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(iso8601(epoch), "1970-01-01T00:00:00.000Z");
+
+        // A known instant, so a wrong weekday or month cannot agree with itself:
+        // 2001-09-09T01:46:40Z was a Sunday.
+        let billennium = epoch + std::time::Duration::from_secs(1_000_000_000);
+        assert_eq!(http_date(billennium), "Sun, 09 Sep 2001 01:46:40 GMT");
+
+        // Leap day, because the calendar arithmetic is hand-rolled.
+        let leap = epoch + std::time::Duration::from_secs(1_709_164_800);
+        assert_eq!(http_date(leap), "Thu, 29 Feb 2024 00:00:00 GMT");
+    }
+
+    #[test]
+    fn range_parsing_separates_the_three_answers() {
+        // `None` = serve the whole object with 200, `Some(None)` = 416,
+        // `Some(Some(_))` = 206. Collapsing any two of those is a bug, and one
+        // of them was: the header was not parsed at all, so every ranged GET
+        // took the 200 path and returned the entire object.
+        let ten = 10;
+
+        // Ordinary closed range, inclusive on both ends.
+        assert_eq!(parse_range("bytes=2-5", ten), Some(Some((2, 5))));
+        // Open ended, and an end past the object: both run to the last byte.
+        assert_eq!(parse_range("bytes=7-", ten), Some(Some((7, 9))));
+        assert_eq!(parse_range("bytes=0-100", ten), Some(Some((0, 9))));
+        // Suffix form counts back from the end.
+        assert_eq!(parse_range("bytes=-3", ten), Some(Some((7, 9))));
+        // A suffix longer than the object is the whole object, not an error.
+        assert_eq!(parse_range("bytes=-99", ten), Some(Some((0, 9))));
+        // Single byte, including the last one.
+        assert_eq!(parse_range("bytes=9-9", ten), Some(Some((9, 9))));
+
+        // Unsatisfiable: starts past the end, inverted, empty suffix, or any
+        // range at all against an empty object.
+        assert_eq!(parse_range("bytes=50-60", ten), Some(None));
+        assert_eq!(parse_range("bytes=5-2", ten), Some(None));
+        assert_eq!(parse_range("bytes=-0", ten), Some(None));
+        assert_eq!(parse_range("bytes=0-0", 0), Some(None));
+
+        // Not acted on, so the caller serves the whole object: a unit this
+        // server does not implement, a malformed value, and multiple ranges —
+        // which real S3 also answers with the entire object rather than a
+        // multipart/byteranges body.
+        assert_eq!(parse_range("rows=1-2", ten), None);
+        assert_eq!(parse_range("bytes=abc", ten), None);
+        assert_eq!(parse_range("bytes=1-2,5-6", ten), None);
+        assert_eq!(parse_range("", ten), None);
     }
 
     #[test]

@@ -157,6 +157,23 @@ pub fn complete_multipart(location: &str, bucket: &str, key: &str, etag: &str) -
     )
 }
 
+/// The `CopyObject` result document.
+///
+/// `CopyObject` answers `200` with a body, which is a shape worth noticing: a
+/// client cannot treat the status alone as success, and a server that returns an
+/// empty body — as this one did before the operation existed — makes every
+/// client fail while parsing instead of at the request.
+pub fn copy_object(etag: &str, last_modified: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <CopyObjectResult xmlns=\"{NS}\">\
+         <ETag>&quot;{}&quot;</ETag><LastModified>{}</LastModified>\
+         </CopyObjectResult>",
+        escape(etag),
+        escape(last_modified)
+    )
+}
+
 /// Part numbers from a `CompleteMultipartUpload` body, in the order given.
 ///
 /// A tiny reader rather than a parser: the document has one repeated element and

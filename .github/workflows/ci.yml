@@ -233,6 +233,20 @@ jobs:
             --admin http://127.0.0.1:18080 \
             --s3 http://127.0.0.1:19000 \
             --api-key ci-s3-e2e-key-long-enough-to-pass
+      # Real sizes and two clients at once — the two things `docs/integrar/S3.md`
+      # listed as untested. They were not merely uncovered: the first run found
+      # that the S3 router had no body limit of its own, so it inherited axum's
+      # 2 MiB default and closed the connection on any larger part, and that
+      # `Range` was not read at all, so every ranged GET returned the whole
+      # object. 64 MiB rather than the 1 GiB this suite can do, because a CI
+      # runner should not spend four minutes proving a cliff that shows up at 8.
+      - name: Large uploads and concurrency
+        run: |
+          cd tests/e2e && python s3_scale.py \
+            --admin http://127.0.0.1:18080 \
+            --s3 http://127.0.0.1:19000 \
+            --api-key ci-s3-e2e-key-long-enough-to-pass \
+            --size-mb 64
       - name: Server log on failure
         if: failure()
         run: cat luma.log

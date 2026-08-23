@@ -254,7 +254,229 @@ def a_multipart_etag_has_the_dash_and_part_count(s3):
     digests = b''.join(hashlib.md5(c).digest() for c in chunks)
     expected = '%s-%d' % (hashlib.md5(digests).hexdigest(), len(chunks))
     assert done['ETag'].strip('"') == expected, (done['ETag'], expected)
+
+    # And it has to *stay* that. This assertion is the one that was missing, and
+    # its absence hid a real defect for as long as the check existed: the
+    # composite was computed at completion, returned, and then thrown away, so
+    # every later HEAD and GET answered with the plain MD5 of the assembled
+    # bytes instead. Reading the ETag only out of the completion response is
+    # exactly the shape of a test that passes with the bug present — `aws s3
+    # sync`, rclone and any ETag-validating cache ask the *server* later, see a
+    # different value every time, and re-transfer the object.
+    head = s3.head_object(Bucket='luma-e2e', Key=key)
+    assert head['ETag'].strip('"') == expected, (
+        'HEAD disagrees with CompleteMultipartUpload: %s != %s'
+        % (head['ETag'], expected))
+    got = s3.get_object(Bucket='luma-e2e', Key=key)
+    assert got['ETag'].strip('"') == expected, (
+        'GET disagrees with CompleteMultipartUpload: %s != %s'
+        % (got['ETag'], expected))
+
+    # Overwriting it with an ordinary PUT must retire the composite: the object
+    # is no longer multipart, and answering with the old value would describe
+    # bytes that are gone.
+    s3.put_object(Bucket='luma-e2e', Key=key, Body=b'plain')
+    after = s3.head_object(Bucket='luma-e2e', Key=key)
+    assert after['ETag'].strip('"') == hashlib.md5(b'plain').hexdigest(), after['ETag']
+
     s3.delete_object(Bucket='luma-e2e', Key=key)
+
+
+@check
+def a_ranged_get_returns_only_the_range(s3):
+    """`Range` in all four shapes, plus the unsatisfiable one.
+
+    This is not an optional nicety. boto3 downloads anything above its
+    threshold as concurrent ranged GETs and writes each reply at its own
+    offset, so a server that *ignores* `Range` does not fail loudly — it returns
+    the whole object for every range, and hands the caller a corrupt file with a
+    200 on every request and nothing in any log.
+
+    That is exactly what this server did until `tests/e2e/s3_scale.py` read a
+    large object at an offset: `Range` appeared nowhere in the S3 router.
+    """
+    key = 'ranged.txt'
+    s3.put_object(Bucket='luma-e2e', Key=key, Body=b'0123456789')
+
+    cases = [
+        ('bytes=2-5', b'2345', 'bytes 2-5/10'),      # closed
+        ('bytes=7-', b'789', 'bytes 7-9/10'),        # open ended
+        ('bytes=-3', b'789', 'bytes 7-9/10'),        # suffix
+        ('bytes=0-100', b'0123456789', 'bytes 0-9/10'),  # end past the object
+    ]
+    for header, want, content_range in cases:
+        got = s3.get_object(Bucket='luma-e2e', Key=key, Range=header)
+        assert got['ResponseMetadata']['HTTPStatusCode'] == 206, (
+            '%s answered %d, not 206' % (header, got['ResponseMetadata']['HTTPStatusCode']))
+        body = got['Body'].read()
+        assert body == want, '%s returned %r, wanted %r' % (header, body, want)
+        assert got.get('ContentRange') == content_range, (
+            '%s: Content-Range %r != %r' % (header, got.get('ContentRange'), content_range))
+
+    # Past the end is 416, not a 200 with everything and not an empty 206.
+    try:
+        s3.get_object(Bucket='luma-e2e', Key=key, Range='bytes=50-60')
+        raise AssertionError('a range past the end must be refused with 416')
+    except s3.exceptions.ClientError as e:
+        status = e.response['ResponseMetadata']['HTTPStatusCode']
+        assert status == 416, 'expected 416, got %d' % status
+
+    # A header this server does not act on is ignored, per RFC 9110 — the whole
+    # object with a 200, never a 400.
+    whole = s3.get_object(Bucket='luma-e2e', Key=key, Range='rows=1-2')
+    assert whole['ResponseMetadata']['HTTPStatusCode'] == 200
+    assert whole['Body'].read() == b'0123456789'
+
+    s3.delete_object(Bucket='luma-e2e', Key=key)
+
+
+@check
+def an_object_larger_than_the_axum_default_is_accepted(s3):
+    """Four megabytes — over axum's 2 MiB default, under any real limit.
+
+    The S3 router carried no body limit of its own, so it inherited that default
+    and closed the connection on anything bigger, with no status line and
+    nothing logged. Every S3 test used hundred-byte bodies, so the API looked
+    healthy while being unable to store a photograph.
+
+    Deliberately small enough to stay on the fast suite: the point is the cliff
+    at 2 MiB, not throughput.
+    """
+    key = 'four-megabytes.bin'
+    body = b'M' * (4 * 1024 * 1024)
+    s3.put_object(Bucket='luma-e2e', Key=key, Body=body)
+    assert s3.head_object(Bucket='luma-e2e', Key=key)['ContentLength'] == len(body)
+    assert s3.get_object(Bucket='luma-e2e', Key=key)['Body'].read() == body
+    s3.delete_object(Bucket='luma-e2e', Key=key)
+
+
+@check
+def content_type_and_user_metadata_survive_a_round_trip(s3):
+    """`Content-Type` and `x-amz-meta-*`, through a PUT and through multipart.
+
+    Neither was stored. Every object came back as `application/octet-stream`
+    with no metadata, so a JPEG uploaded here is served to a browser as a
+    download, and any client that round-trips its own metadata loses it. mint's
+    `test_put_object` fails on exactly that — with an 11 MiB body, which is why
+    the multipart half is checked here too: S3 takes a multipart object's
+    content type from the *initiating* request, and the first version of the fix
+    read that record back after deleting the directory it lived in, so the
+    composite ETag survived and the metadata silently did not.
+    """
+    key = 'typed.png'
+    s3.put_object(Bucket='luma-e2e', Key=key, Body=b'notreallyapng',
+                  ContentType='image/png', Metadata={'author': 'jairo', 'n': '1'})
+    for how, got in (('HEAD', s3.head_object(Bucket='luma-e2e', Key=key)),
+                     ('GET', s3.get_object(Bucket='luma-e2e', Key=key))):
+        assert got['ContentType'] == 'image/png', '%s: %s' % (how, got['ContentType'])
+        assert got['Metadata'] == {'author': 'jairo', 'n': '1'}, '%s: %s' % (how, got['Metadata'])
+
+    # A plain PUT over it retires both: they described bytes that are gone.
+    s3.put_object(Bucket='luma-e2e', Key=key, Body=b'plain')
+    after = s3.head_object(Bucket='luma-e2e', Key=key)
+    assert after['ContentType'] == 'application/octet-stream', after['ContentType']
+    assert after['Metadata'] == {}, after['Metadata']
+    s3.delete_object(Bucket='luma-e2e', Key=key)
+
+    # And through multipart, where the metadata comes from CreateMultipartUpload.
+    key = 'typed-multipart.png'
+    upload = s3.create_multipart_upload(
+        Bucket='luma-e2e', Key=key, ContentType='image/png',
+        Metadata={'testing': 'value'})['UploadId']
+    parts = []
+    for number in (1, 2):
+        chunk = bytes([number]) * (5 * 1024 * 1024)
+        result = s3.upload_part(Bucket='luma-e2e', Key=key, UploadId=upload,
+                                PartNumber=number, Body=chunk)
+        parts.append({'PartNumber': number, 'ETag': result['ETag']})
+    s3.complete_multipart_upload(Bucket='luma-e2e', Key=key, UploadId=upload,
+                                 MultipartUpload={'Parts': parts})
+    got = s3.head_object(Bucket='luma-e2e', Key=key)
+    assert got['ContentType'] == 'image/png', got['ContentType']
+    assert got['Metadata'] == {'testing': 'value'}, got['Metadata']
+    assert '-' in got['ETag'], got['ETag']
+    s3.delete_object(Bucket='luma-e2e', Key=key)
+
+
+@check
+def copy_object_copies_the_bytes_and_not_nothing(s3):
+    """`CopyObject`, which used to store an empty object and report success.
+
+    It is a `PUT` carrying `x-amz-copy-source` and no body, so with no handler
+    for it the request fell through to the ordinary write path: the destination
+    became a 0-byte object and the reply was a 200 with no XML. `aws s3 cp`
+    between two keys destroyed the destination and said it worked, which is the
+    worst shape a bug can take.
+    """
+    s3.put_object(Bucket='luma-e2e', Key='copy-src', Body=b'fourteen bytes',
+                  ContentType='text/plain', Metadata={'origin': 'src'})
+
+    # COPY (the default) carries the source's content type and metadata across.
+    result = s3.copy_object(Bucket='luma-e2e', Key='copy-dst',
+                            CopySource={'Bucket': 'luma-e2e', 'Key': 'copy-src'})
+    assert 'ETag' in result['CopyObjectResult'], result
+    got = s3.get_object(Bucket='luma-e2e', Key='copy-dst')
+    assert got['Body'].read() == b'fourteen bytes'
+    assert got['ContentType'] == 'text/plain', got['ContentType']
+    assert got['Metadata'] == {'origin': 'src'}, got['Metadata']
+
+    # REPLACE takes them from the copy request instead.
+    s3.copy_object(Bucket='luma-e2e', Key='copy-replaced',
+                   CopySource={'Bucket': 'luma-e2e', 'Key': 'copy-src'},
+                   MetadataDirective='REPLACE',
+                   ContentType='application/json', Metadata={'origin': 'copy'})
+    got = s3.head_object(Bucket='luma-e2e', Key='copy-replaced')
+    assert got['ContentType'] == 'application/json', got['ContentType']
+    assert got['Metadata'] == {'origin': 'copy'}, got['Metadata']
+
+    # A missing source is a 404, not an empty object at the destination.
+    try:
+        s3.copy_object(Bucket='luma-e2e', Key='copy-nowhere',
+                       CopySource={'Bucket': 'luma-e2e', 'Key': 'does-not-exist'})
+        raise AssertionError('copying a missing key must fail')
+    except s3.exceptions.ClientError as e:
+        assert e.response['ResponseMetadata']['HTTPStatusCode'] == 404, e.response
+
+    for key in ('copy-src', 'copy-dst', 'copy-replaced'):
+        s3.delete_object(Bucket='luma-e2e', Key=key)
+
+
+@check
+def head_bucket_is_not_a_403(s3):
+    """`HeadBucket`, which answered AccessDenied on a perfectly signed request.
+
+    No HEAD route existed for `/{bucket}`, so axum served it with the GET
+    handler — and that handler signed the canonical request as "GET" while the
+    client had signed "HEAD". SigV4 covers the method, so the signatures could
+    not match, and the reply was a 403 indistinguishable from a wrong secret.
+    Every S3 client calls this to check a bucket exists; it is mint's first test.
+    """
+    assert s3.head_bucket(Bucket='luma-e2e')['ResponseMetadata']['HTTPStatusCode'] == 200
+    try:
+        s3.head_bucket(Bucket='luma-e2e-does-not-exist')
+        raise AssertionError('a missing bucket must not answer 200')
+    except s3.exceptions.ClientError as e:
+        status = e.response['ResponseMetadata']['HTTPStatusCode']
+        assert status in (403, 404), 'expected 404 (or 403 for another org), got %d' % status
+
+
+@check
+def the_last_modified_header_is_an_http_date(s3):
+    """`Last-Modified` has to be parseable as an HTTP date.
+
+    It was emitted in the ISO 8601 shape S3 uses *inside its XML*, which is not
+    the format RFC 9110 fixes for the header. boto3 never parses it, so 14
+    checks against boto3 said nothing; minio-py does, and refused the reply with
+    "time data does not match HTTP header format".
+    """
+    from email.utils import parsedate_to_datetime
+    s3.put_object(Bucket='luma-e2e', Key='dated', Body=b'x')
+    raw = s3.head_object(Bucket='luma-e2e', Key='dated')
+    header = raw['ResponseMetadata']['HTTPHeaders']['last-modified']
+    # Raises if the format is wrong, which is the whole assertion.
+    parsedate_to_datetime(header)
+    assert header.endswith('GMT'), header
+    s3.delete_object(Bucket='luma-e2e', Key='dated')
 
 
 @check

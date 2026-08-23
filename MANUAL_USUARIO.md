@@ -45,7 +45,7 @@ que ya usas.
 | NS-Mem (`/v1/memory`) | **Estable** |
 | Multi-tenancy, RBAC, auditoría, panel admin | **Estable** |
 | **RESP / compatibilidad Redis** | **Experimental por calendario**, no por funcionalidad — §1.1 |
-| **API S3** | **Experimental por cobertura de pruebas** — §1.1 |
+| **API S3** | **Experimental**, pero ya con la suite mint corrida — §1.1 |
 | **Conector Postgres (CDC)** | **Experimental por kilometraje operativo** — §1.1 |
 
 ### 1.1 Por qué esas tres son experimentales
@@ -75,21 +75,29 @@ Lo que sí conviene saber antes de adoptarlo:
   Streams (`XADD`), keyspace notifications.
 - Las estructuras viven en RAM: no es para colas de 10 M de mensajes residentes.
 
-#### S3 — le falta superficie de pruebas
+#### S3 — los tres huecos están cerrados, y costaron siete bugs
 
-Verificada contra **boto3 real** (14 comprobaciones: presignadas que caducan,
-multipart subido fuera de orden, los ETag) y contra los vectores SigV4 publicados
-por AWS. Lo que **no** se ha probado, tal como lo dice
-[`docs/integrar/S3.md`](docs/integrar/S3.md):
+Los tres pendientes eran la suite mint, las cargas grandes y la concurrencia.
+Cubrirlos encontró **siete defectos reales**, seis de ellos invisibles para las
+pruebas que ya existían. Están arreglados, y la tabla con cada uno está en
+[`docs/integrar/S3.md`](docs/integrar/S3.md). Los dos que más importaban:
 
-- **La suite mint de MinIO.** La razón es defendible: prueba versionado,
-  lifecycle y object lock, que aquí se rechazan **a propósito**. Correrla daría
-  una lista larga de fallos esperados y un semáforo que nadie leería.
-- **Cargas grandes.** Las pruebas de multipart usan partes de cien bytes. El
-  ensamblado es correcto por construcción, pero nadie ha subido un gigabyte.
-- **Concurrencia.** Dos clientes escribiendo la misma clave a la vez. Cada
-  escritura es atómica (temporal + rename), así que verás uno de los dos cuerpos
-  y nunca una mezcla — pero cuál de los dos no está definido.
+- **`Range` no se leía**, así que un `GET` con rango devolvía el objeto entero con
+  un 200 — y boto3 baja los ficheros grandes por rangos concurrentes, así que la
+  descarga salía corrupta sin un solo error por ningún lado.
+- **`CopyObject` no existía y tampoco se rechazaba**: es un `PUT` sin cuerpo, así
+  que caía en la ruta de escritura normal. Un `aws s3 cp` entre dos claves dejaba
+  el destino en **0 bytes** y respondía éxito.
+
+Ahora hay **20 comprobaciones contra boto3**, **49 de 50 de la suite mint** de
+MinIO —la que falla es una extensión propietaria de MinIO, no S3—, un gigabyte
+real verificado byte a byte a 105 MiB/s, y concurrencia ejecutada en vez de
+razonada.
+
+Lo que queda por saber: un objeto está topado a `max_body_mb` (100 MB por
+defecto) porque el cuerpo se bufferiza completo en memoria —el S3 real admite
+partes de 5 GiB—, `CompleteMultipartUpload` ensambla en RAM, y el puerto S3 no
+tiene TLS propio.
 
 Lo no soportado se rechaza con **501 NotImplemented**, no se ignora: versionado,
 lifecycle, ACLs, replicación, object lock, cifrado por cabecera, tagging, CORS y
