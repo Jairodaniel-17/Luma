@@ -159,3 +159,41 @@ async fn reads_do_not_queue_behind_writes() {
     );
     writer.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "diagnostic: cargo test --release --test sqlite_write_throughput -- --ignored --nocapture"]
+async fn what_synchronous_full_costs() {
+    // `synchronous = NORMAL` in WAL mode does not fsync on commit: the database
+    // survives a process crash but a power cut can lose recent transactions.
+    // This is what the safe setting costs, measured rather than assumed.
+    let dir = tempfile::tempdir().unwrap();
+    let service = Arc::new(SqliteService::new(dir.path().join("full.db")).unwrap());
+    service
+        .execute(
+            "CREATE TABLE IF NOT EXISTS t (id TEXT PRIMARY KEY, payload TEXT)".into(),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let n = 1_000;
+    let started = Instant::now();
+    for i in 0..n {
+        service
+            .execute(
+                "INSERT INTO t (id, payload) VALUES (?, ?)".into(),
+                vec![
+                    serde_json::json!(format!("k{i}")),
+                    serde_json::json!("a metadata row of a realistic size"),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
+    println!(
+        "current synchronous setting: {n} writes in {:?} = {:.0}/s",
+        elapsed,
+        n as f64 / elapsed.as_secs_f64()
+    );
+}

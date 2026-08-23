@@ -48,7 +48,17 @@ impl SqliteService {
         }
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // FULL, not NORMAL. In WAL mode `NORMAL` skips the fsync at commit: the
+        // database survives a process crash, but a power cut or a kernel panic
+        // can lose transactions that were already reported as committed. That
+        // contradicts the rule this codebase states in `durability.rs` — a write
+        // confirmed to a caller must survive a crash — and it was the reason the
+        // crash-recovery matrix had to *exclude* SQLite to stay green.
+        //
+        // What it costs is measured, not guessed: see
+        // `tests/sqlite_write_throughput.rs`. Only the writer needs it; the
+        // reader pool never commits.
+        conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let (sender, receiver) = mpsc::channel(1000);

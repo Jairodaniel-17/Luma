@@ -403,13 +403,29 @@ impl Default for Config {
             hnsw_segment_compaction_enabled: false,
             hnsw_segment_compaction_threshold: 0.35,
             hnsw_segment_compaction_interval_secs: 300,
-            // Group commit by default: the WAL fsync is amortized across a batch
-            // instead of paid on every write, which is the dominant single-node
-            // write bottleneck. Durability of acked writes is preserved because
-            // the state store (redb) and vector segments still fsync immediately,
-            // so a lost WAL-buffer tail is always recoverable from them on replay.
-            // Set WAL_SYNC_MODE=per_write for a fully synchronous WAL.
-            wal_sync_mode: "group".to_string(),
+            // `per_write`, and the default used to be `group` on an argument
+            // that was not true. It read: "durability of acked writes is
+            // preserved because the state store (redb) and vector segments still
+            // fsync immediately". redb does not — `state_db.rs` sets
+            // `Durability::Eventual` on all three of its write paths. So neither
+            // the WAL nor its projection reached the disk before `put_state`
+            // returned OK, and a confirmed KV write could be lost to a crash
+            // inside the flush window: 10 ms, or 64 records.
+            //
+            // The crash-recovery matrix passed anyway, by timing rather than by
+            // guarantee — its HTTP round-trips are slower than the 10 ms
+            // background flush, so everything was on disk by the time it killed
+            // the process.
+            //
+            // Measured cost of the honest default: 1 964 → 848 writes/s
+            // (`tests/wal_sync_cost.rs`). `group` is still available for a
+            // caller that knowingly wants throughput over a confirmed write, and
+            // its window is stated above rather than hidden behind a claim.
+            //
+            // ponytail: `group` buffers write-behind; real group commit — where
+            // concurrent writers share one fsync and each waits for it — would
+            // give both. Worth it when a workload actually needs the throughput.
+            wal_sync_mode: "per_write".to_string(),
             wal_flush_interval_ms: 10,
             wal_batch_size: 64,
             role: default_role(),
@@ -859,7 +875,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300);
-        let wal_sync_mode = std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "group".to_string());
+        // The resolver's fallback has to match `Config::default()`, or the
+        // durable default only applies to one of the two ways a config is built.
+        let wal_sync_mode =
+            std::env::var("WAL_SYNC_MODE").unwrap_or_else(|_| "per_write".to_string());
         let wal_flush_interval_ms = std::env::var("WAL_FLUSH_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1195,6 +1214,32 @@ fn parse_env_bool(key: &str, default: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_wal_sync_mode_is_the_durable_one() {
+        // A default that trades a confirmed write for throughput should not be
+        // reachable by accident. It was, and the comment defending it claimed
+        // redb fsynced immediately — it does not, `state_db.rs` sets
+        // `Durability::Eventual` on every write path.
+        assert_eq!(Config::default().wal_sync_mode, "per_write");
+    }
+
+    #[test]
+    fn the_shipped_config_file_does_not_downgrade_durability() {
+        // A durable default is worth nothing if the `luma.toml` in the repo
+        // overrides it, and that is exactly what was happening: the file said
+        // `wal_sync_mode = "group"`, so anyone running from a checkout got the
+        // lossy mode no matter what the struct default said.
+        //
+        // Checked through `Config::load()` because that is the path a real
+        // process takes — defaults, then the file, then the environment.
+        std::env::remove_var("WAL_SYNC_MODE");
+        let resolved = Config::load().expect("a config with no overrides must load");
+        assert_eq!(
+            resolved.wal_sync_mode, "per_write",
+            "the shipped luma.toml is turning off per-write durability"
+        );
+    }
 
     #[test]
     fn secrets_never_serialized() {

@@ -63,10 +63,14 @@ impl Server {
             .arg("--data-dir")
             .arg(dir)
             .env("LUMA_API_KEY", API_KEY)
-            // SQLite is out of scope here: its durability is governed by
-            // `synchronous = NORMAL`, a separate question from whether our own
-            // file writes reach the disk.
-            .env("SQLITE_ENABLED", "false")
+            // SQLite used to be excluded here, on the grounds that its
+            // durability was "a separate question" governed by
+            // `synchronous = NORMAL`. It was not a separate question — it was
+            // the same question with an answer nobody liked: NORMAL does not
+            // fsync at commit, so a power cut could lose transactions this
+            // process had already reported as committed. The setting is now
+            // FULL, so SQLite belongs in the matrix like every other store.
+            .env("SQLITE_ENABLED", "true")
             .env("LUMA_ALLOW_INSECURE", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

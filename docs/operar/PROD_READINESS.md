@@ -21,38 +21,55 @@ Leyenda de "confirmado":
 
 | Primitiva | Al devolver OK | Riesgo real de una caída |
 |---|---|---|
-| **WAL de eventos** (`events-NNNNNN.log`) — respalda todas las mutaciones | **fsync diferido** por defecto: `wal_sync_mode = "group"`, lotes de `wal_batch_size` (64) o `wal_flush_interval_ms` (10 ms) | Hasta un lote o 10 ms de mutaciones confirmadas. Poner `wal_sync_mode = "per_write"` lo elimina a costa de throughput |
+| **WAL de eventos** (`events-NNNNNN.log`) — respalda todas las mutaciones | **fsync** por defecto: `wal_sync_mode = "per_write"` | Ninguna. `wal_sync_mode = "group"` sigue disponible y abre una ventana de un lote (64) o 10 ms, a cambio de ~2,3× de throughput |
 | **Blob** (`/v1/blob`) | **fsync** del fichero, luego del directorio tras el rename | Ninguno en Linux. En Windows la entrada de directorio depende del journaling de NTFS |
 | **Colas** (`/v1/queue`) | **fsync** del fichero del mensaje, luego del directorio | Igual que blob. Un `enqueue` confirmado no se pierde |
 | **Manifest de colección vectorial** | **fsync** del temporal, rename, fsync del directorio | Igual que blob |
 | **Runs de vectores** (`runs/*.run`) | `sync_data` por registro en el camino unitario; en el camino por lotes un único `sync_active_run` al cerrar el lote | En el camino por lotes, hasta un lote de vectores. El WAL sigue teniéndolos, así que el replay los recupera |
 | **KV respaldado por redb** | **reconstruible**: las transacciones usan `Durability::Eventual`, sin fsync por commit | Ninguna pérdida de datos: redb es una proyección del WAL y el replay la reconstruye desde `applied_offset` |
-| **SQLite** (relacional, auth, docstore, NS-Mem) | **fsync diferido**: modo WAL con `synchronous = NORMAL` | Un corte de energía puede perder commits recientes. No corrompe la base (eso exigiría `synchronous = OFF`). `FULL` lo elimina a costa de latencia de escritura |
+| **SQLite** (relacional, auth, docstore, NS-Mem) | **fsync**: modo WAL con `synchronous = FULL` | Ninguna. Cuesta ~9× frente a `NORMAL` (23 560 → 2 513 escrituras/s medidas), y esas tablas no están en el camino de volumen |
 | **Snapshots** (`snapshot.json`) | Escritura periódica, no en el camino de la petición | No aplica: el snapshot solo acorta el replay, nunca es la única copia |
 
 ### Lo que esta tabla deja ver
 
-Dos puntos que conviene decidir de forma consciente antes de producción, no
-descubrir después:
+Los dos puntos que esta sección declaraba como «decidir conscientemente» están
+**cerrados**, y vale la pena decir por qué, porque el argumento que sostenía uno
+de ellos era falso:
 
-1. **El default de `wal_sync_mode` es `group`, no `per_write`.** Es la decisión
-   correcta para throughput, pero significa que "no pierde datos confirmados"
-   tiene una ventana de 64 escrituras o 10 ms. Quien necesite RPO cero por
-   escritura tiene que cambiarlo explícitamente.
-2. **SQLite corre con `synchronous = NORMAL`.** Las cuentas, la auditoría y las
-   tablas de NS-Mem viven ahí. Un corte de energía no corrompe nada, pero puede
-   perder los últimos commits — incluida una alta de usuario que la API ya
-   confirmó.
+1. **`wal_sync_mode` ya es `per_write`.** El default era `group`, y el
+   comentario que lo defendía decía que la durabilidad de una escritura
+   confirmada estaba a salvo *«porque el state store (redb) y los segmentos
+   vectoriales sí hacen fsync inmediato»*. redb no lo hace: `state_db.rs` pone
+   `Durability::Eventual` en sus tres rutas de escritura. Ni el WAL ni su
+   proyección llegaban al disco antes de que `put_state` devolviera OK.
+
+   La matriz de crash-recovery pasaba igual, pero **por tiempo y no por
+   garantía**: sus viajes HTTP tardan más que el flush de fondo de 10 ms, así
+   que todo estaba en disco cuando mataba el proceso.
+
+   Coste medido del default honesto: 1 964 → 848 escrituras/s
+   (`tests/wal_sync_cost.rs`). `group` sigue disponible para quien prefiera
+   throughput sabiendo lo que compra.
+
+2. **SQLite ya corre con `synchronous = FULL`.** Y la matriz de crash-recovery
+   dejó de excluirlo: corría con `SQLITE_ENABLED=false` porque su durabilidad
+   era «una cuestión aparte». No lo era — era la misma cuestión con una
+   respuesta incómoda.
+
+La durabilidad de redb **sí** era correcta y sigue igual: es una proyección del
+WAL, y en un crash vuelve a su último commit inmediato mientras el replay
+re-aplica el resto. Ese diseño solo funciona si el WAL es durable de verdad, que
+es justo lo que faltaba.
 
 El objetivo de despliegue es **Linux** (imagen musl). Windows es plataforma de
 desarrollo soportada, no de producción con garantías equivalentes: NTFS no
 expone flush de directorio, así que la durabilidad de los renames descansa en
 su journaling de metadatos y no en un flush que hagamos nosotros.
 
-> Pendiente de W1.1: la matriz de crash-recovery que **demuestra** esta tabla
-> matando el proceso durante ráfagas de escritura de cada motor. Hasta que
-> exista, la tabla describe el código auditado, no un comportamiento verificado
-> bajo fallo.
+> La matriz de crash-recovery **demuestra** esta tabla: mata el proceso durante
+> ráfagas de escritura de cada motor y comprueba que lo confirmado sobrevive.
+> Corre en CI en cada push y con muchas más iteraciones en el nightly, ahora
+> incluyendo SQLite.
 
 ## Respaldos: qué cubren (W1.4)
 
