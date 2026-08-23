@@ -118,9 +118,10 @@ Luma **se niega a arrancar** si faltan, salvo que pongas `LUMA_ALLOW_INSECURE=1`
 
 ## S3
 
-| Variable | Default |
-|---|---|
-| `S3_PORT` | `0` (apagado) |
+| Variable | Default | Nota |
+|---|---|---|
+| `S3_PORT` | `0` (apagado) | |
+| `S3_MAX_OBJECT_MB` | sigue a `MAX_BODY_MB` | Tope de un objeto o una parte. **Separado a propósito**: `MAX_BODY_MB` gobierna también el router `/v1`, el API de blobs, la búsqueda y el proxy, así que subirlo para guardar un objeto grande subía además el cuerpo JSON máximo que acepta `/v1/sql`. El S3 real admite partes de 5 GiB; aquí el cuerpo se bufferiza en memoria, así que el tope existe |
 
 ## Memoria de agentes (NS-Mem)
 

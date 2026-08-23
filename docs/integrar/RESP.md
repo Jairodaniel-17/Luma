@@ -319,16 +319,21 @@ suite diferencial:
    conexión que nunca se suscribe, y esto depende del *estado* de la conexión, no
    del comando.
 
-Resultado: **11 de 12** comprobaciones de ioredis pasan.
+4. **Aceptar `HELLO 3` y contestar `proto: 2`.** Este era el que quedaba abierto,
+   y salió poniendo un proxy que registra las dos direcciones del cable. ioredis
+   pide RESP3; Redis contesta `proto: 3` y a partir de ahí usa **frames push de
+   RESP3** (`>3`) para las entregas de pub/sub. Luma aceptaba el 3, contestaba 2
+   y mandaba `*3` — así que ioredis, que enmarca sus expectativas alrededor de lo
+   que pidió, leía el mensaje como **respuesta a un comando pendiente**.
 
-### Lo que sigue fallando, dicho tal cual
+   Responder honestamente sobre el protocolo no bastaba: hay que **rechazar** el
+   que no se habla. `HELLO 3` devuelve ahora `NOPROTO`, que es lo que contesta
+   Redis cuando no puede, y todo cliente lo maneja cayendo a RESP2 — que es el
+   protocolo que este servidor habla de verdad, así que la caída es la verdad y
+   no una degradación de la que el cliente no se enteró.
 
-`pub/sub with a second connection`: ioredis no emite el evento `message` aunque
-`SUBSCRIBE` devuelve 1 y `PUBLISH` reporta 1 entregado. Las tramas de Luma en el
-cable son **idénticas byte a byte a las de Redis** —comprobado con un socket
-crudo por los dos caminos de autenticación— y el pub/sub sí funciona con redis-py
-(`tests/e2e/clients.py`) y con sockets crudos. La causa no está identificada.
-Queda abierto.
+Resultado: **12 de 12** comprobaciones de ioredis pasan, y el job
+`ioredis-e2e` las corre en CI en cada push.
 
 ## Cómo validar esto de verdad
 

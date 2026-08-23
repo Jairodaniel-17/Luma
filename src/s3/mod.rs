@@ -25,14 +25,19 @@ pub fn router(state: crate::api::AppState) -> axum::Router {
     // listed it as untested rather than broken. `tests/e2e/s3_scale.py` is what
     // found it, on the first 8 MiB part it tried to upload.
     //
-    // The bound stays, and is the same knob the `/v1` router uses
-    // (`max_body_bytes`, 100 MB by default, `MAX_BODY_MB` to change it): these
-    // handlers take the body as `Bytes`, so it is buffered in full, and
-    // `DefaultBodyLimit::disable()` would trade a broken API for one that any
-    // client can use to exhaust the server's memory. Real S3 allows 5 GiB parts;
-    // matching that would mean streaming the body to disk, which is a different
-    // change and belongs with it, not smuggled into a limit constant.
-    let max_body = state.config.max_body_bytes;
+    // The bound stays, because these handlers take the body as `Bytes` and
+    // buffer it in full: `DefaultBodyLimit::disable()` would trade a broken API
+    // for one any client can use to exhaust the server's memory. Real S3 allows
+    // 5 GiB parts; matching that means streaming the body to disk, which is a
+    // different change and does not belong smuggled into a limit constant.
+    //
+    // It is **its own knob** (`s3_max_object_mb`), and that matters more than it
+    // looks. `max_body_bytes` is shared by the `/v1` router, the blob API, the
+    // search route and the proxy, so borrowing it here forced one number to
+    // answer two unrelated questions: raising it to store a large object also
+    // raised the largest JSON body `/v1/sql` will accept. Unset, it follows
+    // `max_body_bytes`, so nothing moves for anyone who does not set it.
+    let max_body = s3_object_limit(&state.config);
 
     axum::Router::new()
         .route("/", get(routes::list_buckets))
@@ -54,6 +59,18 @@ pub fn router(state: crate::api::AppState) -> axum::Router {
         .with_state(state)
 }
 
+/// The largest single object or part the S3 API accepts.
+///
+/// `s3_max_object_bytes` when set, otherwise `max_body_bytes` — which is what it
+/// used before the two were separated, so an unset value is not a change.
+pub fn s3_object_limit(config: &crate::config::Config) -> usize {
+    if config.s3_max_object_bytes > 0 {
+        config.s3_max_object_bytes
+    } else {
+        config.max_body_bytes
+    }
+}
+
 /// Start the S3 listener. Returns the bound port, or `None` when disabled.
 ///
 /// Off unless `s3_port` is set, for the same reason the RESP port is: a server
@@ -70,7 +87,7 @@ pub async fn spawn(
     let addr = std::net::SocketAddr::new(config.bind_addr, config.s3_port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?.port();
-    let max_body = config.max_body_bytes;
+    let max_body = s3_object_limit(config);
 
     let app = router(state);
     tokio::spawn(async move {
@@ -88,10 +105,11 @@ pub async fn spawn(
     // closed and the line was not updated, so the one warning the S3 API prints
     // was advertising a defect it no longer had.
     tracing::warn!(
-        max_body_mb = max_body / (1024 * 1024),
+        max_object_mb = max_body / (1024 * 1024),
         "the S3 API is experimental: several subresources are refused rather \
-         than implemented, and a single object or part is capped at max_body_mb \
-         where real S3 allows 5 GiB. See docs/integrar/S3.md."
+         than implemented, and a single object or part is capped at max_object_mb \
+         (s3_max_object_mb, or max_body_mb when unset) where real S3 allows \
+         5 GiB. See docs/integrar/S3.md."
     );
     Ok(Some(bound))
 }

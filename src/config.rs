@@ -270,6 +270,18 @@ pub struct Config {
     /// router with `/v1/...` without one shadowing the other.
     #[serde(default)]
     pub s3_port: u16,
+    /// Largest single S3 object or multipart part, in bytes.
+    ///
+    /// Separate from `max_body_bytes` on purpose. That one is shared by the
+    /// `/v1` router, the blob API, the search route and the proxy, so using it
+    /// for S3 too forced a trade nobody should have to make: storing a 1 GB
+    /// object meant also accepting 1 GB JSON bodies on `/v1/sql`. Two different
+    /// risks with one knob.
+    ///
+    /// `0` means "follow `max_body_bytes`", which is what it did before this
+    /// existed — so an unset value changes nothing.
+    #[serde(default)]
+    pub s3_max_object_bytes: usize,
     /// OTLP endpoint for trace export, e.g. `http://collector:4317`.
     ///
     /// Absent means no export. There is deliberately no default: guessing
@@ -470,6 +482,7 @@ impl Default for Config {
             backup_remote_region: String::new(),
             backup_remote_allow_http: false,
             s3_port: 0,
+            s3_max_object_bytes: 0,
             otel_endpoint: None,
             wal_ship_interval_secs: 0,
             replica_poll_interval_secs: default_replica_poll_interval_secs(),
@@ -1073,6 +1086,13 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            // In MB, like `MAX_BODY_MB`, because that is the unit an operator
+            // thinks in for object storage.
+            s3_max_object_bytes: std::env::var("S3_MAX_OBJECT_MB")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|mb| (mb * 1024.0 * 1024.0) as usize)
+                .unwrap_or(0),
             otel_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
             resp_port: std::env::var("RESP_PORT")
                 .ok()
@@ -1225,6 +1245,27 @@ fn parse_env_bool(key: &str, default: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_s3_object_limit_is_independent_of_the_json_body_limit() {
+        // One knob answering two unrelated questions is the bug this separates:
+        // `max_body_bytes` bounds the `/v1` router, the blob API, the search
+        // route and the proxy, so borrowing it for S3 meant that storing a 1 GB
+        // object required also accepting 1 GB JSON bodies on `/v1/sql`.
+        // Unset follows `max_body_bytes`, so nothing moves for anyone who does
+        // not set it.
+        let mut config = Config {
+            max_body_bytes: 8 * 1024 * 1024,
+            s3_max_object_bytes: 0,
+            ..Default::default()
+        };
+        assert_eq!(crate::s3::s3_object_limit(&config), 8 * 1024 * 1024);
+
+        // Set, it wins — and it does not touch the other limit.
+        config.s3_max_object_bytes = 200 * 1024 * 1024;
+        assert_eq!(crate::s3::s3_object_limit(&config), 200 * 1024 * 1024);
+        assert_eq!(config.max_body_bytes, 8 * 1024 * 1024);
+    }
 
     #[test]
     fn the_default_wal_sync_mode_is_the_durable_one() {

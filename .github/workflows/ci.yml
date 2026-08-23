@@ -180,6 +180,52 @@ jobs:
       - name: Server log on failure
         if: failure()
         run: cat luma.log
+  ioredis-e2e:
+    name: ioredis (Node) against Redis 7 and Luma
+    runs-on: ubuntu-latest
+    # The README promises ioredis works and nothing had ever run it. The first
+    # run found three protocol bugs the 327-command differential could not see:
+    # `HELLO` ignored its own AUTH clause, its reply was a RESP3 map on a RESP2
+    # connection, and `PING` did not change shape inside a subscription. ioredis
+    # does its own RESP parsing, pipelining and reconnects, which is exactly
+    # where a reimplementation diverges.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install ioredis
+      - name: Build Luma
+        run: cargo build --release --locked
+      - name: Start Luma with the RESP listener
+        env:
+          LUMA_API_KEY: ci-resp-e2e-key-long-enough
+          LUMA_MASTER_KEY: ci-resp-master-key
+          RESP_PORT: '16380'
+          RESP_ALLOW_FLUSH: '1'
+          DATA_DIR: resp-e2e-data
+          PORT_LUMA_VDB: '18081'
+        run: |
+          ./target/release/luma serve > luma.log 2>&1 &
+          for _ in $(seq 1 40); do
+            if (exec 3<>/dev/tcp/127.0.0.1/16380) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo 'the RESP port never opened'; cat luma.log; exit 1
+      - name: ioredis against both
+        run: |
+          node tests/e2e/ioredis_client.mjs \
+            --redis redis://127.0.0.1:6379/0 \
+            --luma  redis://:ci-resp-e2e-key-long-enough@127.0.0.1:16380/0
+      - name: Server log on failure
+        if: failure()
+        run: cat luma.log
+
   s3-e2e:
     name: S3 API against boto3
     runs-on: ubuntu-latest
@@ -302,7 +348,7 @@ jobs:
           echo 'the committed bundle matches the source'
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, s3-e2e, ivf-recall, admin-ui]
+    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, s3-e2e, ioredis-e2e, ivf-recall, admin-ui]
     runs-on: ubuntu-latest
     if: always()
     steps:

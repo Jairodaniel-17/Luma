@@ -729,14 +729,28 @@ fn hello(
     args: &[Vec<u8>],
     authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
 ) -> Value {
-    // A client may ask for RESP3. We answer the handshake either way but keep
-    // speaking RESP2, which every targeted client understands; claiming RESP3
-    // and then sending RESP2 replies would break them in ways that only show up
-    // under load.
+    // **`HELLO 3` is refused, not accepted-and-downgraded.**
+    //
+    // This used to accept 3 and answer `proto: 2`, on the theory that replying
+    // honestly about the protocol was enough. It is not: a client that asked for
+    // RESP3 frames its own expectations around having got it. ioredis 6 asks for
+    // 3, and then reads out-of-band pushes as RESP3 `>` frames — so Luma's `*3`
+    // pub/sub message landed in its command queue as if it were a reply, and it
+    // died with "Command queue state error" the moment anything was published.
+    //
+    // Real Redis answers `HELLO 3` with `proto: 3` and then genuinely switches to
+    // push frames. A server that cannot do that has exactly one correct answer,
+    // which is the one Redis itself gives before 6.0: `NOPROTO`. Every client
+    // handles it by falling back to RESP2 — which is the protocol this server
+    // actually speaks, so the fallback is the truth rather than a downgrade the
+    // client was not told about.
     if let Some(version) = args.first() {
         let requested = String::from_utf8_lossy(version).parse::<i64>().unwrap_or(2);
-        if !(2..=3).contains(&requested) {
-            return err("NOPROTO unsupported protocol version");
+        if requested != 2 {
+            return err(
+                "NOPROTO unsupported protocol version. This server speaks RESP2; \
+                 retry with HELLO 2 or omit the version",
+            );
         }
     }
 
@@ -2445,12 +2459,26 @@ mod tests {
     }
 
     #[test]
-    fn hello_reports_resp2_even_when_three_is_requested() {
-        // Claiming RESP3 and then sending RESP2 replies breaks clients in ways
-        // that only surface under load, so the handshake stays honest.
+    fn hello_three_is_refused_rather_than_silently_downgraded() {
+        // Accepting `HELLO 3` and answering `proto: 2` looks polite and breaks
+        // clients: ioredis 6 asks for 3 and then reads pub/sub deliveries as
+        // RESP3 push frames, so a RESP2 `*3` message went into its command queue
+        // as a reply and killed the connection. `NOPROTO` is what Redis itself
+        // answers when it cannot do 3, and every client falls back to RESP2 on
+        // it — which is the protocol this server really speaks.
         let (e, _d, mut s) = open();
-        let Value::Array(Some(items)) = run(&e, &mut s, &["HELLO", "3"]) else {
-            panic!("HELLO must reply with a flat array on a RESP2 connection");
+        let reply = run(&e, &mut s, &["HELLO", "3"]);
+        let Value::Error(message) = reply else {
+            panic!("HELLO 3 must be refused, got {reply:?}");
+        };
+        assert!(message.starts_with("NOPROTO"), "{message}");
+    }
+
+    #[test]
+    fn hello_two_completes_the_handshake() {
+        let (e, _d, mut s) = open();
+        let Value::Array(Some(items)) = run(&e, &mut s, &["HELLO", "2"]) else {
+            panic!("HELLO 2 must reply with a flat array");
         };
         let proto = items
             .chunks(2)
@@ -2535,7 +2563,7 @@ mod tests {
         );
         // After SETNAME, which Redis allows in either order.
         assert_eq!(
-            credential_in_command(&args(&["HELLO", "3", "SETNAME", "x", "AUTH", "u", "p"])),
+            credential_in_command(&args(&["HELLO", "2", "SETNAME", "x", "AUTH", "u", "p"])),
             Some(("u".into(), "p".into()))
         );
         // Nothing to resolve.
