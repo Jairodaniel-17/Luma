@@ -275,8 +275,19 @@ El set de comandos de las fases 2 y 3 de `SPEC-resp.md` está completo
 (57/57), modificadores de `ZADD` y opciones de `ZRANGE` incluidos.
 
 **Fuera de alcance por decisión** (ver el backlog de `SPEC-resp.md`): protocolo
-de cluster (`MOVED`/`ASK`), replicación por protocolo Redis (`REPLICAOF`), Lua
-(`EVAL`), Streams (`XADD`), keyspace notifications.
+de cluster (`MOVED`/`ASK`), replicación por protocolo Redis (`REPLICAOF`),
+Streams (`XADD`), keyspace notifications.
+
+**`EVAL`/`EVALSHA` existen, pero no hay Lua.** Esta línea decía que Lua estaba
+fuera de alcance, y se quedó desactualizada: el trabajo de E2E encontró que el
+worker de Celery moría con `unknown command EVALSHA`, y que la demanda real era
+mucho más estrecha que «Lua» — es el `Lock` de redis-py, que usa kombu, y solo
+sus `release`, `extend` y `reacquire` son scripts, cada uno seis líneas fijas.
+`src/resp/scripts.rs` reconoce esos tres por su texto y los ejecuta de forma
+nativa, sin intérprete. **Un script cualquiera se rechaza con un error que lo
+dice**, que es el fallo honesto: un cliente con su propio Lua recibe un «no
+soportado» en vez de una respuesta equivocada. Ahí está la costura por donde
+entraría un intérprete de verdad si algún cliente objetivo lo necesitara.
 
 ---
 

@@ -44,13 +44,85 @@ que ya usas.
 | Motor HTTP (`/v1/...`), vectorial, KV, SQL, colas, blobs | **Estable** |
 | NS-Mem (`/v1/memory`) | **Estable** |
 | Multi-tenancy, RBAC, auditoría, panel admin | **Estable** |
-| **RESP / compatibilidad Redis** | **Experimental.** 57/57 comandos de las fases 2–3 verificados byte a byte contra un Redis 7 real (327 comandos, 0 divergencias) y contra Celery, kombu, arq y redis-py reales. Sigue marcado experimental hasta que el nightly acumule 7 días verdes |
-| **API S3** | **Experimental.** Verificada contra boto3 real y los vectores SigV4 de AWS; no se ha corrido la suite mint de MinIO |
-| **Conector Postgres (CDC)** | **Experimental.** 7 pruebas contra un Postgres 16 real |
+| **RESP / compatibilidad Redis** | **Experimental por calendario**, no por funcionalidad — §1.1 |
+| **API S3** | **Experimental por cobertura de pruebas** — §1.1 |
+| **Conector Postgres (CDC)** | **Experimental por kilometraje operativo** — §1.1 |
 
-No lo escondo porque el estado importa más que la lista: «experimental» aquí
-significa *medido y funcionando, sin el kilometraje en producción que justifique
-llamarlo GA*.
+### 1.1 Por qué esas tres son experimentales
+
+No significa lo mismo en las tres, y la diferencia es justo la que decide si
+puedes usarla hoy.
+
+#### RESP — le falta calendario, no código
+
+El set de comandos está **completo** (57/57 de las fases 2 y 3 del SPEC) y
+verificado byte a byte contra un Redis 7 real: **327 comandos idénticos, 0
+divergencias**, más Celery, kombu, arq y redis-py de verdad —incluido un worker
+de Celery que consume, ejecuta y devuelve el resultado.
+
+Lo único que falta es el criterio que el propio plan se puso: **el job nightly
+verde 7 noches seguidas**. Va por **1 de 7**; la primera corrida programada fue
+esta madrugada, las anteriores se lanzaron a mano. No es una duda sobre si
+funciona, es que nadie ha visto todavía siete noches seguidas sin sorpresas.
+
+Lo que sí conviene saber antes de adoptarlo:
+
+- **No hay Lua de verdad.** `EVAL`/`EVALSHA` reconocen los tres scripts del
+  `Lock` de redis-py —los que usa kombu— y los ejecutan de forma nativa, sin
+  intérprete. **Cualquier otro script se rechaza** con un error que lo dice. Si
+  tu código usa Lua propio, no va.
+- **Fuera de alcance por decisión**: cluster (`MOVED`/`ASK`), `REPLICAOF`,
+  Streams (`XADD`), keyspace notifications.
+- Las estructuras viven en RAM: no es para colas de 10 M de mensajes residentes.
+
+#### S3 — le falta superficie de pruebas
+
+Verificada contra **boto3 real** (14 comprobaciones: presignadas que caducan,
+multipart subido fuera de orden, los ETag) y contra los vectores SigV4 publicados
+por AWS. Lo que **no** se ha probado, tal como lo dice
+[`docs/integrar/S3.md`](docs/integrar/S3.md):
+
+- **La suite mint de MinIO.** La razón es defendible: prueba versionado,
+  lifecycle y object lock, que aquí se rechazan **a propósito**. Correrla daría
+  una lista larga de fallos esperados y un semáforo que nadie leería.
+- **Cargas grandes.** Las pruebas de multipart usan partes de cien bytes. El
+  ensamblado es correcto por construcción, pero nadie ha subido un gigabyte.
+- **Concurrencia.** Dos clientes escribiendo la misma clave a la vez. Cada
+  escritura es atómica (temporal + rename), así que verás uno de los dos cuerpos
+  y nunca una mezcla — pero cuál de los dos no está definido.
+
+Lo no soportado se rechaza con **501 NotImplemented**, no se ignora: versionado,
+lifecycle, ACLs, replicación, object lock, cifrado por cabecera, tagging, CORS y
+hosting web. La diferencia importa: un cliente que pone una ACL y recibe **200**
+*cree que el objeto es privado* cuando no lo es.
+
+#### Postgres CDC — le falta kilometraje operativo
+
+7 pruebas contra un Postgres 16 real, con el protocolo `pgoutput` escrito a mano
+porque la crate que hace esto no está publicada. Lo que no se ha ejercitado:
+
+- **TLS contra un servidor real.** El camino existe (`sslmode=require`, rustls
+  con las raíces de webpki), pero el Postgres del contenedor no sirve TLS: solo
+  está probado que rechaza `prefer`.
+- **Volumen.** Las pruebas mueven decenas de filas, no millones.
+- **Reconexión a media transacción.** Reconecta por pasada, lo que cubre un corte
+  de red, un failover y un reinicio con el mismo camino de código — pero nadie ha
+  cortado el cable en mitad de una transacción grande.
+- **Varios conectores contra la misma base.** Cada uno querría su slot; sin
+  probar.
+- **Solo el protocolo lógico 1.** Las versiones 2–4 hacen streaming de
+  transacciones grandes antes del commit.
+
+Y tres cosas que **no hace por decisión**, no por pendiente: no escribe de vuelta
+(Postgres sigue siendo la fuente de verdad), no aplica `TRUNCATE` —lo registra y
+marca el checkpoint `stale` en vez de vaciar una colección derivada— y no hace
+DDL.
+
+#### En una frase
+
+«Experimental» aquí significa **medido y funcionando, sin el kilometraje que
+justifique llamarlo GA**. RESP espera un contador de días; S3 y CDC esperan que
+alguien los use en serio y cuente qué pasó.
 
 ---
 
