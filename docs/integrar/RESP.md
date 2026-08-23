@@ -125,7 +125,7 @@ afecta, es mejor saberlo antes de migrar que descubrirlo en producción.
 
 ### Verificado contra Redis 7 real
 
-`tests/redis_differential.rs` envía **298 comandos idénticos** a un Redis 7 y
+`tests/redis_differential.rs` envía **327 comandos idénticos** a un Redis 7 y
 a Luma por socket crudo y compara los bytes de respuesta. Está `#[ignore]`
 porque necesita un Redis que el proceso no controla:
 

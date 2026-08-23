@@ -8,6 +8,7 @@ Primer contacto: levantar algo y ver que funciona.
 
 | | |
 |---|---|
+| **[Manual de usuario](../MANUAL_USUARIO.md)** | **Empieza aquí.** Qué soporta Luma, cómo configurarlo bien y qué falla si no |
 | [Demo](empezar/DEMO.md) | Recorrido guiado desde cero |
 | [Características](empezar/FEATURES.md) | Qué hay dentro, en una página |
 | [SDK de Python](empezar/SDK_PYTHON.md) | Cliente Python |
