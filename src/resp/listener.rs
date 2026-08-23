@@ -351,6 +351,29 @@ fn load_tls(cert_path: &str, key_path: &str) -> std::io::Result<tokio_rustls::Tl
 }
 
 /// Start the listener. Returns immediately; the accept loop runs in a task.
+/// Run a synchronous dispatch without stalling the runtime.
+///
+/// `dispatch` does real blocking work — the WAL fsync and the projection
+/// transaction — and calling it straight from an async task blocks a Tokio
+/// worker. That caps the number of commands in flight at the worker count, and
+/// it is exactly what the RESP benchmark showed: throughput flat at ~8 000/s
+/// whether 32 clients were connected or 256, while latency rose linearly. Group
+/// commit cannot batch writers that never arrive, and with 20 workers only 20
+/// could ever be queued at once. In-process the same engine reached 21 616/s.
+///
+/// `block_in_place` is the runtime's own answer: it hands this worker's other
+/// tasks to a replacement thread and lets this one block. It panics on a
+/// current-thread runtime — which `#[tokio::test]` creates — so the flavor
+/// decides. On a current-thread runtime there is no other worker to starve, so
+/// calling straight through is both the only option and a harmless one.
+fn run_blocking<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 pub async fn spawn(
     config: &crate::config::Config,
     engine: Engine,
@@ -588,14 +611,16 @@ where
                     // element is already there when the waiter re-checks.
                     let pushed_keys = pushed_list_keys(&session, &args);
                     let authenticated_before = session.authenticated;
-                    let outcome = dispatch(
-                        &server.engine,
-                        &mut session,
-                        &args,
-                        &|_user, _given| resolved.clone(),
-                        Some(server.pubsub.as_ref()),
-                        server.allow_flush,
-                    );
+                    let outcome = run_blocking(|| {
+                        dispatch(
+                            &server.engine,
+                            &mut session,
+                            &args,
+                            &|_user, _given| resolved.clone(),
+                            Some(server.pubsub.as_ref()),
+                            server.allow_flush,
+                        )
+                    });
 
                     match outcome {
                         Dispatch::Block {
