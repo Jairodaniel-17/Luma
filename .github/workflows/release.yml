@@ -248,10 +248,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all build artifacts
+      # `pattern` is not tidiness, it is the fix for the failure that stopped
+      # v4.25.1 from publishing. `docker/build-push-action` uploads a build
+      # record of its own named `<owner>~<repo>~<id>.dockerbuild`, and
+      # downloading everything picked it up too — it failed after 5 retries and
+      # took the whole job with it, after the six real artifacts had already
+      # downloaded fine. It is not release material either way.
+      - name: Download the release artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: luma-*
 
       - name: Flatten & checksum
         run: |
