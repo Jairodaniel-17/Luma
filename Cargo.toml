@@ -13,7 +13,6 @@ async-stream = "0.3"
 axum = { version = "0.7", features = ["macros"] }
 futures-util = "0.3"
 parking_lot = "0.12"
-redb = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -88,8 +87,13 @@ webpki-roots = "1"
 postgres-protocol = "0.6"
 sha1 = "0.10"
 md-5 = "0.10"
+fjall = "2"
 
 [dev-dependencies]
+# Only two ignored diagnostics still use it: `tests/redb_ceiling.rs` and
+# `tests/ram_cost.rs`, which measure what the projection used to cost. The
+# projection itself is `fjall` now, so redb must not be in the shipped binary.
+redb = "2"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
@@ -102,7 +106,6 @@ tokio-test = "0.4"
 mockall = "0.13"
 assert_cmd = "2.0"
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "crypto", "ring"] }
-fjall = "2"
 
 [[bench]]
 name = "vector_bench"

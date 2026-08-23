@@ -55,11 +55,11 @@ Si `wal=0` **y** `snapshot=false`, el respaldo está vacío: comprueba que
 Contiene: la base SQLite (vía `VACUUM INTO`, así que es consistente), el
 `snapshot.json`, los segmentos del WAL, `vectors/`, `blobs/` y `queues/`.
 
-**No contiene `state.redb`**, a propósito. Es una proyección del WAL: el restore
-la reconstruye reproduciendo. Copiarla en caliente falla en Windows con violación
-de compartición y en Linux produce una lectura desgarrada — y una redb desgarrada
-es peor que ninguna, porque el restore arrancaría desde estado derivado corrupto
-en vez de reconstruirlo limpio.
+**No contiene `state.lsm`** (la proyección KV), a propósito. Es una proyección
+del WAL: el restore la reconstruye reproduciendo. Copiarla en caliente falla en
+Windows con violación de compartición y en Linux produce una lectura desgarrada —
+y una proyección desgarrada es peor que ninguna, porque el restore arrancaría
+desde estado derivado corrupto en vez de reconstruirlo limpio.
 
 ### Restaurar
 

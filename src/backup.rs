@@ -160,19 +160,22 @@ pub fn run_backup(config: &Config) -> Result<PathBuf> {
             manifest.snapshot = true;
         }
 
-        // `state.redb` is deliberately NOT copied.
+        // The KV projection (`state.lsm`, formerly `state.redb`) is deliberately
+        // NOT copied.
         //
         // It is a projection of the WAL: a restore replays and rebuilds it. An
         // earlier version of this function copied it to make restores start
-        // served rather than replaying — which was wrong twice over. The file is
+        // served rather than replaying — which was wrong twice over. The store is
         // open and memory-mapped by the running engine, so on Windows the copy
         // fails outright with a sharing violation (breaking `luma backup`
-        // entirely), and on Linux it succeeds while producing a torn read. A
-        // torn redb is worse than no redb: the restore would begin from corrupt
-        // derived state instead of rebuilding it cleanly from the WAL.
+        // entirely), and on Linux it succeeds while producing a torn read. A torn
+        // projection is worse than no projection: the restore would begin from
+        // corrupt derived state instead of rebuilding it cleanly from the WAL.
         //
         // `manifest.state_db` stays in the struct so backups written before this
-        // change still verify.
+        // change still verify. Those name `state.redb`, which is why the verify
+        // and restore paths below still look for that name and only that name —
+        // no build has ever written a backup containing `state.lsm`.
 
         if let Ok(entries) = fs::read_dir(data) {
             for entry in entries.flatten() {
@@ -249,6 +252,8 @@ pub fn verify(backup_path: &Path) -> Result<BackupManifest> {
     if manifest.snapshot && !backup_path.join("snapshot.json").exists() {
         return Err(anyhow!("manifest claims a snapshot but it is missing"));
     }
+    // Legacy only: `state_db` is written `false` now, so this fires exclusively
+    // for backups taken by a build that still copied the projection.
     if manifest.state_db && !backup_path.join("state.redb").exists() {
         return Err(anyhow!("manifest claims a state db but it is missing"));
     }
@@ -355,8 +360,10 @@ pub fn restore(config: &Config, backup_path: &str) -> Result<()> {
         if src_snap.exists() {
             fs::copy(&src_snap, data.join("snapshot.json"))?;
         }
-        // Only present in backups taken before redb stopped being copied. New
-        // ones rebuild it from the WAL, which is the safer path anyway.
+        // Only present in backups taken before the projection stopped being
+        // copied, when it was redb and lived in a single file. New ones rebuild
+        // it from the WAL, which is the safer path anyway; the engine reads
+        // `state.lsm` and ignores this leftover, so restoring it is harmless.
         let src_state_db = src.join("state.redb");
         if src_state_db.exists() {
             fs::copy(&src_state_db, data.join("state.redb"))?;

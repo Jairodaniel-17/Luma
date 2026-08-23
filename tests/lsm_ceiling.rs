@@ -1,7 +1,11 @@
 //! Option 5: an LSM store for the projection, measured against options 1+2 and 3.
 //!
-//! Diagnostic, ignored by default, and `fjall` is a **dev-dependency only** —
-//! nothing ships until the numbers say it should.
+//! Diagnostic, ignored by default. When it was written `fjall` was a
+//! dev-dependency only, so nothing shipped until the numbers said it should.
+//! The numbers said it should: `fjall` is now the projection in
+//! `src/engine/state_db.rs`, and `redb` moved the other way, to a
+//! dev-dependency kept alive only by `tests/redb_ceiling.rs` and
+//! `tests/ram_cost.rs`.
 //!
 //! ## Why this is on the table at all
 //!

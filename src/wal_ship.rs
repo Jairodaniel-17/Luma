@@ -347,7 +347,9 @@ mod tests {
         }
         // Zero padding is what makes lexicographic order chronological.
         std::fs::write(dir.path().join("snapshot.json"), b"{}").unwrap();
-        std::fs::write(dir.path().join("state.redb"), b"x").unwrap();
+        // The KV projection is a *directory* (`state.lsm`), so this decoy also
+        // covers the case a plain file would not: a dir entry that is not a file.
+        std::fs::create_dir(dir.path().join("state.lsm")).unwrap();
 
         let names: Vec<_> = list_segments(dir.path())
             .unwrap()

@@ -80,13 +80,13 @@ su journaling de metadatos y no en un flush que hagamos nosotros.
 | SQLite | `VACUUM INTO` — copia consistente sin parar el actor |
 | `snapshot.json` | copia directa |
 | Segmentos del WAL | todos los `events-*.log` presentes |
-| `state.redb` | **no se copia** — ver abajo |
+| `state.lsm` (proyección KV) | **no se copia** — ver abajo |
 | `vectors/` | árbol completo: manifest, runs y mmaps |
 | `blobs/` | árbol completo |
 | `queues/` | árbol completo |
 | Estructuras (listas, hashes, sets, zsets) | van dentro del WAL y el snapshot: se guardan bajo el prefijo `struct:` del KV. Hay test de round-trip completo |
 
-> **Por qué redb no se copia.** Es una proyección del WAL: el restore lo
+> **Por qué la proyección no se copia.** Es una proyección del WAL: el restore lo
 > reconstruye. Una versión anterior sí lo copiaba, para que el restore arrancara
 > servido en vez de replayando, y estaba mal por partida doble: el fichero está
 > abierto y mapeado por el engine en marcha, así que en Windows la copia falla

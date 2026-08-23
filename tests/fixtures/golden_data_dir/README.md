@@ -13,7 +13,7 @@ says CI must check it, because a rule nothing checks is a wish.
 |---|---|
 | `events-NNNNNN.log` | segmented WAL, JSON lines with per-record checksums |
 | `snapshot.json` | state snapshot |
-| `state.redb` | redb-backed KV projection |
+| `state.redb` | the KV projection **as it was**: redb-backed, from before the LSM swap. The current build reads `state.lsm` and rebuilds it from the WAL, so this file is now a leftover the engine ignores — and the test still passing is the proof that the projection holds no data of its own |
 | `vectors/golden/manifest.json` | collection manifest — written **before** the embedding-provenance fields existed, which is the point |
 | `vectors/golden/runs/*.log` | vector run records |
 | `vectors/golden/*.mmap` | mmap-backed vector and q8 storage |

@@ -1,45 +1,73 @@
+//! The KV projection: an LSM store rebuilt from the WAL.
+//!
+//! ## Why an LSM and not a B-tree
+//!
+//! This used to be redb, a copy-on-write B-tree, and that was the wrong shape
+//! for a write-heavy projection. A single-key insert in a COW B-tree rewrites
+//! the page path from leaf to root — about 16 KB written for a 30-byte value,
+//! roughly 500x amplification. An LSM writes into an in-memory table and flushes
+//! it to a sorted file, and a background job merges those files, so a write never
+//! rewrites a tree.
+//!
+//! Measured, same machine, same shape (`tests/redb_ceiling.rs`,
+//! `tests/lsm_ceiling.rs`):
+//!
+//! ```text
+//! redb, Eventual, one txn per write      1 308/s
+//! redb, None, one txn per write         11 401/s
+//! redb, None, batched 32 per txn       235 679/s
+//! LSM, projection role                 432 764/s
+//! LSM, 128 concurrent writers          208 944/s
+//! ```
+//!
+//! Three things made the swap cheap rather than risky:
+//!
+//! - **There is nothing to migrate.** This store holds no data of its own; it is
+//!   a projection of the WAL, rebuilt from `applied_offset`. Changing engines is
+//!   deleting a directory and replaying.
+//! - **Compaction comes written.** An index over the WAL — the other candidate —
+//!   would have meant writing and testing a compaction subsystem, which is the
+//!   part of that design that puts data at risk. An LSM already has one.
+//! - **Ordered iteration is native.** `KEYS`, `SCAN` and `list_range` walk keys
+//!   in order. An LSM is sorted, so they work directly; a hash index over the WAL
+//!   could not do it at any price.
+//!
+//! ## Durability, and why so little of it
+//!
+//! Nothing here fsyncs on the write path, and that is correct rather than
+//! reckless for the same reason it was correct for redb: **this is not the source
+//! of truth.** The WAL is. On a crash this store rolls back to its last persisted
+//! point, `applied_offset` rolls back with it because it is written in the same
+//! atomic batch, and replay re-applies the difference. WAL retention will not
+//! prune past that point — `set_durable_floor` holds the line using the offset
+//! `flush` returns. So a crash costs a rebuild, never data.
+//!
+//! The cost is memory: unpersisted writes live in the memtable. Bounded by how
+//! often `flush` runs and by the memtable size, not by the size of the dataset —
+//! 50 000 inserts measured at 18.3 MiB.
+
 use crate::engine::events::EventRecord;
 use crate::engine::state::{StateError, StateItem};
 use anyhow::Context;
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 use std::path::Path;
-use std::sync::Arc;
 
-/// How durable a projection commit needs to be, which is: not very.
-///
-/// `Durability::None` looks reckless and is exactly right here, for the reason
-/// this module already states — **redb is not the source of truth**. It is a
-/// projection of the WAL, rebuilt from `applied_offset` on replay, and WAL
-/// retention will not prune past redb's last durable point because
-/// `set_durable_floor` holds the line. redb rolls back to its last durable
-/// commit on a crash; `applied_offset` rolls back with it, and replay re-applies
-/// the difference. So a crash costs a rebuild, never data.
-///
-/// It was `Eventual`, and the difference is not marginal. Measured
-/// (`tests/redb_ceiling.rs`), one transaction per write:
-///
-/// ```text
-/// Eventual                  1 308/s
-/// None                     11 401/s
-/// None, batched 32/txn    235 679/s
-/// ```
-///
-/// The cost is memory: `None` holds dirty pages until a durable commit, about
-/// 400–600 bytes per uncommitted write (`tests/ram_cost.rs`). That is bounded by
-/// how often the checkpoint runs, not by the size of the dataset — 10 000
-/// uncheckpointed writes measured at 5.9 MiB, released almost entirely by the
-/// next durable commit.
-const PROJECTION_DURABILITY: Durability = Durability::None;
-
-const STATE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("state");
-const EXPIRES: TableDefinition<&[u8], u8> = TableDefinition::new("expires");
-const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
+/// Values, by key.
+const STATE: &str = "state";
+/// `(expires_at_ms, key)` → nothing, so TTL expiry is a range scan and not a
+/// full pass over the keyspace.
+const EXPIRES: &str = "expires";
+/// Bookkeeping, which is only ever `applied_offset`.
+const META: &str = "meta";
 
 const META_APPLIED_OFFSET: &[u8] = b"applied_offset";
 
 #[derive(Clone)]
 pub struct StateDb {
-    db: Arc<Database>,
+    keyspace: Keyspace,
+    state: PartitionHandle,
+    expires: PartitionHandle,
+    meta: PartitionHandle,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -53,35 +81,36 @@ struct StoredValue {
 
 impl StateDb {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let path = data_dir.as_ref().join("state.redb");
-        let db = Database::create(&path).context("create/open redb")?;
-        let this = Self { db: Arc::new(db) };
-        this.init_tables().context("init tables")?;
-        Ok(this)
+        // A directory, not a file: an LSM keeps its journal and its sorted runs
+        // separately. The name says which engine wrote it, so a downgrade finds
+        // no directory rather than a file it would misread.
+        let path = data_dir.as_ref().join("state.lsm");
+        let keyspace = Config::new(&path).open().context("open the LSM keyspace")?;
+        let options = PartitionCreateOptions::default();
+        Ok(Self {
+            state: keyspace.open_partition(STATE, options.clone())?,
+            expires: keyspace.open_partition(EXPIRES, options.clone())?,
+            meta: keyspace.open_partition(META, options)?,
+            keyspace,
+        })
     }
 
-    fn init_tables(&self) -> anyhow::Result<()> {
-        let wtx = self.db.begin_write()?;
-        let _ = wtx.open_table(STATE)?;
-        let _ = wtx.open_table(EXPIRES)?;
-        let _ = wtx.open_table(META)?;
-        wtx.commit()?;
-        Ok(())
+    fn read(&self, key: &str) -> anyhow::Result<Option<StoredValue>> {
+        let Some(raw) = self.state.get(key.as_bytes())? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            serde_json::from_slice(&raw).context("decode stored value")?,
+        ))
     }
 
     pub fn get_state(&self, key: &str) -> anyhow::Result<Option<StateItem>> {
-        let tx = self.db.begin_read()?;
-        let table = match tx.open_table(STATE) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        let now = now_ms();
-        let Some(raw) = table.get(key.as_bytes())? else {
+        let Some(stored) = self.read(key)? else {
             return Ok(None);
         };
-        let stored: StoredValue =
-            serde_json::from_slice(raw.value()).context("decode stored value")?;
-        if stored.expires_at_ms.is_some_and(|e| e <= now) {
+        // An expired key reads as absent even before the TTL sweep removes it,
+        // so a reader never sees a value the clock has already retired.
+        if stored.expires_at_ms.is_some_and(|e| e <= now_ms()) {
             return Ok(None);
         }
         Ok(Some(StateItem {
@@ -97,12 +126,7 @@ impl StateDb {
     }
 
     pub fn exists_any(&self, key: &str) -> anyhow::Result<bool> {
-        let tx = self.db.begin_read()?;
-        let table = match tx.open_table(STATE) {
-            Ok(t) => t,
-            Err(_) => return Ok(false),
-        };
-        Ok(table.get(key.as_bytes())?.is_some())
+        Ok(self.state.get(key.as_bytes())?.is_some())
     }
 
     pub fn list(&self, prefix: Option<&str>, limit: usize) -> anyhow::Result<Vec<StateItem>> {
@@ -116,32 +140,31 @@ impl StateDb {
         end: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<StateItem>> {
-        let tx = self.db.begin_read()?;
-        let table = match tx.open_table(STATE) {
-            Ok(t) => t,
-            Err(_) => return Ok(Vec::new()),
-        };
         let now = now_ms();
         let mut out = Vec::new();
 
-        let iter = match start {
-            Some(start) => table.range(start.as_bytes()..)?,
-            None => table.iter()?,
-        };
+        // The range is left-inclusive and right-exclusive, matching what
+        // `next_prefix_boundary` produces and what the KV API documents.
+        let iter: Box<dyn Iterator<Item = fjall::Result<(fjall::Slice, fjall::Slice)>>> =
+            match start {
+                Some(start) => Box::new(self.state.range(start.as_bytes().to_vec()..)),
+                None => Box::new(self.state.iter()),
+            };
+
         for kv in iter {
             let (k, v) = kv?;
-            let key = std::str::from_utf8(k.value()).unwrap_or_default();
+            let key = std::str::from_utf8(&k).unwrap_or_default().to_string();
             if let Some(end) = end {
-                if key >= end {
+                if key.as_str() >= end {
                     break;
                 }
             }
-            let stored: StoredValue = serde_json::from_slice(v.value())?;
+            let stored: StoredValue = serde_json::from_slice(&v)?;
             if stored.expires_at_ms.is_some_and(|e| e <= now) {
                 continue;
             }
             out.push(StateItem {
-                key: key.to_string(),
+                key,
                 value: stored.value,
                 revision: stored.revision,
                 expires_at_ms: stored.expires_at_ms,
@@ -150,7 +173,6 @@ impl StateDb {
                 break;
             }
         }
-
         Ok(out)
     }
 
@@ -159,26 +181,14 @@ impl StateDb {
         key: &str,
         if_revision: Option<u64>,
     ) -> Result<u64, StateError> {
-        let tx = self
-            .db
-            .begin_read()
-            .map_err(|_| StateError::RevisionMismatch)?;
-        let table = match tx.open_table(STATE) {
-            Ok(t) => t,
-            Err(_) => {
-                if if_revision.is_some() {
-                    return Err(StateError::RevisionMismatch);
-                }
-                return Ok(1);
-            }
-        };
         let now = now_ms();
-
-        let current = table
-            .get(key.as_bytes())
+        // A read failure is treated as absent rather than propagated: the caller
+        // only accepts a revision or a mismatch, and inventing a revision from a
+        // failed read is worse than refusing the compare-and-swap.
+        let current = self
+            .read(key)
             .ok()
             .flatten()
-            .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok())
             .filter(|v| v.expires_at_ms.is_none_or(|e| e > now));
 
         match current {
@@ -200,24 +210,102 @@ impl StateDb {
     }
 
     pub fn apply_state_updated(&self, ev: &EventRecord) -> anyhow::Result<()> {
-        if ev.offset <= self.applied_offset()? {
-            return Ok(());
+        self.apply_events(&[ev]).map(|_| ())
+    }
+
+    pub fn apply_state_deleted(&self, ev: &EventRecord) -> anyhow::Result<()> {
+        self.apply_events(&[ev]).map(|_| ())
+    }
+
+    /// Apply a `state_batch` record: every op in one atomic batch.
+    ///
+    /// One batch because a crash must not leave the projection holding half a
+    /// move with `applied_offset` already past it — replay would not repair
+    /// that, since it skips anything at or below the offset.
+    pub fn apply_state_batch(&self, ev: &EventRecord) -> anyhow::Result<()> {
+        self.apply_events(&[ev]).map(|_| ())
+    }
+
+    /// Apply many events in **one** atomic batch.
+    ///
+    /// The single write path: the three `apply_*` methods above all route here,
+    /// so there is one place where an event becomes a mutation. When they were
+    /// separate bodies they drifted — the expiry-index removal is exactly the
+    /// step that gets forgotten in a copy, and forgetting it leaks index entries
+    /// that outlive their values.
+    ///
+    /// Batching is also where the throughput is: 32 records sharing one commit
+    /// measured 235 679/s against 11 401/s one at a time, back when this was a
+    /// B-tree. `applied_offset` goes into the same batch as the data, so the two
+    /// cannot come back from a crash disagreeing.
+    ///
+    /// Non-state events are skipped rather than rejected: a batch arrives mixed
+    /// and the vector store applies its own.
+    pub fn apply_events(&self, events: &[&EventRecord]) -> anyhow::Result<u64> {
+        let already = self.applied_offset()?;
+        let mut batch = self.keyspace.batch();
+        let mut highest = 0u64;
+
+        for ev in events {
+            // The idempotence both callers rely on: replay re-offers records the
+            // projection already holds, and they must be no-ops rather than
+            // double applications.
+            if ev.offset <= already {
+                continue;
+            }
+            let handled = match ev.event_type.as_str() {
+                "state_updated" => {
+                    self.stage_put(&mut batch, &ev.data)?;
+                    true
+                }
+                "state_deleted" => {
+                    self.stage_delete(&mut batch, &ev.data)?;
+                    true
+                }
+                "state_batch" => {
+                    let ops = ev
+                        .data
+                        .get("ops")
+                        .and_then(|v| v.as_array())
+                        .context("state_batch without ops")?;
+                    for op in ops {
+                        if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
+                            self.stage_delete(&mut batch, op)?;
+                        } else {
+                            self.stage_put(&mut batch, op)?;
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                highest = highest.max(ev.offset);
+            }
         }
-        let key = ev
-            .data
+
+        if highest > already {
+            batch.insert(&self.meta, META_APPLIED_OFFSET, highest.to_le_bytes());
+            batch.commit()?;
+        }
+        Ok(highest)
+    }
+
+    /// Stage one key's new value, and retire the expiry index entry it replaces.
+    fn stage_put(
+        &self,
+        batch: &mut fjall::Batch,
+        source: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let key = source
             .get("key")
             .and_then(|v| v.as_str())
             .context("missing key")?;
-        let revision = ev
-            .data
-            .get("revision")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1);
-        let expires_at_ms = ev.data.get("expires_at_ms").and_then(|v| v.as_u64());
-        // Decode through StoredVal so a raw payload replayed from the WAL lands
-        // in redb as bytes rather than as the marker object.
-        let value = ev
-            .data
+        let revision = source.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
+        let expires_at_ms = source.get("expires_at_ms").and_then(|v| v.as_u64());
+        // Decoded through `StoredVal` so a raw payload lands as bytes rather than
+        // as its marker object.
+        let value = source
             .get("value")
             .cloned()
             .map(serde_json::from_value::<crate::engine::stored::StoredVal>)
@@ -225,267 +313,76 @@ impl StateDb {
             .unwrap_or(None)
             .unwrap_or_default();
 
-        let mut wtx = self.db.begin_write()?;
-        {
-            let mut state = wtx.open_table(STATE)?;
-            let mut expires = wtx.open_table(EXPIRES)?;
-
-            let prev = if let Some(prev_raw) = state.get(key.as_bytes())? {
-                let bytes = prev_raw.value().to_vec();
-                serde_json::from_slice::<StoredValue>(&bytes).ok()
-            } else {
-                None
-            };
-            if let Some(prev) = prev {
-                if let Some(exp) = prev.expires_at_ms {
-                    let idx = expires_key(exp, key.as_bytes());
-                    let _ = expires.remove(idx.as_slice())?;
-                }
-            }
-
-            let stored = StoredValue {
-                value,
-                revision,
-                expires_at_ms,
-            };
-            let bytes = serde_json::to_vec(&stored)?;
-            state.insert(key.as_bytes(), bytes.as_slice())?;
-
-            if let Some(exp) = expires_at_ms {
-                let idx = expires_key(exp, key.as_bytes());
-                expires.insert(idx.as_slice(), 0u8)?;
+        // The previous index entry points at a value about to be replaced.
+        // Leaving it behind would fire a TTL sweep against a key whose expiry
+        // has moved.
+        if let Some(previous) = self.read(key)? {
+            if let Some(at) = previous.expires_at_ms {
+                batch.remove(&self.expires, expires_key(at, key.as_bytes()));
             }
         }
-        set_applied_offset(&mut wtx, ev.offset)?;
-        // Eventual durability: don't fsync on every write. The WAL is the durable
-        // source of truth; this store is a projection rebuilt from it on replay.
-        // `flush()` (an Immediate commit) is called at each snapshot/checkpoint to
-        // make it durable and let WAL retention advance. On crash, redb rolls back
-        // to the last Immediate commit and replay re-applies the rest.
-        wtx.set_durability(PROJECTION_DURABILITY);
-        wtx.commit()?;
+
+        let stored = StoredValue {
+            value,
+            revision,
+            expires_at_ms,
+        };
+        batch.insert(&self.state, key.as_bytes(), serde_json::to_vec(&stored)?);
+        if let Some(at) = expires_at_ms {
+            batch.insert(&self.expires, expires_key(at, key.as_bytes()), [0u8]);
+        }
         Ok(())
     }
 
-    /// Apply many events in **one** write transaction.
-    ///
-    /// This is the half of group commit that actually pays. Batching the WAL
-    /// fsync alone moved RESP `SET` from 785/s to 4 648/s; the rest of the gap
-    /// was still one redb transaction per record, because redb is a
-    /// copy-on-write B-tree and every single-key insert rewrites the page path
-    /// from leaf to root. Measured in isolation (`tests/redb_ceiling.rs`), 32
-    /// records sharing a transaction go from 11 401/s to 235 679/s.
-    ///
-    /// Non-state events are skipped rather than rejected: a batch arrives mixed,
-    /// and the vector store applies its own. `applied_offset` advances to the
-    /// highest offset this call actually applied, so a caller that mixes both
-    /// kinds must apply the others too before treating the offset as covered.
-    pub fn apply_events(&self, events: &[&EventRecord]) -> anyhow::Result<u64> {
-        let already = self.applied_offset()?;
-        let mut highest = 0u64;
-
-        let mut wtx = self.db.begin_write()?;
-        {
-            let mut state = wtx.open_table(STATE)?;
-            let mut expires = wtx.open_table(EXPIRES)?;
-            for ev in events {
-                // The same guard each single-event path has, hoisted out of the
-                // loop: one read of `applied_offset` for the whole batch instead
-                // of one per record.
-                if ev.offset <= already {
-                    continue;
-                }
-                let handled = match ev.event_type.as_str() {
-                    "state_updated" => {
-                        apply_put_in_tables(&mut state, &mut expires, &ev.data)?;
-                        true
-                    }
-                    "state_deleted" => {
-                        apply_delete_in_tables(&mut state, &mut expires, &ev.data)?;
-                        true
-                    }
-                    "state_batch" => {
-                        let ops = ev
-                            .data
-                            .get("ops")
-                            .and_then(|v| v.as_array())
-                            .context("state_batch without ops")?;
-                        for op in ops {
-                            if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
-                                apply_delete_in_tables(&mut state, &mut expires, op)?;
-                            } else {
-                                apply_put_in_tables(&mut state, &mut expires, op)?;
-                            }
-                        }
-                        true
-                    }
-                    _ => false,
-                };
-                if handled {
-                    highest = highest.max(ev.offset);
-                }
-            }
-        }
-        if highest > already {
-            set_applied_offset(&mut wtx, highest)?;
-        }
-        wtx.set_durability(PROJECTION_DURABILITY);
-        wtx.commit()?;
-        Ok(highest)
-    }
-
-    /// Force all pending Eventual commits durable (a checkpoint) and return the
-    /// offset now guaranteed persistent. Called before a snapshot records its
-    /// offset and WAL segments at/below the returned offset are pruned.
-    ///
-    /// The applied_offset is read inside this exclusive write transaction, so no
-    /// concurrent Eventual apply can advance it between the read and the fsync —
-    /// the returned value is exactly what this Immediate commit makes durable.
-    pub fn flush(&self) -> anyhow::Result<u64> {
-        let wtx = self.db.begin_write()?;
-        let meta = wtx.open_table(META)?;
-        let offset = meta
-            .get(META_APPLIED_OFFSET)?
-            .map(|v| u64::from_le_bytes(v.value().try_into().unwrap_or([0; 8])))
-            .unwrap_or(0);
-        drop(meta); // release the table borrow before consuming wtx in commit()
-                    // Default durability is Immediate → fsync, persisting every prior Eventual
-                    // commit up to `offset`.
-        wtx.commit()?;
-        Ok(offset)
-    }
-
-    /// Apply a `state_batch` record: every op in one write transaction.
-    ///
-    /// One transaction because this projection is durable. Committing the ops
-    /// separately would let a crash leave the projection holding half a move
-    /// with `applied_offset` already past it, and replay would not repair it.
-    pub fn apply_state_batch(&self, ev: &EventRecord) -> anyhow::Result<()> {
-        if ev.offset <= self.applied_offset()? {
-            return Ok(());
-        }
-        let ops = ev
-            .data
-            .get("ops")
-            .and_then(|v| v.as_array())
-            .context("state_batch without ops")?;
-
-        let mut wtx = self.db.begin_write()?;
-        {
-            let mut state = wtx.open_table(STATE)?;
-            let mut expires = wtx.open_table(EXPIRES)?;
-            for op in ops {
-                let key = op
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .context("batch op without key")?;
-
-                // Whatever the op, the previous expiry index entry goes: it
-                // points at a value that is about to be replaced or removed.
-                let previous = state
-                    .get(key.as_bytes())?
-                    .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok());
-                if let Some(previous) = &previous {
-                    if let Some(at) = previous.expires_at_ms {
-                        let idx = expires_key(at, key.as_bytes());
-                        let _ = expires.remove(idx.as_slice())?;
-                    }
-                }
-
-                if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
-                    let _ = state.remove(key.as_bytes())?;
-                    continue;
-                }
-
-                let revision = op.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
-                let expires_at_ms = op.get("expires_at_ms").and_then(|v| v.as_u64());
-                // Through `StoredVal` so a raw payload lands as bytes rather
-                // than as its marker object, exactly as the single-key path.
-                let value = op
-                    .get("value")
-                    .cloned()
-                    .map(serde_json::from_value::<crate::engine::stored::StoredVal>)
-                    .transpose()
-                    .unwrap_or(None)
-                    .unwrap_or_default();
-
-                let stored = StoredValue {
-                    value,
-                    revision,
-                    expires_at_ms,
-                };
-                state.insert(key.as_bytes(), serde_json::to_vec(&stored)?.as_slice())?;
-                if let Some(at) = expires_at_ms {
-                    let idx = expires_key(at, key.as_bytes());
-                    expires.insert(idx.as_slice(), 0u8)?;
-                }
-            }
-        }
-        set_applied_offset(&mut wtx, ev.offset)?;
-        // Same eventual durability as the single-key path: the WAL is the
-        // durable source of truth and this is a projection rebuilt from it.
-        wtx.set_durability(PROJECTION_DURABILITY);
-        wtx.commit()?;
-        Ok(())
-    }
-    pub fn apply_state_deleted(&self, ev: &EventRecord) -> anyhow::Result<()> {
-        if ev.offset <= self.applied_offset()? {
-            return Ok(());
-        }
-        let key = ev
-            .data
+    /// Stage one key's removal, index entry included.
+    fn stage_delete(
+        &self,
+        batch: &mut fjall::Batch,
+        source: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let key = source
             .get("key")
             .and_then(|v| v.as_str())
             .context("missing key")?;
-
-        let mut wtx = self.db.begin_write()?;
-        {
-            let mut state = wtx.open_table(STATE)?;
-            let mut expires = wtx.open_table(EXPIRES)?;
-            let prev = if let Some(prev_raw) = state.remove(key.as_bytes())? {
-                let bytes = prev_raw.value().to_vec();
-                serde_json::from_slice::<StoredValue>(&bytes).ok()
-            } else {
-                None
-            };
-            if let Some(prev) = prev {
-                if let Some(exp) = prev.expires_at_ms {
-                    let idx = expires_key(exp, key.as_bytes());
-                    let _ = expires.remove(idx.as_slice())?;
-                }
-            };
+        if let Some(previous) = self.read(key)? {
+            if let Some(at) = previous.expires_at_ms {
+                batch.remove(&self.expires, expires_key(at, key.as_bytes()));
+            }
         }
-        set_applied_offset(&mut wtx, ev.offset)?;
-        wtx.set_durability(PROJECTION_DURABILITY);
-        wtx.commit()?;
+        batch.remove(&self.state, key.as_bytes());
         Ok(())
     }
 
+    /// Make everything applied so far durable, and report the offset that is now
+    /// safe for WAL retention to prune below.
+    ///
+    /// The checkpoint. Called before a snapshot records its offset, and it is
+    /// what keeps the WAL from discarding records this projection has not
+    /// persisted — which is the only thing standing between a crash and real
+    /// data loss, given nothing on the write path fsyncs.
+    pub fn flush(&self) -> anyhow::Result<u64> {
+        self.keyspace
+            .persist(PersistMode::SyncAll)
+            .context("persist the LSM journal")?;
+        self.applied_offset()
+    }
+
     pub fn applied_offset(&self) -> anyhow::Result<u64> {
-        let tx = self.db.begin_read()?;
-        let meta = match tx.open_table(META) {
-            Ok(t) => t,
-            Err(_) => return Ok(0),
-        };
-        let Some(v) = meta.get(META_APPLIED_OFFSET)? else {
+        let Some(raw) = self.meta.get(META_APPLIED_OFFSET)? else {
             return Ok(0);
         };
-        Ok(u64::from_le_bytes(v.value().try_into().unwrap_or([0; 8])))
+        Ok(u64::from_le_bytes(
+            raw.as_ref().try_into().unwrap_or([0; 8]),
+        ))
     }
 
     pub fn expired_keys_due(&self, now_ms: u64, limit: usize) -> anyhow::Result<Vec<String>> {
-        let tx = self.db.begin_read()?;
-        let expires = match tx.open_table(EXPIRES) {
-            Ok(t) => t,
-            Err(_) => return Ok(Vec::new()),
-        };
-
         let mut out = Vec::new();
         let start = expires_key(0, &[]);
         let end = expires_key(now_ms, &[0xFF; 1]);
-        for kv in expires.range(start.as_slice()..=end.as_slice())? {
+        for kv in self.expires.range(start..=end) {
             let (k, _) = kv?;
-            if let Some(key) = parse_expires_key(k.value()) {
+            if let Some(key) = parse_expires_key(&k) {
                 out.push(key);
                 if out.len() >= limit {
                     break;
@@ -496,12 +393,8 @@ impl StateDb {
     }
 }
 
-fn set_applied_offset(wtx: &mut redb::WriteTransaction, offset: u64) -> anyhow::Result<()> {
-    let mut meta = wtx.open_table(META)?;
-    meta.insert(META_APPLIED_OFFSET, offset.to_le_bytes().as_slice())?;
-    Ok(())
-}
-
+/// `(expires_at_ms, key)`, big-endian so byte order is time order and the sweep
+/// is a range scan rather than a full pass.
 fn expires_key(expires_at_ms: u64, key: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + key.len());
     out.extend_from_slice(&expires_at_ms.to_be_bytes());
@@ -509,107 +402,33 @@ fn expires_key(expires_at_ms: u64, key: &[u8]) -> Vec<u8> {
     out
 }
 
-fn parse_expires_key(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 8 {
+fn parse_expires_key(raw: &[u8]) -> Option<String> {
+    if raw.len() <= 8 {
         return None;
     }
-    std::str::from_utf8(&bytes[8..]).ok().map(|s| s.to_string())
+    std::str::from_utf8(&raw[8..]).ok().map(str::to_string)
 }
 
-fn now_ms() -> u64 {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    dur.as_millis() as u64
-}
-
+/// The exclusive upper bound of a prefix range.
+///
+/// `None` when the prefix is all `0xFF`, which has no successor — the caller
+/// then scans to the end, which is the correct answer rather than an empty one.
 fn next_prefix_boundary(prefix: &str) -> Option<String> {
     let mut bytes = prefix.as_bytes().to_vec();
-    for idx in (0..bytes.len()).rev() {
-        if bytes[idx] != u8::MAX {
-            bytes[idx] = bytes[idx].saturating_add(1);
-            bytes.truncate(idx + 1);
+    while let Some(last) = bytes.pop() {
+        if last < 0xFF {
+            bytes.push(last + 1);
             return String::from_utf8(bytes).ok();
         }
     }
     None
 }
 
-/// Write one key inside an already-open transaction.
-///
-/// Factored out so the single-event path and `apply_events` share it. When they
-/// were separate bodies the batch path drifted from the single path more than
-/// once — the expiry-index removal is the kind of step that gets forgotten in
-/// the copy, and forgetting it leaks index entries that outlive their values.
-///
-/// `source` is the event data for a single put, or one op of a batch: both carry
-/// `key`, `revision`, `expires_at_ms` and `value` under the same names, which is
-/// why one function serves both.
-fn apply_put_in_tables(
-    state: &mut redb::Table<'_, &[u8], &[u8]>,
-    expires: &mut redb::Table<'_, &[u8], u8>,
-    source: &serde_json::Value,
-) -> anyhow::Result<()> {
-    let key = source
-        .get("key")
-        .and_then(|v| v.as_str())
-        .context("missing key")?;
-    let revision = source.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
-    let expires_at_ms = source.get("expires_at_ms").and_then(|v| v.as_u64());
-    // Decoded through `StoredVal` so a raw payload lands as bytes rather than as
-    // its marker object.
-    let value = source
-        .get("value")
-        .cloned()
-        .map(serde_json::from_value::<crate::engine::stored::StoredVal>)
-        .transpose()
-        .unwrap_or(None)
-        .unwrap_or_default();
-
-    // The previous expiry index entry points at a value about to be replaced.
-    let previous = state
-        .get(key.as_bytes())?
-        .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok());
-    if let Some(previous) = &previous {
-        if let Some(at) = previous.expires_at_ms {
-            let idx = expires_key(at, key.as_bytes());
-            let _ = expires.remove(idx.as_slice())?;
-        }
-    }
-
-    let stored = StoredValue {
-        value,
-        revision,
-        expires_at_ms,
-    };
-    state.insert(key.as_bytes(), serde_json::to_vec(&stored)?.as_slice())?;
-    if let Some(at) = expires_at_ms {
-        let idx = expires_key(at, key.as_bytes());
-        expires.insert(idx.as_slice(), 0u8)?;
-    }
-    Ok(())
-}
-
-/// Remove one key inside an already-open transaction, index entry included.
-fn apply_delete_in_tables(
-    state: &mut redb::Table<'_, &[u8], &[u8]>,
-    expires: &mut redb::Table<'_, &[u8], u8>,
-    source: &serde_json::Value,
-) -> anyhow::Result<()> {
-    let key = source
-        .get("key")
-        .and_then(|v| v.as_str())
-        .context("missing key")?;
-    let previous = state
-        .remove(key.as_bytes())?
-        .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok());
-    if let Some(previous) = previous {
-        if let Some(at) = previous.expires_at_ms {
-            let idx = expires_key(at, key.as_bytes());
-            let _ = expires.remove(idx.as_slice())?;
-        }
-    }
-    Ok(())
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -626,43 +445,184 @@ mod tests {
         }
     }
 
+    fn with_ttl(offset: u64, key: &str, expires_at_ms: u64) -> EventRecord {
+        EventRecord {
+            offset,
+            ts_ms: 1,
+            event_type: "state_updated".to_string(),
+            data: serde_json::json!({
+                "key": key, "value": offset, "revision": 1, "expires_at_ms": expires_at_ms
+            }),
+        }
+    }
+
     #[test]
-    fn eventual_apply_flush_and_reopen_roundtrip() {
+    fn apply_flush_and_reopen_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         {
             let db = StateDb::open(dir.path()).unwrap();
             for i in 1..=3u64 {
                 db.apply_state_updated(&ev(i, &format!("k{i}"), i)).unwrap();
             }
-            // Checkpoint: flush reports the offset it makes durable.
+            // The checkpoint reports the offset it makes durable, which is what
+            // WAL retention is then allowed to prune below.
             assert_eq!(db.flush().unwrap(), 3);
-            // Eventual writes after the checkpoint.
             for i in 4..=5u64 {
                 db.apply_state_updated(&ev(i, &format!("k{i}"), i)).unwrap();
             }
             assert_eq!(db.applied_offset().unwrap(), 5);
         }
-        // Reopen: applied_offset and all values persist across the store's lifetime.
-        let db2 = StateDb::open(dir.path()).unwrap();
-        assert_eq!(db2.applied_offset().unwrap(), 5);
+        let reopened = StateDb::open(dir.path()).unwrap();
+        assert_eq!(reopened.applied_offset().unwrap(), 5);
         for i in 1..=5u64 {
-            let item = db2.get_state(&format!("k{i}")).unwrap().unwrap();
+            let item = reopened.get_state(&format!("k{i}")).unwrap().unwrap();
             assert_eq!(item.value.as_json(), Some(&serde_json::json!(i)));
         }
     }
 
     #[test]
     fn apply_is_idempotent_below_applied_offset() {
+        // Replay starts below `applied_offset` and re-offers records the
+        // projection already holds. They must be no-ops, not regressions.
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         db.apply_state_updated(&ev(5, "k", 5)).unwrap();
-        // Replaying an older offset (as happens when replay starts below
-        // applied_offset) must be a no-op and must not regress state.
         db.apply_state_updated(&ev(3, "k", 999)).unwrap();
         assert_eq!(db.applied_offset().unwrap(), 5);
         assert_eq!(
             db.get_state("k").unwrap().unwrap().value.as_json(),
             Some(&serde_json::json!(5))
         );
+    }
+
+    #[test]
+    fn a_batch_lands_whole_and_advances_the_offset_once() {
+        // The property that makes one atomic batch non-negotiable: a crash must
+        // not leave half a move applied with the offset already past it, because
+        // replay skips anything at or below the offset and would never repair it.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        db.apply_state_updated(&ev(1, "from", 42)).unwrap();
+
+        let batch = EventRecord {
+            offset: 7,
+            ts_ms: 1,
+            event_type: "state_batch".to_string(),
+            data: serde_json::json!({ "ops": [
+                { "op": "put", "key": "to", "value": 1, "revision": 1 },
+                { "op": "delete", "key": "from" }
+            ]}),
+        };
+        db.apply_state_batch(&batch).unwrap();
+
+        assert_eq!(db.applied_offset().unwrap(), 7);
+        assert!(db.get_state("from").unwrap().is_none());
+        assert!(db.get_state("to").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_mixed_batch_applies_only_the_state_events() {
+        // The commit pipeline hands over whatever was queued, vector events
+        // included. Those own their own storage; taking them here would apply
+        // them twice.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        let vector = EventRecord {
+            offset: 2,
+            ts_ms: 1,
+            event_type: "vector_upserted".to_string(),
+            data: serde_json::json!({ "collection": "c", "id": "v" }),
+        };
+        let state = ev(3, "k", 1);
+        let highest = db.apply_events(&[&vector, &state]).unwrap();
+        assert_eq!(highest, 3, "the state event is the highest applied here");
+        assert!(db.get_state("k").unwrap().is_some());
+    }
+
+    #[test]
+    fn an_expired_key_reads_as_absent_before_the_sweep_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        db.apply_state_updated(&with_ttl(1, "gone", 1)).unwrap();
+
+        assert!(
+            db.get_state("gone").unwrap().is_none(),
+            "a reader must never see a value the clock has retired"
+        );
+        assert!(
+            db.exists_any("gone").unwrap(),
+            "the record is still on disk until the sweep takes it"
+        );
+        assert_eq!(
+            db.expired_keys_due(super::now_ms(), 10).unwrap(),
+            vec!["gone"]
+        );
+    }
+
+    #[test]
+    fn replacing_a_value_retires_its_old_expiry_entry() {
+        // Left behind, the stale index entry fires a TTL sweep against a key
+        // whose expiry has moved — deleting a value that should still be live.
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        db.apply_state_updated(&with_ttl(1, "k", 1_000)).unwrap();
+        db.apply_state_updated(&with_ttl(2, "k", u64::MAX)).unwrap();
+
+        assert!(
+            db.expired_keys_due(super::now_ms(), 10).unwrap().is_empty(),
+            "the entry at 1000 must be gone, so a sweep now finds nothing"
+        );
+        assert!(db.get_state("k").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_delete_removes_the_key_and_its_index_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        db.apply_state_updated(&with_ttl(1, "k", u64::MAX)).unwrap();
+        db.apply_state_deleted(&EventRecord {
+            offset: 2,
+            ts_ms: 1,
+            event_type: "state_deleted".to_string(),
+            data: serde_json::json!({ "key": "k" }),
+        })
+        .unwrap();
+
+        assert!(!db.exists_any("k").unwrap());
+        assert!(
+            db.expired_keys_due(u64::MAX, 10).unwrap().is_empty(),
+            "a sweep must not report a key that no longer exists"
+        );
+    }
+
+    #[test]
+    fn a_prefix_listing_stops_at_the_prefix_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        for (offset, key) in [(1u64, "a:1"), (2, "a:2"), (3, "b:1")] {
+            db.apply_state_updated(&ev(offset, key, offset)).unwrap();
+        }
+        let keys: Vec<String> = db
+            .list(Some("a:"), 100)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.key)
+            .collect();
+        assert_eq!(keys, vec!["a:1", "a:2"], "b:1 is past the boundary");
+    }
+
+    #[test]
+    fn a_revision_guard_refuses_a_stale_expectation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        assert_eq!(db.prepare_put_revision("new", None).unwrap(), 1);
+        assert!(
+            db.prepare_put_revision("new", Some(1)).is_err(),
+            "a compare-and-swap against a key that does not exist must fail"
+        );
+
+        db.apply_state_updated(&ev(1, "k", 1)).unwrap();
+        assert_eq!(db.prepare_put_revision("k", Some(1)).unwrap(), 2);
+        assert!(db.prepare_put_revision("k", Some(99)).is_err());
     }
 }
