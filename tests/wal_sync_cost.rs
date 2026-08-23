@@ -147,3 +147,56 @@ async fn concurrent_writers_with_the_commit_pipeline() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "diagnostic: cargo test --release --test wal_sync_cost -- --ignored --nocapture"]
+async fn does_the_cost_scale_with_the_value() {
+    // The question this settles: after group commit, is the remaining ~38 us per
+    // write the *store*, or the *representation*?
+    //
+    // The projection measured at 235 679/s batched (4 us) and an LSM at 432 764/s
+    // (2 us), so neither can account for 38. What can is the event format: the
+    // payload is a `serde_json::Value` that gets cloned into the queue, cloned
+    // again for the batch, encoded to JSON for the WAL, decoded back through
+    // `StoredVal` and re-encoded for the projection.
+    //
+    // If throughput falls as the value grows, the cost is copying and
+    // serializing it, and swapping the store would buy almost nothing.
+    for size in [10usize, 200, 2_000] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = std::sync::Arc::new(
+            Engine::new(config(dir.path(), "per_write"), CancellationToken::new()).unwrap(),
+        );
+        let payload = "x".repeat(size);
+        let concurrency = 32;
+        let per_task = 300;
+        let started = Instant::now();
+        let mut handles = Vec::new();
+        for task in 0..concurrency {
+            let engine = engine.clone();
+            let payload = payload.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..per_task {
+                    engine
+                        .put_state(
+                            format!("t{task}-{i}"),
+                            serde_json::json!({ "value": payload }),
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let elapsed = started.elapsed();
+        let total = concurrency * per_task;
+        println!(
+            "value {size:>5} bytes: {total:>6} writes in {:>10?} = {:>8.0}/s",
+            elapsed,
+            total as f64 / elapsed.as_secs_f64()
+        );
+    }
+}
