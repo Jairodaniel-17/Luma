@@ -833,7 +833,15 @@ fn set(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR syntax error");
     }
 
-    let existing = engine.get_state(&key);
+    // Read the existing value only when a modifier actually needs it. The plain
+    // `SET k v` — which is the overwhelming majority of traffic and the one a
+    // benchmark measures — used to pay an unconditional read transaction for a
+    // value it then ignored.
+    let existing = if only_if_absent || only_if_present || keep_ttl {
+        engine.get_state(&key)
+    } else {
+        None
+    };
     if only_if_absent && existing.is_some() {
         return Value::nil();
     }

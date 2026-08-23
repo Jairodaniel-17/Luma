@@ -63,3 +63,43 @@ async fn what_durability_costs() {
     measure("group (buffered, current)", "group", n);
     measure("per_write (fsync each)", "per_write", n);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "diagnostic: cargo test --release --test wal_sync_cost -- --ignored --nocapture"]
+async fn where_the_write_cost_actually_is() {
+    // Isolates the three layers. `data_dir = None` gives no WAL and no redb —
+    // the in-memory `StateStore` that already exists for that case. The gap
+    // between it and the persistent modes is what a batching pipeline could
+    // recover, so it is the number that decides whether the work is worth it.
+    let n = 3_000;
+
+    let started = Instant::now();
+    let engine = Engine::new(
+        Config {
+            port: 0,
+            data_dir: None,
+            sqlite_enabled: false,
+            snapshot_interval_secs: 3600,
+            ..Config::default()
+        },
+        CancellationToken::new(),
+    )
+    .unwrap();
+    for i in 0..n {
+        engine
+            .put_state(
+                format!("k{i}"),
+                serde_json::json!({ "value": "a payload of a realistic size for a KV write" }),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
+    println!(
+        "{:<30} {n} writes in {:?} = {:.0}/s",
+        "in-memory only (no WAL, no redb)",
+        elapsed,
+        n as f64 / elapsed.as_secs_f64()
+    );
+}
