@@ -1,5 +1,42 @@
 # CHANGELOG
 
+## 🚀 v4.26.0 — Camino de escritura: 29× y la proyección KV sobre un LSM
+
+### Rendimiento de escritura
+
+- **Proyección KV de redb a un LSM (`fjall`)**: el B-tree copy-on-write costaba
+  16 KiB de amplificación para un valor de 30 bytes. En proceso: **26.379 →
+  35.622 escrituras/s** con 128 escritores. **Sin migración**: la proyección no
+  guarda datos propios, se reconstruye del WAL desde `applied_offset`, y
+  `tests/golden_data_dir.rs` lo prueba leyendo un `data_dir` de v4.24.0 —que
+  contiene `state.redb`— con el binario actual.
+- **Cadena completa del listener RESP: 785 → 22.989 `SET`/s (29×)** en SSD NVMe,
+  con `wal_sync_mode = "per_write"` intacto: group commit del WAL (líder/
+  seguidor), la proyección aplicando el lote entero en una transacción, y
+  `block_in_place` en el dispatch, que estaba bloqueando un worker de Tokio y
+  limitando los comandos en vuelo al número de workers.
+- **Contra Redis 7 por la misma ruta de red**: Luma 22.989 `SET`/s y 25.685
+  `GET`/s contra 28.517 y 27.298 — el 81% de su escritura y el 94% de su lectura,
+  haciendo fsync de cada escritura confirmada que Redis de fábrica no hace.
+  Tabla completa y dónde gana Redis en
+  [`docs/referencia/BENCHMARKS.md`](BENCHMARKS.md#camino-de-escritura-kv--resp).
+- **`wal_sync_mode` ya no afecta al camino KV/state**: el group commit hace fsync
+  una vez por lote siempre, así que `group` contra `per_write` es 1.497 contra
+  1.399/s (7%, cuando era 2,3×). Sigue gobernando vector, doc, blob y colas.
+
+### Operación
+
+- **`data_dir` en disco mecánico hunde la escritura 7,3×**: 3.142 `SET`/s contra
+  22.989 en NVMe, misma máquina, sin mover el `GET`. Documentado como requisito,
+  no como consejo.
+- **`redb` sale del binario** (queda como dev-dependency de dos diagnósticos) y
+  `[profile.release]` fija `strip` para que un build local sea el que se publica.
+- **La release vuelve a publicar**: v4.25.0 y v4.25.1 construyeron todo y no
+  publicaron nada. Eran dos fallos distintos — el `Dockerfile` no parseaba el
+  manifest porque el layer de dependencias no stubbeaba los cuatro benches, y el
+  job de release descargaba *todos* los artefactos, incluido el registro de build
+  que sube `docker/build-push-action`, que falla tras 5 reintentos.
+
 ## 🚀 Novedades en v3.0.0 (Search, Observabilidad y NS-Mem Avanzado)
 
 ### Búsqueda y exportación

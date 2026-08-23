@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "luma"
-version = "4.25.1"
+version = "4.26.0"
 dependencies = [
  "anndists",
  "anyhow",
