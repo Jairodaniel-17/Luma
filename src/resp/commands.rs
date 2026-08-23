@@ -49,6 +49,19 @@ pub struct Session {
     /// Keys under `WATCH`, with the revision they had when watched. `EXEC`
     /// compares against these; any change aborts the transaction.
     pub watched: Vec<(String, u64)>,
+    /// How many channels and patterns this connection is subscribed to.
+    ///
+    /// Dispatch needs it because **`PING` changes shape inside a subscription**:
+    /// Redis answers `+PONG` normally and a two-element array `["pong", ""]`
+    /// while subscribed. ioredis uses `PING` as a keepalive on its subscriber
+    /// connection, reads the array, and desynchronises its command queue on
+    /// anything else — it died with "Command queue state error" the moment a
+    /// message arrived.
+    ///
+    /// The differential suite could not have caught this: it sends 327 commands
+    /// on a connection that never subscribes, and this is behaviour that depends
+    /// on connection *state*, not on the command.
+    pub subscriptions: usize,
     /// Row id of the api key this connection authenticated with.
     ///
     /// Kept so revocation can be re-checked later without holding the secret
@@ -77,6 +90,7 @@ impl Session {
             queued: None,
             queue_error: false,
             watched: Vec::new(),
+            subscriptions: 0,
             key_id: None,
         }
     }
@@ -414,6 +428,15 @@ pub fn dispatch(
     match name.as_str() {
         // ── connection ───────────────────────────────────────────────────────
         "QUIT" => Dispatch::Quit,
+        // Inside a subscription Redis answers with an array, not a simple
+        // string. See `Session::subscriptions`.
+        "PING" if session.subscriptions > 0 => Dispatch::Reply(Value::Array(Some(vec![
+            Value::bulk("pong"),
+            match rest.first() {
+                Some(message) => Value::Bulk(Some(message.clone())),
+                None => Value::bulk(""),
+            },
+        ]))),
         "PING" => Dispatch::Reply(match rest.len() {
             0 => Value::Simple("PONG".into()),
             // With an argument PING echoes it, as a bulk string rather than a
@@ -426,7 +449,7 @@ pub fn dispatch(
             _ => err("ERR wrong number of arguments for 'echo' command"),
         }),
         "AUTH" => Dispatch::Reply(auth(session, rest, authenticate)),
-        "HELLO" => Dispatch::Reply(hello(session, rest)),
+        "HELLO" => Dispatch::Reply(hello(session, rest, authenticate)),
         "SELECT" => Dispatch::Reply(select(rest)),
         "CLIENT" => Dispatch::Reply(client(session, rest)),
         "COMMAND" => Dispatch::Reply(Value::Array(Some(Vec::new()))),
@@ -631,6 +654,45 @@ pub fn auth_credential(args: &[Vec<u8>]) -> Option<(String, String)> {
     }
 }
 
+/// The credential a command carries, if it carries one.
+///
+/// Two commands can authenticate a connection, and the listener has to know
+/// about **both** — it resolves the secret before dispatch, because the api-key
+/// lookup is async and dispatch is not. It used to check only for `AUTH`, so
+/// `HELLO <proto> AUTH <user> <pass>` reached dispatch with a resolver that
+/// answered `None` no matter what it was asked, and every client that
+/// authenticates through the handshake was told `WRONGPASS` with a perfectly
+/// good password. ioredis 6 does exactly that.
+///
+/// Living next to [`auth_credential`] on purpose: the listener and dispatch must
+/// agree about where the password is, and two copies of that knowledge is how
+/// they stop agreeing.
+pub fn credential_in_command(args: &[Vec<u8>]) -> Option<(String, String)> {
+    let name = args.first()?;
+    if name.eq_ignore_ascii_case(b"auth") {
+        return auth_credential(&args[1..]);
+    }
+    if !name.eq_ignore_ascii_case(b"hello") {
+        return None;
+    }
+    // `HELLO [protover [AUTH username password] [SETNAME clientname]]`: scan for
+    // the option rather than assuming a position, since `SETNAME` may come first.
+    let mut i = 1;
+    while i < args.len() {
+        if args[i].eq_ignore_ascii_case(b"auth") {
+            let (Some(user), Some(password)) = (args.get(i + 1), args.get(i + 2)) else {
+                return None;
+            };
+            return Some((
+                String::from_utf8_lossy(user).to_string(),
+                String::from_utf8_lossy(password).to_string(),
+            ));
+        }
+        i += 1;
+    }
+    None
+}
+
 fn auth(
     session: &mut Session,
     args: &[Vec<u8>],
@@ -651,7 +713,22 @@ fn auth(
     }
 }
 
-fn hello(session: &Session, args: &[Vec<u8>]) -> Value {
+/// `HELLO [protover [AUTH username password] [SETNAME clientname]]`.
+///
+/// **The `AUTH` clause is not optional to implement.** This function used to read
+/// `args.first()` for the version and drop everything after it, which meant a
+/// client that authenticates through `HELLO` — rather than with a separate
+/// `AUTH` — was never authenticated, and every command it sent afterwards came
+/// back `NOAUTH`. ioredis 6 does exactly that, and ioredis is a client the
+/// README promises works; it could not open a single connection to an
+/// authenticated instance. Nothing caught it because nothing had ever run
+/// ioredis: `tests/e2e/clients.py` covers the Python clients, and redis-py sends
+/// `AUTH` on its own.
+fn hello(
+    session: &mut Session,
+    args: &[Vec<u8>],
+    authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
+) -> Value {
     // A client may ask for RESP3. We answer the handshake either way but keep
     // speaking RESP2, which every targeted client understands; claiming RESP3
     // and then sending RESP2 replies would break them in ways that only show up
@@ -662,24 +739,87 @@ fn hello(session: &Session, args: &[Vec<u8>]) -> Value {
             return err("NOPROTO unsupported protocol version");
         }
     }
-    Value::Map(vec![
-        (Value::bulk("server"), Value::bulk("luma")),
-        (
-            Value::bulk("version"),
-            Value::bulk(env!("CARGO_PKG_VERSION")),
-        ),
-        (Value::bulk("proto"), Value::Integer(2)),
-        (Value::bulk("id"), Value::Integer(0)),
-        (Value::bulk("mode"), Value::bulk("standalone")),
-        (Value::bulk("role"), Value::bulk("master")),
-        (
-            Value::bulk("name"),
-            match &session.name {
-                Some(name) => Value::bulk(name.clone()),
-                None => Value::bulk(""),
-            },
-        ),
-    ])
+
+    // The options after the version, in any order, as Redis accepts them.
+    let mut i = 1;
+    while i < args.len() {
+        let option = String::from_utf8_lossy(&args[i]).to_ascii_uppercase();
+        match option.as_str() {
+            "AUTH" => {
+                // `AUTH` inside `HELLO` always carries both a username and a
+                // password, unlike the standalone command where the username is
+                // optional.
+                let (Some(user), Some(password)) = (args.get(i + 1), args.get(i + 2)) else {
+                    return err("ERR Protocol error: unexpected end of HELLO AUTH");
+                };
+                let user = String::from_utf8_lossy(user).to_string();
+                let password = String::from_utf8_lossy(password).to_string();
+                match authenticate(&user, &password) {
+                    Some(binding) => {
+                        session.authenticated = true;
+                        session.tenant = binding.tenant;
+                        session.key_id = binding.key_id;
+                    }
+                    // The same wording the standalone `AUTH` gives, because
+                    // clients match on the leading token.
+                    None => {
+                        return err("WRONGPASS invalid username-password pair or user is disabled.")
+                    }
+                }
+                i += 3;
+            }
+            "SETNAME" => {
+                let Some(name) = args.get(i + 1) else {
+                    return err("ERR Protocol error: unexpected end of HELLO SETNAME");
+                };
+                session.name = Some(String::from_utf8_lossy(name).to_string());
+                i += 2;
+            }
+            other => return err(format!("ERR unknown option '{other}' for HELLO")),
+        }
+    }
+
+    // Redis refuses the handshake itself when the instance needs a password and
+    // this `HELLO` did not carry one — saying so here, rather than letting the
+    // first real command fail, is what lets a client report a credential problem
+    // instead of a mysterious command failure.
+    if !session.authenticated {
+        return err(
+            "NOAUTH HELLO must be called with the client already authenticated, \
+             otherwise the HELLO <proto> AUTH <user> <pass> option can be used to \
+             authenticate the client and select the RESP protocol version at the same time",
+        );
+    }
+    // A **flat array**, not a RESP3 map, and the distinction is the whole point.
+    //
+    // This reply used to be `Value::Map`, which encodes as `%7` — the RESP3 map
+    // type — on a connection this same reply declares as `proto: 2`. The comment
+    // above warns against exactly that mismatch and the code did it anyway.
+    //
+    // What it cost: ioredis 6 desynchronised its command queue and died with
+    // "Command queue state error" the first time a `message` push arrived on a
+    // subscriber, because a `%7` counted differently from the 14 elements a
+    // RESP2 client expects. Real Redis answers `HELLO 2` with `*14`.
+    //
+    // The field set is Redis's too. `name` was in here and is not a HELLO field
+    // at all — Redis reports `modules`, and a client reading the reply
+    // positionally would have found the wrong thing in the last slot.
+    Value::Array(Some(vec![
+        Value::bulk("server"),
+        Value::bulk("luma"),
+        Value::bulk("version"),
+        Value::bulk(env!("CARGO_PKG_VERSION")),
+        Value::bulk("proto"),
+        Value::Integer(2),
+        Value::bulk("id"),
+        Value::Integer(0),
+        Value::bulk("mode"),
+        Value::bulk("standalone"),
+        Value::bulk("role"),
+        Value::bulk("master"),
+        Value::bulk("modules"),
+        Value::Array(Some(Vec::new())),
+    ]))
 }
 
 fn select(args: &[Vec<u8>]) -> Value {
@@ -2309,14 +2449,103 @@ mod tests {
         // Claiming RESP3 and then sending RESP2 replies breaks clients in ways
         // that only surface under load, so the handshake stays honest.
         let (e, _d, mut s) = open();
-        let Value::Map(pairs) = run(&e, &mut s, &["HELLO", "3"]) else {
-            panic!("HELLO must reply with a map");
+        let Value::Array(Some(items)) = run(&e, &mut s, &["HELLO", "3"]) else {
+            panic!("HELLO must reply with a flat array on a RESP2 connection");
         };
-        let proto = pairs
-            .iter()
-            .find(|(k, _)| *k == Value::bulk("proto"))
-            .map(|(_, v)| v.clone());
+        let proto = items
+            .chunks(2)
+            .find(|pair| pair.first() == Some(&Value::bulk("proto")))
+            .and_then(|pair| pair.get(1).cloned());
         assert_eq!(proto, Some(Value::Integer(2)));
+    }
+
+    #[test]
+    fn the_hello_reply_is_a_flat_array_and_not_a_resp3_map() {
+        // The reply used to be `Value::Map`, which goes on the wire as `%7` —
+        // the RESP3 map type — while the same reply declares `proto: 2`. ioredis
+        // 6 desynchronised its command queue on it and died with "Command queue
+        // state error" the moment a `message` push arrived on a subscriber.
+        //
+        // Real Redis 7 answers `HELLO 2` with `*14`, so that is what this
+        // asserts: on the bytes, not on the enum, because the enum is what got
+        // this wrong.
+        let (e, _d, mut s) = open();
+        let wire = run(&e, &mut s, &["HELLO", "2"]).to_bytes();
+        assert!(
+            wire.starts_with(b"*14\r\n"),
+            "expected a 14-element array, got {:?}",
+            String::from_utf8_lossy(&wire[..wire.len().min(16)])
+        );
+        assert!(
+            !wire.starts_with(b"%"),
+            "a RESP3 map must never be sent on a RESP2 connection"
+        );
+    }
+
+    #[test]
+    fn hello_authenticates_through_its_own_auth_clause() {
+        // `HELLO <proto> AUTH <user> <pass>` is how ioredis, node-redis and
+        // redis-py in RESP3 mode authenticate: one round trip instead of two.
+        // This used to be parsed as far as the version and no further, so the
+        // connection stayed unauthenticated and every command after the
+        // handshake answered NOAUTH.
+        let (e, _d, mut s) = open();
+        let reply = run(&e, &mut s, &["HELLO", "2", "AUTH", "default", "hunter2"]);
+        assert!(
+            matches!(reply, Value::Array(Some(_))),
+            "a good credential must complete the handshake, got {reply:?}"
+        );
+        assert!(
+            s.authenticated,
+            "the session must be authenticated afterwards"
+        );
+
+        // And SETNAME in the same breath, which is the other option clients pass.
+        let mut s = Session::new(false);
+        let _ = run(
+            &e,
+            &mut s,
+            &[
+                "HELLO", "2", "AUTH", "default", "hunter2", "SETNAME", "worker-9",
+            ],
+        );
+        assert_eq!(s.name.as_deref(), Some("worker-9"));
+    }
+
+    #[test]
+    fn a_credential_is_found_in_either_command_that_carries_one() {
+        // The listener resolves the secret *before* dispatch, because the api-key
+        // lookup is async and dispatch is not — so it has to know that `HELLO`
+        // can carry one too. It only looked for `AUTH`, which is why a perfectly
+        // good password inside `HELLO` came back WRONGPASS.
+        let args = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        assert_eq!(
+            credential_in_command(&args(&["AUTH", "secret"])),
+            Some(("default".into(), "secret".into()))
+        );
+        assert_eq!(
+            credential_in_command(&args(&["AUTH", "user", "secret"])),
+            Some(("user".into(), "secret".into()))
+        );
+        assert_eq!(
+            credential_in_command(&args(&["HELLO", "2", "AUTH", "user", "secret"])),
+            Some(("user".into(), "secret".into()))
+        );
+        // After SETNAME, which Redis allows in either order.
+        assert_eq!(
+            credential_in_command(&args(&["HELLO", "3", "SETNAME", "x", "AUTH", "u", "p"])),
+            Some(("u".into(), "p".into()))
+        );
+        // Nothing to resolve.
+        assert_eq!(credential_in_command(&args(&["HELLO", "2"])), None);
+        assert_eq!(credential_in_command(&args(&["GET", "k"])), None);
+        // Truncated: no credential rather than a half-read one.
+        assert_eq!(
+            credential_in_command(&args(&["HELLO", "2", "AUTH", "u"])),
+            None
+        );
     }
 
     #[test]

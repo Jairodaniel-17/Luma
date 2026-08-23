@@ -291,6 +291,45 @@ entraría un intérprete de verdad si algún cliente objetivo lo necesitara.
 
 ---
 
+## ioredis: tres bugs de protocolo que solo aparecen con un cliente Node
+
+El README promete que ioredis funciona y nadie lo había ejecutado.
+`tests/e2e/ioredis_client.mjs` lo ejecuta — 12 comprobaciones, contra Redis 7 y
+contra Luma. Salieron **tres divergencias reales**, y ninguna la podía ver la
+suite diferencial:
+
+1. **`HELLO` ignoraba su cláusula `AUTH`.** `HELLO <proto> AUTH <user> <pass>` es
+   como autentican ioredis, node-redis y redis-py en modo RESP3: un viaje en vez
+   de dos. Se parseaba hasta la versión y nada más, así que la conexión quedaba
+   sin autenticar y **todo comando posterior respondía `NOAUTH`** — ioredis no
+   podía abrir una sola conexión a una instancia con contraseña. La resolución de
+   la credencial es además asíncrona y vive en el listener, que solo la buscaba
+   para `AUTH`; ahora `credential_in_command` conoce los dos comandos en un solo
+   sitio, porque dos copias de ese conocimiento es como dejan de coincidir.
+2. **La respuesta de `HELLO` era un mapa de RESP3 (`%7`)** en una conexión que esa
+   misma respuesta declara `proto: 2`. Redis contesta `*14`, un array plano. El
+   comentario del código advertía justo contra esa incoherencia y el código la
+   cometía. ioredis desincronizaba su cola de comandos y moría con «Command queue
+   state error» en cuanto llegaba un `message`. De paso el último campo era
+   `name`, que no es un campo de `HELLO` en absoluto: Redis manda `modules`.
+3. **`PING` dentro de una suscripción tiene otra forma.** Redis responde `+PONG`
+   normalmente y `["pong", ""]` mientras hay suscripciones activas; Luma
+   respondía `+PONG` siempre, e ioredis usa `PING` de keepalive en la conexión
+   suscriptora. **El diferencial no podía cogerlo**: manda 327 comandos por una
+   conexión que nunca se suscribe, y esto depende del *estado* de la conexión, no
+   del comando.
+
+Resultado: **11 de 12** comprobaciones de ioredis pasan.
+
+### Lo que sigue fallando, dicho tal cual
+
+`pub/sub with a second connection`: ioredis no emite el evento `message` aunque
+`SUBSCRIBE` devuelve 1 y `PUBLISH` reporta 1 entregado. Las tramas de Luma en el
+cable son **idénticas byte a byte a las de Redis** —comprobado con un socket
+crudo por los dos caminos de autenticación— y el pub/sub sí funciona con redis-py
+(`tests/e2e/clients.py`) y con sockets crudos. La causa no está identificada.
+Queda abierto.
+
 ## Cómo validar esto de verdad
 
 Los ~180 tests de RESP que hay hoy fijan **el comportamiento que pretendemos**.

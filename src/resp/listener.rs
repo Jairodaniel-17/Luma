@@ -591,20 +591,19 @@ where
                     // synchronous on purpose. The epoch is read *before* the
                     // lookup so a revocation racing this auth is caught on the
                     // next command rather than skipped.
-                    let resolved = if args[0].eq_ignore_ascii_case(b"auth") {
-                        let epoch_before = server.revocation_epoch();
-                        let binding = match crate::resp::commands::auth_credential(&args[1..]) {
-                            Some((_user, password)) => server.resolve(&password).await,
-                            // Wrong arity: let dispatch produce the arity error
-                            // rather than reporting a bad password.
-                            None => None,
-                        };
-                        if binding.is_some() {
-                            seen_epoch = epoch_before;
+                    let resolved = match crate::resp::commands::credential_in_command(&args) {
+                        Some((_user, password)) => {
+                            let epoch_before = server.revocation_epoch();
+                            let binding = server.resolve(&password).await;
+                            if binding.is_some() {
+                                seen_epoch = epoch_before;
+                            }
+                            binding
                         }
-                        binding
-                    } else {
-                        None
+                        // No credential here, or the wrong arity: let dispatch
+                        // produce the arity error rather than reporting a bad
+                        // password.
+                        None => None,
                     };
                     // A push has to wake a parked reader; the keys are
                     // captured before dispatch and notified after, so the
@@ -656,7 +655,7 @@ where
                             value.encode(&mut out);
                         }
                         Dispatch::PubSub(command) => {
-                            for reply in handle_pubsub(server, &session, subscriber, command) {
+                            for reply in handle_pubsub(server, &mut session, subscriber, command) {
                                 reply.encode(&mut out);
                             }
                         }
@@ -940,7 +939,7 @@ fn try_serve(server: &RespServer, key: &str, tenant: Option<&str>, kind: &BlockK
 /// connection's subscriber id and inbox, which only exist here.
 fn handle_pubsub(
     server: &RespServer,
-    session: &Session,
+    session: &mut Session,
     subscriber: &mut Option<crate::resp::pubsub::Subscriber>,
     command: crate::resp::commands::PubSubCommand,
 ) -> Vec<Value> {
@@ -957,9 +956,14 @@ fn handle_pubsub(
             id
         }
     };
-    let tenant = session.tenant.as_deref();
+    let tenant = session.tenant.as_deref().map(|t| t.to_string());
+    let tenant = tenant.as_deref();
 
-    match command {
+    // Every subscribe/unsubscribe reply carries the connection's new total, and
+    // that total is what decides the shape of a later `PING`. Read back out of
+    // the replies rather than tracked separately, so the number a client is told
+    // and the number this server acts on cannot disagree.
+    let replies = match command {
         P::Subscribe(channels) => channels
             .into_iter()
             .map(|channel| {
@@ -1049,7 +1053,36 @@ fn handle_pubsub(
             }
             vec![Value::Array(Some(out))]
         }
+    };
+
+    // The last count in a subscribe/unsubscribe batch is this connection's
+    // current total. `PUBLISH`, `CHANNELS` and `NUMSUB` do not change it, and
+    // their replies are not shaped like one, so they leave it alone.
+    if let Some(total) = replies.iter().rev().find_map(subscription_total) {
+        session.subscriptions = total;
     }
+    replies
+}
+
+/// The subscription total carried by a `subscribe`/`unsubscribe` confirmation.
+///
+/// `None` for any other reply. Matching on the shape rather than on the command
+/// keeps this in step with what the client was actually told.
+fn subscription_total(reply: &Value) -> Option<usize> {
+    let Value::Array(Some(items)) = reply else {
+        return None;
+    };
+    let [kind, _target, Value::Integer(count)] = items.as_slice() else {
+        return None;
+    };
+    let Value::Bulk(Some(kind)) = kind else {
+        return None;
+    };
+    matches!(
+        kind.as_slice(),
+        b"subscribe" | b"unsubscribe" | b"psubscribe" | b"punsubscribe"
+    )
+    .then(|| (*count).max(0) as usize)
 }
 
 /// Encode a delivered message in the shape the subscriber expects.
