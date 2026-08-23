@@ -26,7 +26,7 @@ Leyenda de "confirmado":
 | **Colas** (`/v1/queue`) | **fsync** del fichero del mensaje, luego del directorio | Igual que blob. Un `enqueue` confirmado no se pierde |
 | **Manifest de colección vectorial** | **fsync** del temporal, rename, fsync del directorio | Igual que blob |
 | **Runs de vectores** (`runs/*.run`) | `sync_data` por registro en el camino unitario; en el camino por lotes un único `sync_active_run` al cerrar el lote | En el camino por lotes, hasta un lote de vectores. El WAL sigue teniéndolos, así que el replay los recupera |
-| **KV respaldado por redb** | **reconstruible**: las transacciones usan `Durability::Eventual`, sin fsync por commit | Ninguna pérdida de datos: redb es una proyección del WAL y el replay la reconstruye desde `applied_offset` |
+| **KV respaldado por un LSM** (`state.lsm`, fjall) | **reconstruible**: nada hace fsync en el camino de escritura | Ninguna pérdida de datos: es una proyección del WAL y el replay la reconstruye desde `applied_offset`. Las tres rutas de escritura pasan por un único `keyspace.batch()` que incluye `applied_offset`, así que el offset y los datos no pueden divergir tras una caída |
 | **SQLite** (relacional, auth, docstore, NS-Mem) | **fsync**: modo WAL con `synchronous = FULL` | Ninguna. Cuesta ~9× frente a `NORMAL` (23 560 → 2 513 escrituras/s medidas), y esas tablas no están en el camino de volumen |
 | **Snapshots** (`snapshot.json`) | Escritura periódica, no en el camino de la petición | No aplica: el snapshot solo acorta el replay, nunca es la única copia |
 
@@ -56,7 +56,8 @@ de ellos era falso:
    era «una cuestión aparte». No lo era — era la misma cuestión con una
    respuesta incómoda.
 
-La durabilidad de redb **sí** era correcta y sigue igual: es una proyección del
+La durabilidad de la proyección KV **sí** era correcta y sigue igual —aunque
+debajo ya no está redb sino un LSM: es una proyección del
 WAL, y en un crash vuelve a su último commit inmediato mientras el replay
 re-aplica el resto. Ese diseño solo funciona si el WAL es durable de verdad, que
 es justo lo que faltaba.

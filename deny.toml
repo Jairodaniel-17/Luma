@@ -37,13 +37,21 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    # `Unicode-DFS-2016` y `OpenSSL` estaban aquí y ya no los trae nada: se
+    # quitan en vez de dejarlos. Permitir de antemano una licencia que ningún
+    # dependiente usa no es inofensivo — deja pasar en silencio, por ejemplo, a
+    # un crate enlazado contra OpenSSL en un stack que es rustls entero.
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
-    "OpenSSL",
     "bzip2-1.0.6",
     "CDLA-Permissive-2.0",
+    # Las trae `fjall`, la proyección KV, y las dos son permisivas y aprobadas
+    # por la OSI: `0BSD` en `varint-rs` (BSD de cero cláusulas: más permisiva
+    # que MIT, sin obligación de atribución) y `BSL-1.0` en `xxhash-rust`
+    # (Boost, también FSF Free/Libre).
+    "0BSD",
+    "BSL-1.0",
 ]
 
 # ──────────────────────────────────────────

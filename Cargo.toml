@@ -126,3 +126,16 @@ harness = false
 [[bench]]
 name = "hybrid_hub_bench"
 harness = false
+
+[profile.release]
+# El argumento del producto es un binario unico y pequeno, asi que el tamano
+# tiene que ser propiedad del build y no de un paso del workflow: hasta ahora el
+# unico `strip` vivia en `release.yml`, asi que un `cargo build --release` local
+# daba un binario que no era el que se publica.
+#
+# `panic` se queda en `unwind` a proposito: `abort` recortaria mas, pero los
+# tests que comprueban que un panic en una tarea no se lleva el proceso dejarian
+# de comprobar nada.
+strip = true
+lto = "thin"
+codegen-units = 1
