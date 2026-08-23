@@ -103,3 +103,47 @@ async fn where_the_write_cost_actually_is() {
         n as f64 / elapsed.as_secs_f64()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "diagnostic: cargo test --release --test wal_sync_cost -- --ignored --nocapture"]
+async fn concurrent_writers_with_the_commit_pipeline() {
+    // The number the RESP benchmark cannot separate from the network. Many
+    // writers in-process, so what is measured is the pipeline and nothing else.
+    // If this tracks the ~8 000/s seen over RESP, the ceiling is inside Luma; if
+    // it is far higher, the ceiling is the socket.
+    let dir = tempfile::tempdir().unwrap();
+    let engine = std::sync::Arc::new(
+        Engine::new(config(dir.path(), "per_write"), CancellationToken::new()).unwrap(),
+    );
+
+    for concurrency in [1usize, 8, 32, 128] {
+        let per_task = 500;
+        let started = Instant::now();
+        let mut handles = Vec::new();
+        for task in 0..concurrency {
+            let engine = engine.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..per_task {
+                    engine
+                        .put_state(
+                            format!("t{task}-{i}"),
+                            serde_json::json!({ "value": "a payload of a realistic size" }),
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let elapsed = started.elapsed();
+        let total = concurrency * per_task;
+        println!(
+            "{concurrency:>4} writers: {total:>6} writes in {:>10?} = {:>8.0}/s",
+            elapsed,
+            total as f64 / elapsed.as_secs_f64()
+        );
+    }
+}

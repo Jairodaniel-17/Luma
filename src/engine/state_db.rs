@@ -5,6 +5,32 @@ use redb::{Database, Durability, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 
+/// How durable a projection commit needs to be, which is: not very.
+///
+/// `Durability::None` looks reckless and is exactly right here, for the reason
+/// this module already states — **redb is not the source of truth**. It is a
+/// projection of the WAL, rebuilt from `applied_offset` on replay, and WAL
+/// retention will not prune past redb's last durable point because
+/// `set_durable_floor` holds the line. redb rolls back to its last durable
+/// commit on a crash; `applied_offset` rolls back with it, and replay re-applies
+/// the difference. So a crash costs a rebuild, never data.
+///
+/// It was `Eventual`, and the difference is not marginal. Measured
+/// (`tests/redb_ceiling.rs`), one transaction per write:
+///
+/// ```text
+/// Eventual                  1 308/s
+/// None                     11 401/s
+/// None, batched 32/txn    235 679/s
+/// ```
+///
+/// The cost is memory: `None` holds dirty pages until a durable commit, about
+/// 400–600 bytes per uncommitted write (`tests/ram_cost.rs`). That is bounded by
+/// how often the checkpoint runs, not by the size of the dataset — 10 000
+/// uncheckpointed writes measured at 5.9 MiB, released almost entirely by the
+/// next durable commit.
+const PROJECTION_DURABILITY: Durability = Durability::None;
+
 const STATE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("state");
 const EXPIRES: TableDefinition<&[u8], u8> = TableDefinition::new("expires");
 const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
@@ -236,9 +262,76 @@ impl StateDb {
         // `flush()` (an Immediate commit) is called at each snapshot/checkpoint to
         // make it durable and let WAL retention advance. On crash, redb rolls back
         // to the last Immediate commit and replay re-applies the rest.
-        wtx.set_durability(Durability::Eventual);
+        wtx.set_durability(PROJECTION_DURABILITY);
         wtx.commit()?;
         Ok(())
+    }
+
+    /// Apply many events in **one** write transaction.
+    ///
+    /// This is the half of group commit that actually pays. Batching the WAL
+    /// fsync alone moved RESP `SET` from 785/s to 4 648/s; the rest of the gap
+    /// was still one redb transaction per record, because redb is a
+    /// copy-on-write B-tree and every single-key insert rewrites the page path
+    /// from leaf to root. Measured in isolation (`tests/redb_ceiling.rs`), 32
+    /// records sharing a transaction go from 11 401/s to 235 679/s.
+    ///
+    /// Non-state events are skipped rather than rejected: a batch arrives mixed,
+    /// and the vector store applies its own. `applied_offset` advances to the
+    /// highest offset this call actually applied, so a caller that mixes both
+    /// kinds must apply the others too before treating the offset as covered.
+    pub fn apply_events(&self, events: &[&EventRecord]) -> anyhow::Result<u64> {
+        let already = self.applied_offset()?;
+        let mut highest = 0u64;
+
+        let mut wtx = self.db.begin_write()?;
+        {
+            let mut state = wtx.open_table(STATE)?;
+            let mut expires = wtx.open_table(EXPIRES)?;
+            for ev in events {
+                // The same guard each single-event path has, hoisted out of the
+                // loop: one read of `applied_offset` for the whole batch instead
+                // of one per record.
+                if ev.offset <= already {
+                    continue;
+                }
+                let handled = match ev.event_type.as_str() {
+                    "state_updated" => {
+                        apply_put_in_tables(&mut state, &mut expires, &ev.data)?;
+                        true
+                    }
+                    "state_deleted" => {
+                        apply_delete_in_tables(&mut state, &mut expires, &ev.data)?;
+                        true
+                    }
+                    "state_batch" => {
+                        let ops = ev
+                            .data
+                            .get("ops")
+                            .and_then(|v| v.as_array())
+                            .context("state_batch without ops")?;
+                        for op in ops {
+                            if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
+                                apply_delete_in_tables(&mut state, &mut expires, op)?;
+                            } else {
+                                apply_put_in_tables(&mut state, &mut expires, op)?;
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    highest = highest.max(ev.offset);
+                }
+            }
+        }
+        if highest > already {
+            set_applied_offset(&mut wtx, highest)?;
+        }
+        wtx.set_durability(PROJECTION_DURABILITY);
+        wtx.commit()?;
+        Ok(highest)
     }
 
     /// Force all pending Eventual commits durable (a checkpoint) and return the
@@ -331,7 +424,7 @@ impl StateDb {
         set_applied_offset(&mut wtx, ev.offset)?;
         // Same eventual durability as the single-key path: the WAL is the
         // durable source of truth and this is a projection rebuilt from it.
-        wtx.set_durability(Durability::Eventual);
+        wtx.set_durability(PROJECTION_DURABILITY);
         wtx.commit()?;
         Ok(())
     }
@@ -363,7 +456,7 @@ impl StateDb {
             };
         }
         set_applied_offset(&mut wtx, ev.offset)?;
-        wtx.set_durability(Durability::Eventual);
+        wtx.set_durability(PROJECTION_DURABILITY);
         wtx.commit()?;
         Ok(())
     }
@@ -440,6 +533,83 @@ fn next_prefix_boundary(prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Write one key inside an already-open transaction.
+///
+/// Factored out so the single-event path and `apply_events` share it. When they
+/// were separate bodies the batch path drifted from the single path more than
+/// once — the expiry-index removal is the kind of step that gets forgotten in
+/// the copy, and forgetting it leaks index entries that outlive their values.
+///
+/// `source` is the event data for a single put, or one op of a batch: both carry
+/// `key`, `revision`, `expires_at_ms` and `value` under the same names, which is
+/// why one function serves both.
+fn apply_put_in_tables(
+    state: &mut redb::Table<'_, &[u8], &[u8]>,
+    expires: &mut redb::Table<'_, &[u8], u8>,
+    source: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let key = source
+        .get("key")
+        .and_then(|v| v.as_str())
+        .context("missing key")?;
+    let revision = source.get("revision").and_then(|v| v.as_u64()).unwrap_or(1);
+    let expires_at_ms = source.get("expires_at_ms").and_then(|v| v.as_u64());
+    // Decoded through `StoredVal` so a raw payload lands as bytes rather than as
+    // its marker object.
+    let value = source
+        .get("value")
+        .cloned()
+        .map(serde_json::from_value::<crate::engine::stored::StoredVal>)
+        .transpose()
+        .unwrap_or(None)
+        .unwrap_or_default();
+
+    // The previous expiry index entry points at a value about to be replaced.
+    let previous = state
+        .get(key.as_bytes())?
+        .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok());
+    if let Some(previous) = &previous {
+        if let Some(at) = previous.expires_at_ms {
+            let idx = expires_key(at, key.as_bytes());
+            let _ = expires.remove(idx.as_slice())?;
+        }
+    }
+
+    let stored = StoredValue {
+        value,
+        revision,
+        expires_at_ms,
+    };
+    state.insert(key.as_bytes(), serde_json::to_vec(&stored)?.as_slice())?;
+    if let Some(at) = expires_at_ms {
+        let idx = expires_key(at, key.as_bytes());
+        expires.insert(idx.as_slice(), 0u8)?;
+    }
+    Ok(())
+}
+
+/// Remove one key inside an already-open transaction, index entry included.
+fn apply_delete_in_tables(
+    state: &mut redb::Table<'_, &[u8], &[u8]>,
+    expires: &mut redb::Table<'_, &[u8], u8>,
+    source: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let key = source
+        .get("key")
+        .and_then(|v| v.as_str())
+        .context("missing key")?;
+    let previous = state
+        .remove(key.as_bytes())?
+        .and_then(|raw| serde_json::from_slice::<StoredValue>(raw.value()).ok());
+    if let Some(previous) = previous {
+        if let Some(at) = previous.expires_at_ms {
+            let idx = expires_key(at, key.as_bytes());
+            let _ = expires.remove(idx.as_slice())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

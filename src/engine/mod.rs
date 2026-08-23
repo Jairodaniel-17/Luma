@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod chunking;
+mod commit;
 pub mod embeddings;
 mod events;
 pub mod hub;
@@ -51,9 +52,158 @@ struct Inner {
     events: events::EventBus,
     metrics: Arc<metrics::Metrics>,
     persist: Option<persist::Persist>,
+    /// Group commit: batches the WAL fsync and the projection transaction across
+    /// whatever mutations are in flight. See `engine::commit`.
+    commits: commit::Commits,
     memory_rss_bytes: AtomicU64,
 
     shutdown: CancellationToken,
+}
+
+impl Engine {
+    /// Order, persist, apply and publish one event — durably, and sharing the
+    /// commit with whatever else is queued.
+    ///
+    /// The ordering guard now covers only ordering: allocate the offset, encode
+    /// the record, put it in the queue. The two expensive halves — the WAL fsync
+    /// and the projection transaction — happen outside it, batched, so a burst
+    /// of concurrent mutations costs one flush and one transaction instead of
+    /// one each. `engine::commit` carries the measurements that led here.
+    ///
+    /// Returns only once this event's offset is durable, applied and published,
+    /// so every guarantee a caller had before still holds: a confirmed write
+    /// survives a crash, and a read that follows it sees it.
+    fn commit_event(
+        &self,
+        event_type: &str,
+        data: serde_json::Value,
+    ) -> Result<EventRecord, EngineError> {
+        let Some(persist) = &self.0.persist else {
+            // No WAL means no projection to batch into either — both come from
+            // `data_dir`. Nothing to share, so this stays inline.
+            let append = self.0.events.append_guard();
+            let event = self.0.events.next_record(event_type, data);
+            self.0.events.publish_record(event.clone());
+            drop(append);
+            self.metrics().inc_events();
+            return Ok(event);
+        };
+
+        let event = {
+            let append = self.0.events.append_guard();
+            let event = self.0.events.next_record(event_type, data);
+            // Encoded here rather than by the batch leader: a leader that
+            // serialized everybody's records would hold them all up doing work
+            // each writer can do on its own thread.
+            let line = persist.encode(&event)?;
+            self.0.commits.enqueue(event.clone(), line);
+            drop(append);
+            event
+        };
+
+        let inner = self.0.clone();
+        let events = self.0.events.clone();
+        let write_wal = move |lines: &[Vec<u8>]| persist.write_batch_synced(lines);
+        let apply_batch = move |evs: &[EventRecord]| -> (u64, Option<anyhow::Error>) {
+            // Every state event in the batch shares one redb transaction. That
+            // is the expensive half: redb is a copy-on-write B-tree, so a
+            // per-record transaction rewrites the page path from leaf to root
+            // each time. `state_db::apply_events` carries the numbers.
+            let state_events: Vec<&EventRecord> =
+                evs.iter().filter(|ev| is_state_event(ev)).collect();
+            if let Some(db) = &inner.state_db {
+                if !state_events.is_empty() {
+                    if let Err(err) = db.apply_events(&state_events) {
+                        // The transaction is atomic, so none of them landed.
+                        return (0, Some(err));
+                    }
+                }
+            }
+
+            // Everything else owns its own storage and applies on its own. The
+            // publish happens here, in queue order, so a subscriber never sees a
+            // gap that fills in afterwards.
+            let mut highest = 0u64;
+            for ev in evs {
+                if !is_state_event(ev) {
+                    if let Err(err) = Inner::apply_event(&inner, ev) {
+                        return (highest, Some(err));
+                    }
+                }
+                events.publish_record(ev.clone());
+                highest = ev.offset;
+            }
+            (highest, None)
+        };
+        self.0.commits.wait_for(
+            event.offset,
+            commit::Commit {
+                write_wal: &write_wal,
+                apply_batch: &apply_batch,
+            },
+        )?;
+        self.metrics().inc_events();
+        Ok(event)
+    }
+}
+
+/// Whether this event's projection is the KV store, and so can share a
+/// transaction with the other KV events in its batch.
+///
+/// Kept next to `Inner::apply_event`'s match on purpose: the two lists have to
+/// agree, and a state event missing from here would silently fall back to a
+/// transaction of its own — slower, but not wrong, which is the kind of drift
+/// nothing fails on.
+fn is_state_event(ev: &EventRecord) -> bool {
+    matches!(
+        ev.event_type.as_str(),
+        "state_updated" | "state_deleted" | "state_batch"
+    )
+}
+
+impl Inner {
+    /// Apply one event to the projections it belongs to.
+    ///
+    /// The single dispatcher, shared by WAL replay at startup and by the commit
+    /// pipeline at run time. Sharing it is not tidiness: when replay had its own
+    /// copy, the `state_batch` arm was missing from it, so every atomic move was
+    /// lost on the first restart after a crash — the exact failure the batch
+    /// exists to prevent, reintroduced one layer down. Two copies of a match on
+    /// event type is how that happens.
+    ///
+    /// Idempotent, because both callers need it to be: each `apply_*` skips a
+    /// record at or below its own `applied_offset`, so replaying a record the
+    /// projection already holds is a no-op rather than a double application.
+    fn apply_event(inner: &Arc<Inner>, ev: &EventRecord) -> anyhow::Result<()> {
+        match ev.event_type.as_str() {
+            "state_updated" => {
+                if let Some(db) = &inner.state_db {
+                    db.apply_state_updated(ev)?;
+                }
+            }
+            "state_deleted" => {
+                if let Some(db) = &inner.state_db {
+                    db.apply_state_deleted(ev)?;
+                }
+            }
+            "state_batch" => {
+                if let Some(db) = &inner.state_db {
+                    db.apply_state_batch(ev)?;
+                }
+            }
+            "vector_collection_created"
+            | "vector_collection_dropped"
+            | "vector_added"
+            | "vector_upserted"
+            | "vector_updated"
+            | "vector_deleted" => {
+                inner.vectors.apply_event(ev)?;
+            }
+            // Everything else is a notification with no projection of its own.
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 /// Upper bound on the in-RAM event replay buffer when persistence is enabled.
@@ -136,6 +286,7 @@ impl Engine {
             events,
             metrics,
             persist,
+            commits: commit::Commits::new(),
             memory_rss_bytes: AtomicU64::new(read_process_memory_rss()),
 
             shutdown,
@@ -238,39 +389,13 @@ impl Engine {
         }
 
         if let Some(db) = &self.0.state_db {
-            let vectors = self.0.vectors.clone();
+            let inner = self.0.clone();
             let events = self.0.events.clone();
+            let _ = db;
             let replay = persist
                 .try_for_each_event_since(since_offset, |ev| {
-                    match ev.event_type.as_str() {
-                        "state_updated" => {
-                            db.apply_state_updated(&ev)
-                                .map_err(|err| std::io::Error::other(err.to_string()))?;
-                        }
-                        "state_deleted" => {
-                            db.apply_state_deleted(&ev)
-                                .map_err(|err| std::io::Error::other(err.to_string()))?;
-                        }
-                        // Without this arm a batch record replayed as nothing at
-                        // all, so every atomic move was lost on the first
-                        // restart after a crash -- the exact failure the batch
-                        // exists to prevent, reintroduced one layer down.
-                        "state_batch" => {
-                            db.apply_state_batch(&ev)
-                                .map_err(|err| std::io::Error::other(err.to_string()))?;
-                        }
-                        "vector_collection_created"
-                        | "vector_collection_dropped"
-                        | "vector_added"
-                        | "vector_upserted"
-                        | "vector_updated"
-                        | "vector_deleted" => {
-                            vectors
-                                .apply_event(&ev)
-                                .map_err(|err| std::io::Error::other(err.to_string()))?;
-                        }
-                        _ => {}
-                    }
+                    Inner::apply_event(&inner, &ev)
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
                     events.set_next_offset(ev.offset.saturating_add(1));
                     Ok(true)
                 })
@@ -771,20 +896,7 @@ impl Engine {
         // marker object instead of its bytes, silently changing the value's type
         // between the WAL record and the in-memory store.
         let key = event_data["key"].as_str().unwrap_or_default().to_string();
-        // Hold the append guard across offset allocation, WAL append and publish
-        // so offset order == WAL file order == publish order (no false gaps).
-        let append = self.0.events.append_guard();
-        let event = self.0.events.next_record("state_updated", event_data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
-        if let Some(db) = &self.0.state_db {
-            db.apply_state_updated(&event)?;
-        }
-        self.0.events.publish_record(event.clone());
-        drop(append);
-        self.metrics().inc_events();
-
+        self.commit_event("state_updated", event_data)?;
         self.metrics().inc_state_put();
         // state_db path: we just applied this exact (key,value,revision,expires)
         // above, so build the returned item directly instead of paying a second

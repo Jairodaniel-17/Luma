@@ -216,6 +216,27 @@ impl Persist {
         self.write_lines_to_wal(&lines, true)
     }
 
+    /// Serialize one event into the line the WAL stores.
+    ///
+    /// Exposed so a caller can encode under its own ordering guard and hand the
+    /// bytes to the commit pipeline, instead of the batch leader paying for
+    /// everybody's serialization while the rest wait on it.
+    pub fn encode(&self, event: &EventRecord) -> std::io::Result<Vec<u8>> {
+        encode_wal_record(event)
+    }
+
+    /// Write a batch of already-encoded lines and fsync **once** for all of them.
+    ///
+    /// This is what makes group commit worth anything: the fsync is per call,
+    /// not per record, so a batch of 32 costs one flush instead of 32. See
+    /// `engine::commit`.
+    pub fn write_batch_synced(&self, lines: &[Vec<u8>]) -> std::io::Result<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        self.write_lines_to_wal(lines, true)
+    }
+
     /// Write a batch of serialized JSON lines to the current WAL segment.
     fn write_lines_to_wal(&self, lines: &[Vec<u8>], sync: bool) -> std::io::Result<()> {
         let _g = self.0.wal_lock.lock();
