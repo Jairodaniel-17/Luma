@@ -540,6 +540,7 @@ Notas de honestidad:
 
 | Documento | Contenido |
 | :--- | :--- |
+| **[`CONTINUAR.md`](CONTINUAR.md)** | Estado del proyecto, qué quedó pendiente y cómo levantar el entorno de pruebas |
 | **[`MANUAL_USUARIO.md`](MANUAL_USUARIO.md)** | **Empieza aquí.** Qué soporta Luma, cómo configurarlo correctamente y los errores típicos |
 | [`docs/integrar/API.md`](docs/integrar/API.md) | Referencia de endpoints |
 | [`docs/openapi.yaml`](docs/openapi.yaml) | Spec OpenAPI (servida en `/docs`) |

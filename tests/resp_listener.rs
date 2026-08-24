@@ -628,9 +628,27 @@ async fn a_subscribed_connection_still_answers_commands() {
     // Redis restricts a subscriber to a subset; keeping ordinary commands
     // working is a superset, and a client that sends PING to keep the
     // connection alive must get a reply rather than silence.
+    //
+    // **The reply is an array, not `+PONG`.** This test asserted `+PONG` and was
+    // wrong: inside a subscription Redis answers `["pong", ""]`. ioredis uses
+    // PING as its subscriber keepalive, read the simple string where it expected
+    // two elements, and desynchronised its command queue — it died with "Command
+    // queue state error" the moment anything was published. So this assertion
+    // was actively holding the bug in place.
     let server = start(|_| {}).await;
     let mut client = connect(&server).await;
     exchange(&mut client, b"*2\r\n$9\r\nSUBSCRIBE\r\n$1\r\nc\r\n").await;
+    assert_eq!(
+        text(&exchange(&mut client, b"PING\r\n").await),
+        "*2\r\n$4\r\npong\r\n$0\r\n\r\n"
+    );
+    // With an argument the second element is that argument, still as an array.
+    assert_eq!(
+        text(&exchange(&mut client, b"*2\r\n$4\r\nPING\r\n$2\r\nhi\r\n").await),
+        "*2\r\n$4\r\npong\r\n$2\r\nhi\r\n"
+    );
+    // And once the subscription is dropped it goes back to the simple string.
+    exchange(&mut client, b"*2\r\n$11\r\nUNSUBSCRIBE\r\n$1\r\nc\r\n").await;
     assert_eq!(text(&exchange(&mut client, b"PING\r\n").await), "+PONG\r\n");
     server.shutdown.cancel();
 }
