@@ -297,6 +297,13 @@ impl Persist {
         // Durably record the snapshot rename in the directory entry.
         fsync_dir(&self.0.dir)?;
 
+        // A segment that is still empty has nothing to seal: rotating it anyway
+        // left one empty file behind per snapshot (every 30 s, ~2.900 a day).
+        let current_seg = *self.0.current_segment.lock();
+        if is_empty_file(&self.segment_path(current_seg)) {
+            self.enforce_retention_locked(current_seg)?;
+            return Ok(());
+        }
         let seg = {
             let mut current = self.0.current_segment.lock();
             *current = current.saturating_add(1);
@@ -396,7 +403,10 @@ impl Persist {
                     if !gated {
                         // Legacy (no deferred-durability store): prune by count.
                         let _ = std::fs::remove_file(path);
-                    } else if segment_max_offset(&path).is_some_and(|max| max <= floor) {
+                    } else if is_empty_file(&path)
+                        || segment_max_offset(&path).is_some_and(|max| max <= floor)
+                    {
+                        // A zero-byte segment holds no record any store could need.
                         // Gated: every record in this segment is durably applied.
                         // (floor == 0 => nothing durable yet => keep all.)
                         let _ = std::fs::remove_file(path);
@@ -545,6 +555,12 @@ fn apply_event(state: &crate::engine::state::StateStore, _vectors: &VectorStore,
         }
         _ => {}
     }
+}
+
+/// Exists and holds zero bytes. Missing or unreadable is not empty: retention
+/// must keep what it cannot inspect.
+fn is_empty_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() == 0)
 }
 
 fn ensure_file_exists(path: &Path) -> std::io::Result<()> {
@@ -820,6 +836,39 @@ mod tests {
         assert!(first_segment.contains("\"offset\":7"));
         assert!(dir.path().join("snapshot.json").exists());
         assert!(dir.path().join("events-000002.log").exists());
+    }
+
+    /// Un snapshot por cada 30 s sin escrituras dejaba un segmento vacío cada
+    /// vez, y la retención con piso no los borraba nunca (sin registros no hay
+    /// offset máximo que comparar): en nova se juntaron ~17.900.
+    #[test]
+    fn quiet_snapshots_do_not_pile_up_empty_segments() {
+        let dir = tempdir().unwrap();
+        for seg in 1..=50u64 {
+            std::fs::File::create(dir.path().join(format!("events-{seg:06}.log"))).unwrap();
+        }
+        let persist = Persist::new(dir.path(), 1024 * 1024, 4).unwrap();
+        persist.set_durable_floor(10);
+        let segmentos = || super::list_segments_sorted(dir.path()).len();
+
+        for _ in 0..100 {
+            persist
+                .write_snapshot_and_rotate(&Snapshot { last_offset: 10 })
+                .unwrap();
+        }
+        assert!(segmentos() <= 4, "quedaron {} segmentos", segmentos());
+
+        // Con un registro sin aplicar (11 > piso 10), rota y lo conserva.
+        persist.append_event(&sample_event(11)).unwrap();
+        persist
+            .write_snapshot_and_rotate(&Snapshot { last_offset: 11 })
+            .unwrap();
+        let con_datos = super::list_segments_sorted(dir.path())
+            .into_iter()
+            .filter(|p| segment_max_offset(p) == Some(11))
+            .count();
+        assert_eq!(con_datos, 1);
+        assert!(segmentos() <= 4);
     }
 
     #[test]
