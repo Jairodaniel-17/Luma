@@ -386,6 +386,13 @@ impl Engine {
             let applied = db.applied_offset().unwrap_or(0);
             since_offset = applied;
             persist.set_durable_floor(applied);
+            // New offsets must start above what redb already holds, whatever the
+            // snapshot says: `apply_events` skips anything at or below its applied
+            // offset, so numbering from a lower snapshot (data dirs written before
+            // the fix in `set_next_offset` carry `last_offset: 0`) acknowledged
+            // writes that never landed.
+            let next = self.0.events.last_published_offset().max(applied) + 1;
+            self.0.events.set_next_offset(next);
         }
 
         if let Some(db) = &self.0.state_db {

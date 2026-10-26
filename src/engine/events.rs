@@ -119,8 +119,17 @@ impl EventBus {
         self.0.last_published_offset.load(Ordering::Relaxed)
     }
 
+    /// Also lifts `last_published_offset` to `next - 1`. A run that restores its
+    /// offset and then publishes nothing still snapshots that offset; leaving it
+    /// at 0 wrote `last_offset: 0` into the snapshot after 30 quiet seconds, the
+    /// next start numbered from 1 again, and `state_db` dropped every new write
+    /// as an already-applied duplicate.
     pub fn set_next_offset(&self, next: u64) {
-        self.0.next_offset.store(next.max(1), Ordering::Relaxed);
+        let next = next.max(1);
+        self.0.next_offset.store(next, Ordering::Relaxed);
+        self.0
+            .last_published_offset
+            .fetch_max(next - 1, Ordering::Relaxed);
     }
 }
 

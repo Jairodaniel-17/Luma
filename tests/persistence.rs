@@ -330,3 +330,60 @@ async fn truncated_wal_tail_does_not_drop_valid_prefix() {
         Some(&serde_json::json!({"v":2}))
     );
 }
+
+/// Un arranque sin escrituras que hace snapshot dejaba `last_offset: 0`; el
+/// siguiente numeraba desde 1 y `state_db` descartaba lo nuevo como duplicado
+/// (PUT 200, GET 404). Pasó en producción: Luma en nova, octubre de 2026.
+#[tokio::test]
+async fn writes_after_a_quiet_restart_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        port: 0,
+        bind_addr: "127.0.0.1".parse().unwrap(),
+        api_key: "test".to_string(),
+        data_dir: Some(dir.path().to_string_lossy().to_string()),
+        snapshot_interval_secs: 3600,
+        ..Config::default()
+    };
+
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    for i in 0..5u32 {
+        engine
+            .put_state(
+                format!("viejo:{i}"),
+                serde_json::json!({ "i": i }),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    engine.force_snapshot().unwrap();
+    drop(engine);
+
+    // arranque tranquilo: ninguna escritura, solo el snapshot periódico
+    let quieto = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    quieto.force_snapshot().unwrap();
+    drop(quieto);
+
+    let engine = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    engine
+        .put_state(
+            "nuevo".to_string(),
+            serde_json::json!({ "ok": true }),
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        engine.get_state("nuevo").is_some(),
+        "la escritura respondió bien pero no quedó"
+    );
+    drop(engine);
+
+    let engine = Engine::new(config, CancellationToken::new()).unwrap();
+    assert!(
+        engine.get_state("nuevo").is_some(),
+        "no sobrevivió al reinicio"
+    );
+    assert!(engine.get_state("viejo:4").is_some());
+}
