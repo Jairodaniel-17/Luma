@@ -56,6 +56,19 @@ impl DocumentParser {
                     text.push_str(&unescaped);
                     text.push(' ');
                 }
+                // quick-xml 0.41 hands `&amp;`, `&#233;` and the like over as
+                // their own event; ignoring it dropped them from the text.
+                Ok(Event::GeneralRef(e)) => {
+                    let name = e
+                        .decode()
+                        .map_err(|e| anyhow::anyhow!("Error decoding DOCX text: {}", e))?;
+                    if let Ok(Some(ch)) = e.resolve_char_ref() {
+                        text.push(ch);
+                    } else if let Some(s) = quick_xml::escape::resolve_predefined_entity(&name) {
+                        text.push_str(s);
+                    }
+                    text.push(' ');
+                }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(anyhow::anyhow!("Error parsing DOCX XML: {}", e)),
                 _ => (),
@@ -74,7 +87,9 @@ impl DocumentParser {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            if file.name().ends_with(".html") || file.name().ends_with(".xhtml") {
+            // zip 9: a name that is not valid UTF-8 is an error, not a lossy string.
+            let name = file.name()?.to_string();
+            if name.ends_with(".html") || name.ends_with(".xhtml") {
                 let mut html_content = String::new();
                 file.read_to_string(&mut html_content)?;
 

@@ -57,9 +57,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 pdf-extract = "0.12.0"
-docx-rs = "0.4.19"
 quick-xml = { version = "0.41", features = ["escape-html"] }
-zip = { version = "8.1.0", features = ["default"] }
+# Reading DOCX and EPUB in memory, which are deflate. Without the default codecs
+# (zstd, bzip2, lzma, aes): attack surface Luma never used, and the source of
+# most RUSTSEC advisories in October 2026.
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 toml = "1.0.3"
 dashmap = "6.1.0"
 memmap2 = "0.9.10"
