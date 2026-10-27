@@ -7,6 +7,10 @@
 #
 # Needs the luma-apagon image (scripts/apagon/Dockerfile) and
 # cgr.dev/chainguard/minio.
+#
+# With BACKUP_REMOTE_URL (plus BACKUP_REMOTE_ENDPOINT, BACKUP_REMOTE_REGION,
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) it drills against that real store
+# instead of MinIO, each drill under a fresh prefix below the URL.
 set -euo pipefail
 
 # `pwd -W`: the Windows path Docker Desktop needs under Git Bash.
@@ -15,8 +19,8 @@ HERE=$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })
 DRILLS=${DRILLS:-3}
 NET=luma-dr
 MINIO=dr-minio
+EXTERNAL=${BACKUP_REMOTE_URL:-}
 REMOTE=(
-  -e BACKUP_REMOTE_URL=s3://luma-dr/friochap
   -e BACKUP_REMOTE_ENDPOINT=http://$MINIO:9000
   -e BACKUP_REMOTE_ALLOW_HTTP=true
   -e BACKUP_REMOTE_REGION=us-east-1
@@ -24,18 +28,27 @@ REMOTE=(
   -e AWS_SECRET_ACCESS_KEY=drill-secret-key-0123456789
   -e WAL_SHIP_INTERVAL_SECS=${WAL_SHIP_INTERVAL_SECS:-10}
 )
+if [ -n "$EXTERNAL" ]; then
+  REMOTE=(-e BACKUP_REMOTE_ENDPOINT -e BACKUP_REMOTE_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY
+    -e WAL_SHIP_INTERVAL_SECS=${WAL_SHIP_INTERVAL_SECS:-10})
+fi
 
 docker network create $NET >/dev/null 2>&1 || true
 failed=0
 for drill in $(seq "$DRILLS"); do
-  docker rm -f $MINIO >/dev/null 2>&1 || true
-  # A fresh, empty remote each time; the bucket is a directory MinIO picks up.
-  docker run -d --name $MINIO --network $NET \
-    -e MINIO_ROOT_USER=drill-access-key -e MINIO_ROOT_PASSWORD=drill-secret-key-0123456789 \
-    --entrypoint sh cgr.dev/chainguard/minio:latest -c "mkdir -p /data/luma-dr && exec minio server /data" >/dev/null
+  if [ -n "$EXTERNAL" ]; then
+    url=$EXTERNAL/drill-$(date +%s)-$drill
+  else
+    url=s3://luma-dr/friochap
+    docker rm -f $MINIO >/dev/null 2>&1 || true
+    # A fresh, empty remote each time; the bucket is a directory MinIO picks up.
+    docker run -d --name $MINIO --network $NET \
+      -e MINIO_ROOT_USER=drill-access-key -e MINIO_ROOT_PASSWORD=drill-secret-key-0123456789 \
+      --entrypoint sh cgr.dev/chainguard/minio:latest -c "mkdir -p /data/luma-dr && exec minio server /data" >/dev/null
+  fi
   journal=$(docker volume create)
   run() {
-    docker run --rm --network $NET "${REMOTE[@]}" -v "$journal:/var/dr/journal" \
+    docker run --rm --network $NET "${REMOTE[@]}" -e BACKUP_REMOTE_URL="$url" -v "$journal:/var/dr/journal" \
       -v "$BIN:/luma" -v "$HERE/apagon:/apagon" --entrypoint bash luma-apagon /apagon/dr.sh "$1"
   }
   echo "== drill $drill"
