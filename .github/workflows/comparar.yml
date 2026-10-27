@@ -1,0 +1,40 @@
+name: Durability against other engines
+
+# The same power-cut harness (LazyFS) and the same workload against Luma, Redis
+# and PostgreSQL: what "on par with other engines" means in numbers. The lossy
+# settings (Redis appendfsync everysec, Postgres synchronous_commit=off) are
+# the control that the cuts are deep enough to lose data. See
+# scripts/apagon/comparar.sh.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "11 5 * * 0"
+
+jobs:
+  compare:
+    name: ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [luma, redis-always, redis-everysec, pg-on, pg-off]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        if: matrix.engine == 'luma'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build Luma
+        if: matrix.engine == 'luma'
+        run: cargo build --release --bin luma --locked
+      - name: LazyFS image with Redis and PostgreSQL
+        run: docker build -q -t luma-apagon scripts/apagon
+      - name: Binary under test
+        if: matrix.engine == 'luma'
+        run: mkdir -p bin && cp target/release/luma bin/
+      - name: 15 power cuts
+        run: >-
+          docker run --rm --privileged --device /dev/fuse -e CYCLES=15
+          -v "$PWD/bin:/luma" -v "$PWD/scripts/apagon:/apagon" luma-apagon
+          bash /apagon/comparar.sh ${{ matrix.engine }}
