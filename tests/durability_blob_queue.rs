@@ -430,3 +430,181 @@ async fn raw_kv_value_roundtrips_and_survives_a_restart() {
 
     app.stop().await;
 }
+
+// ─── What Friochap relies on: TTL keys, delayed messages, leases, receivers ─
+
+async fn get_json(client: &reqwest::Client, url: String) -> (StatusCode, serde_json::Value) {
+    let resp = client.get(url).bearer_auth("test").send().await.unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or_default())
+}
+
+async fn receive(
+    client: &reqwest::Client,
+    base: &str,
+    queue: &str,
+    max: u64,
+    visibility: u64,
+) -> Vec<serde_json::Value> {
+    let got: serde_json::Value = client
+        .post(format!("{base}/v1/queue/{queue}/receive"))
+        .bearer_auth("test")
+        .json(&serde_json::json!({ "max": max, "visibility_secs": visibility }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    got["messages"].as_array().unwrap().clone()
+}
+
+/// A key with a TTL keeps its absolute deadline across a restart (it is not
+/// reset nor dropped), and one that expired while the server was down does not
+/// come back through the WAL replay.
+#[tokio::test]
+async fn ttl_keys_keep_their_deadline_and_expired_ones_stay_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+    let app = start_on(dir.path()).await;
+    for (key, ttl) in [("larga", 3_600_000u64), ("corta", 300)] {
+        let resp = client
+            .put(format!("{}/v1/state/{key}", app.base))
+            .bearer_auth("test")
+            .json(&serde_json::json!({ "value": { "v": key }, "ttl_ms": ttl }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let (_, before) = get_json(&client, format!("{}/v1/state/larga", app.base)).await;
+    app.stop().await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let app = start_on(dir.path()).await;
+    let (status, after) = get_json(&client, format!("{}/v1/state/larga", app.base)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a live TTL key was lost by the restart"
+    );
+    assert_eq!(after["value"]["v"], "larga");
+    assert_eq!(
+        after["expires_at_ms"], before["expires_at_ms"],
+        "the restart moved the key's deadline"
+    );
+    let (status, _) = get_json(&client, format!("{}/v1/state/corta", app.base)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an expired key came back after the restart"
+    );
+    app.stop().await;
+}
+
+/// A delayed message survives a restart and is still not handed out before its
+/// time, then is.
+#[tokio::test]
+async fn delayed_message_survives_a_restart_and_waits_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+    let app = start_on(dir.path()).await;
+    let resp = client
+        .post(format!("{}/v1/queue/planos", app.base))
+        .bearer_auth("test")
+        .json(&serde_json::json!({ "body": { "plano": 7 }, "delay_secs": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sent = std::time::Instant::now();
+    app.stop().await;
+
+    let app = start_on(dir.path()).await;
+    if sent.elapsed() < std::time::Duration::from_millis(1500) {
+        assert!(
+            receive(&client, &app.base, "planos", 10, 30)
+                .await
+                .is_empty(),
+            "a delayed message was handed out early"
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(2).saturating_sub(sent.elapsed())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let got = receive(&client, &app.base, "planos", 10, 30).await;
+    assert_eq!(got.len(), 1, "the delayed message was lost by the restart");
+    assert_eq!(got[0]["body"]["plano"], 7);
+    app.stop().await;
+}
+
+/// A message received but not acked when the server goes down is not lost: it
+/// is handed out again once its lease runs out, with the attempt counted.
+#[tokio::test]
+async fn leased_message_is_not_lost_by_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+    let app = start_on(dir.path()).await;
+    client
+        .post(format!("{}/v1/queue/correo", app.base))
+        .bearer_auth("test")
+        .json(&serde_json::json!({ "body": { "para": "x" } }))
+        .send()
+        .await
+        .unwrap();
+    let first = receive(&client, &app.base, "correo", 1, 1).await;
+    assert_eq!(first.len(), 1);
+    app.stop().await;
+
+    let app = start_on(dir.path()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let again = receive(&client, &app.base, "correo", 1, 30).await;
+    assert_eq!(again.len(), 1, "an unacked message was lost by the restart");
+    assert_eq!(again[0]["id"], first[0]["id"]);
+    assert!(again[0]["attempts"].as_u64().unwrap() >= 1);
+    app.stop().await;
+}
+
+/// Many consumers at once: every message goes to exactly one of them while its
+/// lease lasts, and none is skipped.
+#[tokio::test]
+async fn concurrent_receivers_never_share_a_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::new();
+    let app = start_on(dir.path()).await;
+    for i in 0..200 {
+        client
+            .post(format!("{}/v1/queue/tareas", app.base))
+            .bearer_auth("test")
+            .json(&serde_json::json!({ "body": { "i": i } }))
+            .send()
+            .await
+            .unwrap();
+    }
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let (client, base) = (client.clone(), app.base.clone());
+            tokio::spawn(async move {
+                let mut ids = Vec::new();
+                loop {
+                    let got = receive(&client, &base, "tareas", 5, 60).await;
+                    if got.is_empty() {
+                        return ids;
+                    }
+                    ids.extend(got.iter().map(|m| m["id"].as_str().unwrap().to_string()));
+                }
+            })
+        })
+        .collect();
+    let mut all = Vec::new();
+    for w in workers {
+        all.extend(w.await.unwrap());
+    }
+    let unique: std::collections::HashSet<_> = all.iter().collect();
+    assert_eq!(
+        all.len(),
+        unique.len(),
+        "a message was handed to two receivers"
+    );
+    assert_eq!(unique.len(), 200, "a message was skipped");
+    app.stop().await;
+}
