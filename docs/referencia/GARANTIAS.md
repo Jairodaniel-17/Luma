@@ -39,3 +39,19 @@ escritura y queda en solo lectura hasta reiniciar. Con el disco casi lleno recha
 | Disco lleno y `fsync` con EIO | `tests/disk_full.rs`, `tests/fsync_eio.rs` |
 | Host perdido: lo confirmado hasta 10 s antes está en la máquina nueva | `scripts/dr_drill.sh` |
 | Una versión nueva lee lo que escribió la anterior | `tests/golden_data_dir.rs` |
+
+## Contra otros motores, con el mismo corte de luz
+
+`scripts/apagon/comparar.sh` (en GitHub: «Durability against other engines», semanal): la misma carga para todos
+(clave = valor desde seis hilos; cuenta solo lo que el motor confirmó), `kill -9` en un momento al azar, LazyFS tira lo
+que no llegó a disco, se reinicia y se cuentan las confirmadas que faltan. 15 cortes por motor, 27/10/2026:
+
+| Motor | Escrituras confirmadas | Perdidas |
+|---|---|---|
+| **Luma** | 118 475 | **0** |
+| Redis 7, `appendfsync always` | 133 882 | 0 |
+| PostgreSQL, `synchronous_commit=on` | 133 239 | 0 |
+| Redis 7, `appendfsync everysec` | 251 380 | 40 808 |
+| PostgreSQL, `synchronous_commit=off` | 154 443 | 7 943 |
+
+Las dos últimas son el control: no prometen durabilidad, y que pierdan muestra que el corte llega hasta lo no escrito.
