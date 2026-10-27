@@ -2,14 +2,16 @@
 # Luma against other engines under the same power cut (LazyFS, see run.sh).
 #
 #   comparar.sh <engine>   engine: luma | redis-always | redis-everysec | pg-on | pg-off
+#                                  | etcd | sqlite-full | sqlite-normal
 #
 # Same workload for all (comparar.py: key = value from six threads, journalled
 # once the engine confirms), SIGKILL at a random moment, unsynced data dropped,
 # restart, count the confirmed writes that are gone. The lossy settings
 # (Redis appendfsync everysec, Postgres synchronous_commit=off) are the control:
 # if they never lost anything the harness would not be cutting deep enough.
-# Fails when an engine that promises durability (luma, redis-always, pg-on)
-# loses a confirmed write.
+# SQLite runs inside the load process, so for it the cut kills that process.
+# Fails when an engine that promises durability (luma, redis-always, pg-on,
+# etcd, sqlite-full) loses a confirmed write.
 set -euo pipefail
 
 ENGINE=$1
@@ -70,6 +72,12 @@ start() {
         redis-server --dir "$MNT/redis" --appendonly yes --appendfsync "${ENGINE#redis-}" \
             --save "" --port 6380 --bind 127.0.0.1 --protected-mode no >>"$WORK/engine.log" 2>&1 &
         PID=$!; wait_port 6380 ;;
+    etcd)
+        etcd --data-dir "$MNT/etcd" --listen-client-urls http://127.0.0.1:2379 \
+            --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:2380 \
+            >>"$WORK/engine.log" 2>&1 &
+        PID=$!; wait_port 2379 ;;
+    sqlite-*) PID= ;;
     pg-*)
         if [ ! -d "$MNT/pg" ]; then
             install -d -o postgres "$MNT/pg"
@@ -99,6 +107,7 @@ for cycle in $(seq "$CYCLES"); do
     start
     python3 "$HERE/comparar.py" load "$ENGINE" "$JOURNAL" "$cycle" &
     LOAD=$!
+    [[ $ENGINE == sqlite-* ]] && PID=$LOAD
     sleep "$((RANDOM % 4 + 1)).$((RANDOM % 10))"
     cut
     wait "$LOAD" || true
@@ -110,5 +119,5 @@ done
 
 echo "$ENGINE: $(wc -l < "$JOURNAL") writes confirmed over $CYCLES cuts"
 case $ENGINE in
-luma | redis-always | pg-on) [ "$lost" = 0 ] || { echo "$ENGINE promises durability and lost writes"; exit 1; } ;;
+luma | redis-always | pg-on | etcd | sqlite-full) [ "$lost" = 0 ] || { echo "$ENGINE promises durability and lost writes"; exit 1; } ;;
 esac

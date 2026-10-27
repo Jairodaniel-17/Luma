@@ -1,9 +1,10 @@
 name: Durability against other engines
 
-# The same power-cut harness (LazyFS) and the same workload against Luma, Redis
-# and PostgreSQL: what "on par with other engines" means in numbers. The lossy
-# settings (Redis appendfsync everysec, Postgres synchronous_commit=off) are
-# the control that the cuts are deep enough to lose data. See
+# The same power-cut harness (LazyFS) and the same workload against Luma, Redis,
+# PostgreSQL, etcd and SQLite: what "on par with other engines" means in
+# numbers. The lossy settings (Redis appendfsync everysec, Postgres
+# synchronous_commit=off, SQLite synchronous=NORMAL) are the control that the
+# cuts are deep enough to lose data. See
 # scripts/apagon/comparar.sh.
 
 on:
@@ -24,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: ${{ fromJSON(inputs.engines || '["luma","redis-always","redis-everysec","pg-on","pg-off"]') }}
+        engine: ${{ fromJSON(inputs.engines || '["luma","redis-always","redis-everysec","pg-on","pg-off","etcd","sqlite-full","sqlite-normal"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -33,7 +34,7 @@ jobs:
       - name: Build Luma
         if: matrix.engine == 'luma'
         run: cargo build --release --bin luma --locked
-      - name: LazyFS image with Redis and PostgreSQL
+      - name: LazyFS image with the other engines
         run: docker build -q -t luma-apagon scripts/apagon
       - name: Binary under test
         if: matrix.engine == 'luma'
