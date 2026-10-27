@@ -72,7 +72,7 @@ start() {
     pg-*)
         if [ ! -d "$MNT/pg" ]; then
             install -d -o postgres "$MNT/pg"
-            su postgres -c "$PG/initdb -q -D $MNT/pg --auth=trust" >>"$WORK/engine.log"
+            su postgres -c "$PG/initdb -D $MNT/pg --auth=trust" >>"$WORK/engine.log" 2>&1
             FIRST=1
         fi
         su postgres -c "$PG/pg_ctl -D $MNT/pg -l $WORK/engine.log -w \
