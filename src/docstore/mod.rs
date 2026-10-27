@@ -76,10 +76,10 @@ fn write_doc(
         // Index key -> whether the id belongs in it after this write.
         let mut wanted: BTreeMap<String, bool> = BTreeMap::new();
         for (field, value) in &old_fields {
-            wanted.insert(index_key(collection, field, value), false);
+            wanted.insert(index_key(collection, field, value, id), false);
         }
         for (field, value) in &new_fields {
-            wanted.insert(index_key(collection, field, value), true);
+            wanted.insert(index_key(collection, field, value, id), true);
         }
         let mut keys = vec![key.clone()];
         keys.extend(wanted.keys().cloned());
@@ -111,31 +111,22 @@ fn write_doc(
                 }
                 (None, None) => return Ok((Vec::new(), Some(0))),
             };
+            // One index key per (field, value, id): only the entries this
+            // document enters or leaves are written, never a list that grows
+            // with the collection.
             for (index, item) in keys[1..].iter().zip(&items[1..]) {
-                let mut ids = item
-                    .as_ref()
-                    .map(|i| parse_ids(&i.value))
-                    .unwrap_or_default();
-                ids.retain(|existing| existing != id);
-                if wanted[index] {
-                    ids.push(id.to_string());
-                }
-                ids.sort();
-                ids.dedup();
-                if ids.is_empty() {
-                    if item.is_some() {
-                        ops.push(StateOp::Delete {
-                            key: index.clone(),
-                            if_revision: None,
-                        });
-                    }
-                } else {
-                    ops.push(StateOp::Put {
+                match (wanted[index], item.is_some()) {
+                    (true, false) => ops.push(StateOp::Put {
                         key: index.clone(),
-                        value: serde_json::json!({ "ids": ids }).into(),
+                        value: serde_json::Value::Bool(true).into(),
                         ttl_ms: None,
                         if_revision: None,
-                    });
+                    }),
+                    (false, true) => ops.push(StateOp::Delete {
+                        key: index.clone(),
+                        if_revision: None,
+                    }),
+                    _ => {}
                 }
             }
             Ok((ops, Some(revision)))
@@ -150,8 +141,11 @@ fn write_doc(
 
 /// The index format the stored entries are known to match. Version 2: before
 /// it, concurrent writers lost each other's ids, so entries written by an
-/// older Luma can be missing documents and must be rebuilt.
-const INDEX_VERSION: u64 = 2;
+/// older Luma can be missing documents and must be rebuilt. Version 3: one key
+/// per (field, value, id) instead of one id list per (field, value), which
+/// every write rewrote whole: with 10 000 documents sharing a value, each write
+/// copied ~150 KB in memory and into the WAL.
+const INDEX_VERSION: u64 = 3;
 const INDEX_VERSION_KEY: &str = "docmeta:index_version";
 
 /// Rebuild every document index from the documents themselves, once per
@@ -180,7 +174,7 @@ pub fn migrate_indexes(engine: &Engine) -> Result<usize, EngineError> {
         engine.put_state_batch(ops)?;
     }
 
-    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut wanted: Vec<String> = Vec::new();
     let mut docs = 0;
     for item in scan(engine, "doc:") {
         // Collections cannot contain ':', so the first one after the prefix
@@ -190,26 +184,17 @@ pub fn migrate_indexes(engine: &Engine) -> Result<usize, EngineError> {
         };
         docs += 1;
         for (field, value) in fields_of(Some(&item)) {
-            wanted
-                .entry(index_key(collection, &field, &value))
-                .or_default()
-                .push(id.to_string());
+            wanted.push(index_key(collection, &field, &value, id));
         }
     }
-    let entries: Vec<(String, Vec<String>)> = wanted.into_iter().collect();
-    for chunk in entries.chunks(500) {
+    for chunk in wanted.chunks(500) {
         let ops = chunk
             .iter()
-            .map(|(key, ids)| {
-                let mut ids = ids.clone();
-                ids.sort();
-                ids.dedup();
-                StateOp::Put {
-                    key: key.clone(),
-                    value: serde_json::json!({ "ids": ids }).into(),
-                    ttl_ms: None,
-                    if_revision: None,
-                }
+            .map(|key| StateOp::Put {
+                key: key.clone(),
+                value: serde_json::Value::Bool(true).into(),
+                ttl_ms: None,
+                if_revision: None,
             })
             .collect();
         engine.put_state_batch(ops)?;
@@ -290,10 +275,9 @@ pub fn find_docs(
 
     let prefix = format!("doc:{collection}:");
     let mut docs = Vec::new();
-    for item in engine.list_state(Some(&prefix), limit * 4) {
-        if !item.key.starts_with(&prefix) {
-            continue;
-        }
+    // Every document of the collection, page by page, until `limit` match: a
+    // filter that only late documents match must still find them.
+    for item in scan(engine, &prefix) {
         let id = item.key[prefix.len()..].to_string();
         let Some(json) = item.value.as_json() else {
             continue;
@@ -317,8 +301,15 @@ fn doc_key(collection: &str, id: &str) -> String {
     format!("doc:{collection}:{id}")
 }
 
-fn index_key(collection: &str, field: &str, value: &str) -> String {
-    format!("docidx:{collection}:{field}:{value}")
+/// `\0` ends the value. A value that itself contains `\0` can make a scan for
+/// another value list extra ids; `find_docs` checks every candidate against the
+/// filter, so those never reach a result.
+fn index_prefix(collection: &str, field: &str, value: &str) -> String {
+    format!("docidx:{collection}:{field}:{value}\0")
+}
+
+fn index_key(collection: &str, field: &str, value: &str, id: &str) -> String {
+    format!("{}{id}", index_prefix(collection, field, value))
 }
 
 fn string_fields(doc: &serde_json::Value) -> Vec<(String, String)> {
@@ -332,22 +323,6 @@ fn string_fields(doc: &serde_json::Value) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-/// Read the id list out of an index entry.
-///
-/// Takes the stored value rather than JSON so a raw byte value under an index
-/// key yields an empty list instead of forcing every caller to unwrap.
-fn parse_ids(value: &crate::engine::stored::StoredVal) -> Vec<String> {
-    value
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn indexed_candidates(
@@ -364,12 +339,10 @@ fn indexed_candidates(
         let Some(value_str) = value.as_str() else {
             return Ok(None);
         };
-        let key = index_key(collection, field, value_str);
-        let Some(item) = engine.get_state(&key) else {
-            return Ok(Some(Vec::new()));
-        };
-        let ids = parse_ids(&item.value);
-        let set: HashSet<String> = ids.into_iter().collect();
+        let prefix = index_prefix(collection, field, value_str);
+        let set: HashSet<String> = scan(engine, &prefix)
+            .map(|item| item.key[prefix.len()..].to_string())
+            .collect();
         result = Some(match result {
             None => set,
             Some(current) => current.into_iter().filter(|id| set.contains(id)).collect(),

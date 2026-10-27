@@ -330,14 +330,12 @@ fn document_indexes_stay_consistent_under_concurrent_writes() {
     // The index itself, not just the filtered result: an id left behind in the
     // wrong entry is a stale index, even if `find` filters it out.
     let stale = e
-        .get_state("docidx:orders:estado:abierto")
-        .map(|item| {
-            item.value.as_json().unwrap()["ids"]
-                .as_array()
-                .unwrap()
-                .len()
-        })
-        .unwrap_or(0);
+        .list_state_range(
+            Some("docidx:orders:estado:abierto\0"),
+            Some("docidx:orders:estado:abierto\u{1}"),
+            usize::MAX,
+        )
+        .len();
     assert_eq!(
         stale,
         THREADS * DOCS / 2,
@@ -384,6 +382,60 @@ fn startup_migration_rebuilds_stale_document_indexes() {
     assert!(e.get_state("docidx:orders:estado:cerrado").is_none());
     // Once per index version.
     assert_eq!(luma::docstore::migrate_indexes(&e).unwrap(), 0);
+}
+
+/// A document write costs the same with 3 or 3 000 documents sharing a value.
+/// The index used to keep one id list per value and rewrite it whole on every
+/// write: in the 72 h soak, 20 000 tiny documents left ~300 MB of WAL.
+#[test]
+fn document_index_write_does_not_grow_with_the_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(dir.path());
+    for i in 0..3000 {
+        luma::docstore::put_doc(
+            &e,
+            "orders",
+            &format!("d{i}"),
+            serde_json::json!({ "estado": "abierto" }),
+        )
+        .unwrap();
+    }
+    let entries = e.list_state_range(Some("docidx:"), Some("docidx;"), usize::MAX);
+    assert_eq!(entries.len(), 3000, "one index entry per document");
+    // The first document's entry was written once and never again.
+    assert!(entries.iter().all(|item| item.revision == 1));
+    let largest = entries
+        .iter()
+        .map(|item| serde_json::to_vec(&item.value.as_json()).unwrap().len())
+        .max()
+        .unwrap();
+    assert!(
+        largest < 16,
+        "an index entry must not carry an id list ({largest} bytes)"
+    );
+}
+
+/// Without an index (a numeric filter) `find` must look at the whole
+/// collection, not only its first `limit × 4` documents.
+#[test]
+fn find_without_index_reaches_late_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(dir.path());
+    for i in 0..200 {
+        luma::docstore::put_doc(
+            &e,
+            "orders",
+            &format!("d{i:03}"),
+            serde_json::json!({ "n": i }),
+        )
+        .unwrap();
+    }
+    let found =
+        luma::docstore::find_docs(&e, "orders", Some(&serde_json::json!({ "n": 199 })), 1).unwrap();
+    assert_eq!(
+        found.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+        ["d199"]
+    );
 }
 
 /// Write skew, the anomaly snapshot isolation lets through: two doctors on
