@@ -76,4 +76,6 @@ jobs:
         run: chmod +x bin/luma && CYCLES=10 bash scripts/sysrq/run.sh bin/luma
       - name: VM console on failure
         if: failure()
-        run: tail -60 /tmp/sysrq/console.log || true
+        run: |
+          grep -nE "Linux version|reboot|panic|Oops|BUG:|sysrq|watchdog" /tmp/sysrq/console.log | tail -40 || true
+          tail -40 /tmp/sysrq/console.log || true

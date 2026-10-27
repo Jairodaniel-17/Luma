@@ -87,7 +87,12 @@ MAX_DOC_FIND=1000000
 SNAPSHOT_INTERVAL_SECS=3
 ENV
     systemctl daemon-reload
-    systemctl enable --now luma"
+    systemctl enable --now luma
+    sync"
+# Before any cut the VM must have booted exactly once: a reboot nobody asked
+# for here (a guest panic) would pass for a result of the test.
+boots=$(vm "journalctl --list-boots --no-pager | tail -n +2 | wc -l")
+[ "$boots" = 1 ] || { echo "the VM rebooted on its own ($boots boots) before the test"; exit 1; }
 log "reboots"
 
 for cycle in $(seq "$CYCLES"); do
