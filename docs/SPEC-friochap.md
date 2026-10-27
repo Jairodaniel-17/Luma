@@ -33,7 +33,7 @@ Esa es la razón de la separación, no una desconfianza en Luma.
 | Criterio | Estado | Evidencia |
 |---|---|---|
 | CA-1 · 1 000 cortes con LazyFS | cumplido: 1 115 cortes, 0 pérdidas (533 en local, 582 en GitHub) | `scripts/apagon/`; 200 por noche en `nightly-resilience.yml` |
-| CA-2 · 50 `sysrq` | cumplido en x86 con KVM y en **arm64**: 50 + 50 reinicios reales, 0 pérdidas. arm64: Debian 13 en una VM Graviton (AWS t4g.small, disco EBS) con la unidad de producción, ~21 600 claves/blobs/docs y ~3 700 mensajes verificados. Queda repetirlo en la A1 de producción antes de abrirla (mismo script con `HOST=`) | `scripts/sysrq/run.sh` (`HOST=` reinicia una máquina existente), `sysrq.yml` (semanal); `test-arm64` en CI |
+| CA-2 · 50 `sysrq` | **cumplido en la A1 de producción**: 27/10, 50 reinicios reales en `friochap` (VM.Standard.A1.Flex de 2 OCPU y 12 GB, Toronto, Debian 13, unidad de producción y el binario actual de main): ~30 600 claves/blobs/docs y ~5 150 mensajes verificados, 0 pérdidas. Antes: 50 en x86 con KVM y 50 en arm64 en AWS t4g.small, también 0 | `scripts/sysrq/run.sh` (`HOST=` reinicia una máquina existente), `sysrq.yml` (semanal); `test-arm64` en CI |
 | CA-3 · disco lleno | cumplido | `tests/disk_full.rs` en ext4 de 64 MB (`scripts/disk_full.sh`): 507, lecturas 200, recuperación sola, todo sobrevive al reinicio |
 | CA-4 · EIO en fsync | cumplido | `tests/fsync_eio.rs` con `dm-error` (`scripts/fsync_eio.sh`): falla la escritura, solo lectura en `/v1/health/ready` aunque el disco vuelva |
 | CA-5 · watchdog | cumplido | `scripts/watchdog_check.py`: `READY` tras el bind, latidos que se cortan con el proceso congelado, `STOPPING` y salida en 1 s |
