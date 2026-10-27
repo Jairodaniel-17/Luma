@@ -51,7 +51,9 @@ que no llegó a disco, se reinicia y se cuentan las confirmadas que faltan. 15 c
 | **Luma** | 118 475 | **0** |
 | Redis 7, `appendfsync always` | 133 882 | 0 |
 | PostgreSQL, `synchronous_commit=on` | 133 239 | 0 |
+| SQLite (WAL), `synchronous=FULL` | 54 739 | 0 |
 | Redis 7, `appendfsync everysec` | 251 380 | 40 808 |
 | PostgreSQL, `synchronous_commit=off` | 154 443 | 7 943 |
+| SQLite (WAL), `synchronous=NORMAL` | 65 236 | 2 828 |
 
-Las dos últimas son el control: no prometen durabilidad, y que pierdan muestra que el corte llega hasta lo no escrito.
+Las tres últimas son el control: no prometen durabilidad, y que pierdan muestra que el corte llega hasta lo no escrito.
