@@ -1,0 +1,5 @@
+# `cargo update` picks versions that build with `rust-version` (1.88), not the
+# newest: in October 2026 it pulled uuid 1.29 and crc-fast 1.10, which need
+# 1.89, and the MSRV job went red.
+[resolver]
+incompatible-rust-versions = "fallback"

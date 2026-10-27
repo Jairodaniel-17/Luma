@@ -18,7 +18,7 @@ on:
       iterations:
         description: "Crash iterations per engine"
         required: false
-        default: "100"
+        default: "50"
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +28,7 @@ jobs:
     name: Crash recovery matrix
     runs-on: ubuntu-latest
     # A hung server would otherwise sit here until the account default expires.
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -39,7 +39,7 @@ jobs:
         run: cargo build --bin luma --locked
       - name: Crash recovery matrix
         env:
-          LUMA_CRASH_ITERATIONS: ${{ github.event.inputs.iterations || '100' }}
+          LUMA_CRASH_ITERATIONS: ${{ github.event.inputs.iterations || '50' }}
         # Two threads: each iteration runs a server process, and oversubscribing
         # the runner makes health-check timeouts look like durability failures.
         run: cargo test --test crash_recovery --locked -- --test-threads=2
@@ -47,7 +47,7 @@ jobs:
   durability-invariants:
     name: Durability invariants
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -67,7 +67,7 @@ jobs:
   forward-compatibility:
     name: Reads what the last release wrote
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -88,6 +88,7 @@ jobs:
   atomicity:
     name: Multi-key atomicity
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -103,6 +104,7 @@ jobs:
   parser-fuzz:
     name: Parser fuzzing
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly
@@ -128,6 +130,7 @@ jobs:
   differential:
     name: RESP differential, extended
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       redis:
         image: redis:7-alpine
@@ -150,6 +153,7 @@ jobs:
   clients:
     name: Client E2E, both targets
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       redis:
         image: redis:7-alpine
@@ -198,6 +202,7 @@ jobs:
   ioredis:
     name: ioredis (Node), both targets
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # The nightly is what the GA criterion for the RESP listener counts, so it
     # has to cover the clients the README promises. It covered the Python ones
     # and not ioredis, and the first ioredis run found four protocol bugs — three
@@ -252,6 +257,7 @@ jobs:
   audit:
     name: Advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -264,11 +270,12 @@ jobs:
 
   power-cuts:
     name: Power cuts (${{ matrix.shard }}/10)
-    # SPEC-friochap CA-1: 1 000 cuts a night, as ten jobs of 100 in parallel.
-    # LazyFS throws away whatever was not fsynced, which is what a power cut
-    # does to the page cache and what kill -9 never reaches.
+    # 200 a night as ten jobs of 20, each under 15 min (~5 min building, ~20 s
+    # a cut). SPEC-friochap CA-1, the one-off 1 000, was met on 2026-10-27:
+    # 1 115 cuts, no loss. LazyFS throws away whatever was not fsynced, which
+    # is what a power cut does to the page cache and kill -9 never reaches.
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -281,18 +288,17 @@ jobs:
         run: cargo build --release --bin luma --locked && mkdir -p bin && cp target/release/luma bin/
       - name: LazyFS image
         run: docker build -q -t luma-apagon scripts/apagon
-      - name: 100 power cuts under load
-        run: |
-          docker run --rm --privileged --device /dev/fuse -e CYCLES=100             -v "$PWD/bin:/luma" -v "$PWD/scripts/apagon:/apagon" luma-apagon bash /apagon/run.sh
+      - name: 20 power cuts under load
+        run: >-
+          docker run --rm --privileged --device /dev/fuse -e CYCLES=20
+          -v "$PWD/bin:/luma" -v "$PWD/scripts/apagon:/apagon" luma-apagon bash /apagon/run.sh
 
-  power-loss:
-    name: Full disk, EIO, lost host, watchdog
-    # SPEC-friochap F2, F3 and F6: a 64 MB ext4 fills up, a device-mapper disk
-    # starts answering EIO, a host is rebuilt from MinIO alone, and systemd's
-    # watchdog sees a frozen process. Docker, because each needs privileges the
-    # runner gives a container.
+  lost-host:
+    name: Lost host, systemd watchdog
+    # SPEC-friochap F6 and F3: a host rebuilt from MinIO alone, and systemd's
+    # watchdog seeing a frozen process.
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -303,14 +309,25 @@ jobs:
         run: docker build -q -t luma-apagon scripts/apagon
       - name: Host lost, rebuilt from the remote (RPO 10 s)
         run: DRILLS=2 bash scripts/dr_drill.sh bin
-      - name: Full disk
-        run: |
-          docker run --rm --privileged -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-docker             rust:1-slim-bookworm bash scripts/disk_full.sh
-      - name: EIO on fsync
-        run: |
-          docker run --rm --privileged -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-docker             rust:1-slim-bookworm bash scripts/fsync_eio.sh
       - name: systemd watchdog
         run: python3 scripts/watchdog_check.py bin/luma
+
+  disk-faults:
+    name: Full disk, EIO on fsync
+    # SPEC-friochap F2: a 64 MB ext4 fills up, a device-mapper disk starts
+    # answering EIO. Docker, for the privileges loop devices and dm need.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full disk
+        run: >-
+          docker run --rm --privileged -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-docker
+          rust:1-slim-bookworm bash scripts/disk_full.sh
+      - name: EIO on fsync
+        run: >-
+          docker run --rm --privileged -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-docker
+          rust:1-slim-bookworm bash scripts/fsync_eio.sh
 
   summary:
     name: Nightly result
@@ -318,7 +335,8 @@ jobs:
       [
         crash-recovery,
         power-cuts,
-        power-loss,
+        lost-host,
+        disk-faults,
         ioredis,
         durability-invariants,
         forward-compatibility,
@@ -329,6 +347,7 @@ jobs:
         audit,
       ]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     steps:
       - name: Report

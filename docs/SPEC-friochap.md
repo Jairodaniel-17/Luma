@@ -32,7 +32,7 @@ Esa es la razón de la separación, no una desconfianza en Luma.
 
 | Criterio | Estado | Evidencia |
 |---|---|---|
-| CA-1 · 1 000 cortes con LazyFS | en curso, 0 pérdidas hasta ahora | `scripts/apagon/` (100 por noche en `nightly-resilience.yml`) |
+| CA-1 · 1 000 cortes con LazyFS | cumplido: 1 115 cortes, 0 pérdidas (533 en local, 582 en GitHub) | `scripts/apagon/`; 200 por noche en `nightly-resilience.yml` |
 | CA-2 · 50 `sysrq` en arm64 | **falta**: necesita una VM arm64 desechable | — |
 | CA-3 · disco lleno | cumplido | `tests/disk_full.rs` en ext4 de 64 MB (`scripts/disk_full.sh`): 507, lecturas 200, recuperación sola, todo sobrevive al reinicio |
 | CA-4 · EIO en fsync | cumplido | `tests/fsync_eio.rs` con `dm-error` (`scripts/fsync_eio.sh`): falla la escritura, solo lectura en `/v1/health/ready` aunque el disco vuelva |
