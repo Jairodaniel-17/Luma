@@ -1,0 +1,57 @@
+name: Reboots without sync (arm64)
+
+# SPEC-friochap CA-2: 50 real `echo b > /proc/sysrq-trigger` reboots under
+# load, in a Debian 13 arm64 VM with Luma under the production unit, and not a
+# single confirmed write lost. One build, then five VMs of ten reboots, each
+# job under 15 minutes. See scripts/sysrq/run.sh.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Sundays 04:41 UTC: weekly is enough for the kernel path, the nightly
+    # LazyFS cuts cover the engine every day.
+    - cron: "41 4 * * 0"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bin luma --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luma-arm64
+          path: target/release/luma
+          retention-days: 1
+
+  reboots:
+    name: sysrq reboots (${{ matrix.vm }}/5)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        vm: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: luma-arm64
+          path: bin
+      - name: QEMU and cloud-init tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm qemu-efi-aarch64 qemu-utils cloud-image-utils >/dev/null
+      - name: 10 reboots under load
+        run: chmod +x bin/luma && CYCLES=10 bash scripts/sysrq/run.sh bin/luma
+      - name: VM console on failure
+        if: failure()
+        run: tail -60 /tmp/sysrq/console.log || true

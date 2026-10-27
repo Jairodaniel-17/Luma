@@ -7,6 +7,11 @@ on:
     branches: [ "main", "master" ]
   # By hand too, to check a commit without pushing another.
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Run only these jobs, comma-separated ids (e.g. test-arm64). Empty runs all."
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +19,7 @@ env:
 jobs:
   fmt:
     name: Rustfmt
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',fmt,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -28,6 +34,7 @@ jobs:
 
   clippy:
     name: Clippy
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',clippy,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -52,6 +59,7 @@ jobs:
 
   test:
     name: Test
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',test,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -64,8 +72,25 @@ jobs:
       - name: Run tests
         run: cargo test --verbose --locked
 
+  test-arm64:
+    name: Test (arm64)
+    # Friochap runs on an Ampere A1. arm64 orders memory more weakly than x86,
+    # so a missing barrier in the engine's locks and atomics can pass every
+    # test on x86 and lose writes here: the concurrency tests have to run on
+    # the architecture that ships.
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',test-arm64,') }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --locked
+
   msrv:
     name: MSRV (1.88)
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',msrv,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -78,6 +103,7 @@ jobs:
 
   deny:
     name: Dependency Audit (cargo-deny)
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',deny,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -90,6 +116,7 @@ jobs:
 
   audit:
     name: Security Audit (cargo-audit)
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',audit,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -102,6 +129,7 @@ jobs:
 
   bench-compile:
     name: Bench Compilation Check
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',bench-compile,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -114,6 +142,7 @@ jobs:
 
   redis-differential:
     name: RESP Differential vs Redis 7
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',redis-differential,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -143,6 +172,7 @@ jobs:
         run: cargo test --test redis_differential --locked -- --ignored
   client-e2e:
     name: Celery / arq / redis-py E2E
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',client-e2e,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The adoption milestone of docs/PLAN-MAESTRO.md (F3.4). Everything else
@@ -201,6 +231,7 @@ jobs:
         run: cat luma.log
   ioredis-e2e:
     name: ioredis (Node) against Redis 7 and Luma
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',ioredis-e2e,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The README promises ioredis works and nothing had ever run it. The first
@@ -248,6 +279,7 @@ jobs:
 
   s3-e2e:
     name: S3 API against boto3
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',s3-e2e,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # W3.2. This suite existed and was never wired into CI, which is how a
@@ -320,6 +352,7 @@ jobs:
 
   ivf-recall:
     name: IVF recall at 1M vectors
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',ivf-recall,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -339,6 +372,7 @@ jobs:
 
   admin-ui:
     name: Admin panel is in sync
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',admin-ui,') }}
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
@@ -373,7 +407,7 @@ jobs:
           echo 'the committed bundle matches the source'
   all-checks:
     name: All Checks Passed
-    needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, s3-e2e, ioredis-e2e, ivf-recall, admin-ui]
+    needs: [fmt, clippy, test, test-arm64, msrv, deny, audit, bench-compile, redis-differential, client-e2e, s3-e2e, ioredis-e2e, ivf-recall, admin-ui]
     runs-on: ubuntu-latest
     # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
     timeout-minutes: 15
