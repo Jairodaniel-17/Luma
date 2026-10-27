@@ -37,9 +37,9 @@ Esa es la razón de la separación, no una desconfianza en Luma.
 | CA-3 · disco lleno | cumplido | `tests/disk_full.rs` en ext4 de 64 MB (`scripts/disk_full.sh`): 507, lecturas 200, recuperación sola, todo sobrevive al reinicio |
 | CA-4 · EIO en fsync | cumplido | `tests/fsync_eio.rs` con `dm-error` (`scripts/fsync_eio.sh`): falla la escritura, solo lectura en `/v1/health/ready` aunque el disco vuelva |
 | CA-5 · watchdog | cumplido | `scripts/watchdog_check.py`: `READY` tras el bind, latidos que se cortan con el proceso congelado, `STOPPING` y salida en 1 s |
-| CA-6 · RSS y `MemoryMax` | **falta la carga real de Friochap**; pico con la carga sintética anotado por `scripts/apagon/dr.sh` | — |
+| CA-6 · RSS y `MemoryMax` | **falta la carga real de Friochap**; con la carga sintética el pico fue de 60–250 MB (`scripts/apagon/dr.sh`) | — |
 | CA-7 · actualizar con carga | cumplido | v4.26.0 → nueva bajo carga, 10 ciclos sin pérdidas; `tests/golden_data_dir.rs` lee un `data_dir` grabado por v4.26.0 |
-| CA-8 · otra máquina desde el remoto | cumplido con MinIO; falta repetirlo contra R2 en la VM | `scripts/dr_drill.sh`: 0 fallas, todo lo confirmado hasta 2,5–4,4 s antes del corte está (promesa: 10 s); RTO 6–12 s |
+| CA-8 · otra máquina desde el remoto | cumplido con MinIO; falta repetirlo contra R2 en la VM | `scripts/dr_drill.sh`: 0 fallas, todo lo confirmado hasta 2,5–7,9 s antes del corte está (promesa: 10 s); RTO 2–16 s (16 s con ~27 600 objetos en GitHub) |
 | CA-9 · rodaje de 72 h | **falta** (semana del 16/11) | — |
 
 Corregido en el camino, con pérdida o corrupción de datos de por medio:
