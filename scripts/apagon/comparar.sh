@@ -23,6 +23,7 @@ WORK=/var/apagon
 JOURNAL=$WORK/journal-$ENGINE.log
 
 mkdir -p "$ROOT" "$MNT" "$WORK"
+chmod 777 "$WORK"  # pg_ctl writes its log here as the postgres user
 : > "$JOURNAL"
 cat > /tmp/lazyfs.toml <<EOF
 [faults]
@@ -75,7 +76,7 @@ start() {
             su postgres -c "$PG/initdb -D $MNT/pg --auth=trust" >>"$WORK/engine.log" 2>&1
             FIRST=1
         fi
-        su postgres -c "$PG/pg_ctl -D $MNT/pg -l $WORK/engine.log -w \
+        su postgres -c "$PG/pg_ctl -D $MNT/pg -l $WORK/pg.log -w \
             -o '-p 5433 -k /tmp -c synchronous_commit=${ENGINE#pg-}' start" >/dev/null
         PID=$(head -1 "$MNT/pg/postmaster.pid")
         if [ "${FIRST:-}" = 1 ]; then
