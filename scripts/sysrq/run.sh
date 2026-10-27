@@ -1,8 +1,11 @@
 #!/bin/bash
-# Real reboots without flushing (SPEC-friochap CA-2), in an arm64 VM.
+# Real reboots without flushing (SPEC-friochap CA-2), in a VM of the host's
+# architecture: arm64 on an Ampere A1 (what CA-2 asks for), x86_64 on GitHub's
+# runners, the only hosted ones with KVM (without it QEMU emulates, and not
+# even one boot fits in a 15 min job).
 #
 # LazyFS (scripts/apagon) simulates a lost page cache; this one loses it for
-# real: a Debian 13 arm64 VM under QEMU, Luma installed with the production
+# real: a Debian 13 VM under QEMU, Luma installed with the production
 # unit (deploy/luma.service), load from several threads, and then
 # `echo b > /proc/sysrq-trigger`: the kernel reboots on the spot, without
 # syncing or unmounting anything. After the reboot systemd starts Luma, and
@@ -11,7 +14,7 @@
 # The disk is cache=none: what the guest did not flush is gone, what it did
 # reached the host disk, as with a real drive that honours flushes.
 #
-#   run.sh <linux arm64 luma binary>      (on an arm64 Linux host, KVM if any)
+#   run.sh <luma binary for this host's architecture>      (Linux host with KVM)
 set -euo pipefail
 
 LUMA=$(realpath "$1")
@@ -20,25 +23,27 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=${WORK:-/tmp/sysrq}
 mkdir -p "$W" && cd "$W"
 
-if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; ACCEL=(-enable-kvm -cpu host); else
-    echo "no KVM: emulated, slow"; ACCEL=(-cpu max); fi
+[ -e /dev/kvm ] || { echo "no /dev/kvm: emulated reboots are too slow to be worth it"; exit 1; }
+sudo chmod 666 /dev/kvm
+case $(uname -m) in
+    aarch64) IMG=arm64 QEMU=(qemu-system-aarch64 -M virt -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd) ;;
+    x86_64) IMG=amd64 QEMU=(qemu-system-x86_64 -M q35) ;;
+    *) echo "unsupported host $(uname -m)"; exit 1 ;;
+esac
 
 [ -f base.qcow2 ] || curl -sfL -o base.qcow2 \
-    https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2
+    "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-$IMG.qcow2"
 rm -f disk.qcow2 key key.pub
 qemu-img create -q -f qcow2 -F qcow2 -b base.qcow2 disk.qcow2 8G
 ssh-keygen -q -t ed25519 -N '' -f key
 cat > user-data <<CFG
 #cloud-config
 disable_root: false
-users:
-  - name: root
-    ssh_authorized_keys: ["$(cat key.pub)"]
+ssh_authorized_keys: ["$(cat key.pub)"]
 CFG
 cloud-localds seed.img user-data
 
-qemu-system-aarch64 -M virt "${ACCEL[@]}" -m 2048 -smp 2 \
-    -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+"${QEMU[@]}" -enable-kvm -cpu host -m 2048 -smp 2 \
     -drive if=virtio,file=disk.qcow2,cache=none,discard=unmap \
     -drive if=virtio,file=seed.img,format=raw \
     -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 \

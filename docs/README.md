@@ -47,6 +47,7 @@ Cómo está hecho por dentro.
 |---|---|
 | [Arquitectura](referencia/ARCHITECTURE.md) | Los subsistemas y cómo encajan |
 | [Modelos de datos](referencia/DATA_MODELS.md) | Qué se guarda y con qué forma |
+| [Garantías por motor](referencia/GARANTIAS.md) | Qué es atómico, aislado y durable en cada motor, y con qué se compara |
 | [Almacenamiento vectorial](referencia/VECTOR_STORAGE.md) | Segmentos, índices, y el formato en disco |
 | [Benchmarks](referencia/BENCHMARKS.md) · [cómo medirlos](referencia/BENCH.md) | Números, y cómo reproducirlos |
 | [Changelog](referencia/CHANGELOG.md) | Qué cambió y cuándo |
