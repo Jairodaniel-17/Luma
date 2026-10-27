@@ -15,6 +15,8 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -27,6 +29,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       # Pinned, unlike every other job here, and that is the point. `-D warnings`
@@ -49,6 +53,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -61,6 +67,8 @@ jobs:
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install MSRV toolchain
@@ -71,6 +79,8 @@ jobs:
   deny:
     name: Dependency Audit (cargo-deny)
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install cargo-deny
@@ -81,6 +91,8 @@ jobs:
   audit:
     name: Security Audit (cargo-audit)
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install cargo-audit
@@ -91,6 +103,8 @@ jobs:
   bench-compile:
     name: Bench Compilation Check
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
@@ -101,6 +115,8 @@ jobs:
   redis-differential:
     name: RESP Differential vs Redis 7
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     # `docs/SPEC-resp.md` names a real Redis the source of truth for RESP
     # semantics, not our own tests. The first run of this suite found 13
     # divergences the in-tree tests could not catch, because they encoded the
@@ -128,6 +144,7 @@ jobs:
   client-e2e:
     name: Celery / arq / redis-py E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # The adoption milestone of docs/PLAN-MAESTRO.md (F3.4). Everything else
     # verifies RESP against tests we wrote, which encode our understanding of
     # Redis; this runs the libraries a user would actually install. Its first
@@ -185,6 +202,7 @@ jobs:
   ioredis-e2e:
     name: ioredis (Node) against Redis 7 and Luma
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # The README promises ioredis works and nothing had ever run it. The first
     # run found three protocol bugs the 327-command differential could not see:
     # `HELLO` ignored its own AUTH clause, its reply was a RESP3 map on a RESP2
@@ -231,6 +249,7 @@ jobs:
   s3-e2e:
     name: S3 API against boto3
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # W3.2. This suite existed and was never wired into CI, which is how a
     # check that passed *with the bug still present* went unnoticed: boto3
     # declined to send a chunk-framed body, so the test exercised nothing.
@@ -302,6 +321,8 @@ jobs:
   ivf-recall:
     name: IVF recall at 1M vectors
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     # This suite is behind the `ivf_stress_tests` feature, and the `test` job
     # runs `cargo test --locked` without `--all-features`. So it never ran here,
     # and a recall bug that emptied the top-5 after a retrain sat undetected: the
@@ -319,6 +340,8 @@ jobs:
   admin-ui:
     name: Admin panel is in sync
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     # `ui/dist` is committed and embedded into the binary with rust-embed, so
     # the panel a user sees is the *built* output, not the source. Editing
     # `admin-ui/src` and forgetting to rebuild changes nothing at runtime and
@@ -352,6 +375,8 @@ jobs:
     name: All Checks Passed
     needs: [fmt, clippy, test, msrv, deny, audit, bench-compile, redis-differential, client-e2e, s3-e2e, ioredis-e2e, ivf-recall, admin-ui]
     runs-on: ubuntu-latest
+    # Past 15 min something is stuck; GitHub would otherwise wait 6 h.
+    timeout-minutes: 15
     if: always()
     steps:
       - name: Verify all jobs passed
