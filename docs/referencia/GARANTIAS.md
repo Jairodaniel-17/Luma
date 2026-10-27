@@ -73,3 +73,7 @@ fault address»). Se midió con reinicios reales: `scripts/sysrq/etcd.sh`, la mi
 
 El control también vale para los 50 reinicios de Luma en arm64 de arriba: en esa máquina, un reinicio real sí borra
 lo que no se sincronizó.
+
+## Rodaje con cortes, borrados y reinicios (27/10/2026)
+
+Carga sin pausa sobre KV, blobs, colas, vectores y documentos; `kill -9` cada minuto (cada cuarto ciclo, apagado limpio) y verificación de todo lo confirmado tras cada corte; cada ciclo borra lo de tres ciclos atrás y, tras el corte siguiente, comprueba que nada borrado volvió. 45 min, 33 ciclos: **439 212 operaciones confirmadas, 0 perdidas, 0 respuestas 5xx, 274 711 borrados sin una sola resurrección**. Un encolado en vuelo en el instante del corte puede quedar sin haberse confirmado, como en cualquier motor: eso no es una pérdida y el control lo acepta. RSS pico 112 MB con tope de 1 GB. Detalle en `docs/SPEC-friochap.md`, CA-9.
