@@ -15,14 +15,22 @@
 # reached the host disk, as with a real drive that honours flushes.
 #
 #   run.sh <luma binary for this host's architecture>      (Linux host with KVM)
+#   HOST=<ip> KEY=<ssh key> run.sh <luma binary for that machine>
+#
+# With HOST it reboots that machine instead (a throwaway cloud VM you can SSH
+# into as root): what CA-2 asks for on an A1, or on any arm64 VM without KVM.
 set -euo pipefail
 
 LUMA=$(realpath "$1")
+[ -z "${KEY:-}" ] || KEY=$(realpath "$KEY")
 CYCLES=${CYCLES:-10}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=${WORK:-/tmp/sysrq}
 mkdir -p "$W" && cd "$W"
 
+log() { echo "$(date +%T) $*"; }
+
+if [ -z "${HOST:-}" ]; then
 [ -e /dev/kvm ] || { echo "no /dev/kvm: emulated reboots are too slow to be worth it"; exit 1; }
 sudo chmod 666 /dev/kvm
 case $(uname -m) in
@@ -30,8 +38,6 @@ case $(uname -m) in
     x86_64) IMG=amd64 QEMU=(qemu-system-x86_64 -M q35) ;;
     *) echo "unsupported host $(uname -m)"; exit 1 ;;
 esac
-
-log() { echo "$(date +%T) $*"; }
 
 log "image"
 [ -f base.qcow2 ] || curl -sfL -o base.qcow2 \
@@ -51,13 +57,15 @@ cloud-localds seed.img user-data
     -drive if=virtio,file=seed.img,format=raw \
     -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 \
     -display none -serial file:console.log -daemonize
+fi
 
-SSH=(ssh -i key -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-     -o ConnectTimeout=5 -o LogLevel=ERROR root@127.0.0.1)
+KEY=${KEY:-key} PORT=${HOST:+22} PORT=${PORT:-2222} HOST=${HOST:-127.0.0.1}
+SSH=(ssh -i "$KEY" -p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+     -o ConnectTimeout=5 -o LogLevel=ERROR "root@$HOST")
 vm() { "${SSH[@]}" "$@"; }
 wait_ssh() {
     for _ in $(seq 120); do vm true 2>/dev/null && return 0; sleep 2; done
-    echo "the VM did not come back"; tail -30 console.log; exit 1
+    echo "the VM did not come back"; tail -30 console.log 2>/dev/null; exit 1
 }
 
 log "booting the VM"
@@ -66,13 +74,13 @@ log "installing Luma"
 # Throwaway secrets for a throwaway VM: Luma refuses weak ones.
 KEYS="LUMA_API_KEY=sysrq-harness-key-0123456789abcdef"  # gitleaks:allow (test only)
 MASTER="LUMA_MASTER_KEY=sysrq-harness-master-0123456789abcdef"  # gitleaks:allow (test only)
-scp -q -i key -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+scp -q -i "$KEY" -P "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
     "$LUMA" "$REPO/deploy/luma.service" "$REPO/scripts/apagon/carga.py" "$REPO/scripts/sysrq/ready.py" \
-    root@127.0.0.1:/root/
+    "root@$HOST:/root/"
 vm "set -e
     install -m 755 /root/luma /usr/local/bin/luma
     install -m 644 /root/luma.service /etc/systemd/system/luma.service
-    useradd --system --home /var/lib/luma luma
+    id luma >/dev/null 2>&1 || useradd --system --home /var/lib/luma luma
     install -d -o luma -g luma /var/lib/luma
     mkdir -p /etc/luma
     cat > /etc/luma/luma.env <<ENV
