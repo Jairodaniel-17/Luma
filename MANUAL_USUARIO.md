@@ -1,6 +1,6 @@
 # Manual de usuario de Luma
 
-Para la versión **v4.26.0**. Todo lo que hay aquí está verificado contra el
+Para la versión **v4.27.0** (estable). Todo lo que hay aquí está verificado contra el
 código de esa versión, no contra la memoria de cómo funcionaba antes.
 
 Este manual es el que se lee **antes** de poner Luma en producción: qué es, qué
@@ -159,7 +159,7 @@ docker run -p 1234:1234 -v luma-data:/data \
   -e DATA_DIR=/data \
   -e LUMA_API_KEY="$(openssl rand -hex 24)" \
   -e LUMA_MASTER_KEY="$(openssl rand -hex 32)" \
-  ghcr.io/jairodaniel-17/luma:v4.26.0
+  ghcr.io/jairodaniel-17/luma:v4.27.0
 ```
 
 **El volumen no es opcional.** Sin `-v`, el `data_dir` vive en la capa efímera

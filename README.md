@@ -1,14 +1,14 @@
 <!-- RustKissVDB: el motor de datos convergente en Rust que impulsa Luma (búsqueda vectorial + KV + SQL + eventos en un solo binario). -->
 # Luma: La Plataforma de Datos Convergente
 
-[![CI](https://github.com/Jairodaniel-17/rust-kiss-vdb/actions/workflows/ci.yml/badge.svg)](https://github.com/Jairodaniel-17/rust-kiss-vdb/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/tag/Jairodaniel-17/rust-kiss-vdb?label=release&sort=semver)](https://github.com/Jairodaniel-17/rust-kiss-vdb/releases)
+[![CI](https://github.com/Jairodaniel-17/Luma/actions/workflows/ci.yml/badge.svg)](https://github.com/Jairodaniel-17/Luma/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/Jairodaniel-17/Luma?label=release&sort=semver)](https://github.com/Jairodaniel-17/Luma/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![Python SDK](https://img.shields.io/badge/python-luma--vdb-3775A9.svg)](sdk/)
 [![TS SDK](https://img.shields.io/badge/npm-luma--vdb-CB3837.svg)](sdk/typescript/)
 
-**Luma** (crate Cargo `luma`, versión **4.24.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
+**Luma** (crate Cargo `luma`, versión **4.27.0**, *powered by RustKissVDB*) no es solo una base de datos vectorial. Es un **Motor de Datos Convergente** escrito en **Rust** que unifica, en un **único binario** (`luma`), las primitivas que necesita una aplicación de IA moderna:
 
 - **Búsqueda vectorial** (ANN) con índices conmutables HNSW / IVF-FLAT-Q8 / DiskANN.
 - **Estado clave-valor** (KV) con TTL, compare-and-swap e índices.
@@ -26,8 +26,35 @@ Todo corre en un mismo proceso, eliminando la latencia de red entre subsistemas 
 
 ---
 
+<a id="estable"></a>
+
+## ✅ Versión estable: 4.27.0
+
+Desde la **4.27.0** Luma es **estable**: se puede usar para guardar datos de producción. En concreto, se validó como
+cola, caché, KV y almacén de documentos del ERP de Friochap. «Estable» aquí significa algo medible: cada garantía
+tiene una prueba que la sostiene, en CI o en máquinas reales, y **lo que no está en
+[`GARANTIAS.md`](docs/referencia/GARANTIAS.md) no se promete**.
+
+| Qué se probó | Cómo | Resultado |
+|---|---|---|
+| Corte de luz (se pierde lo que no llegó a disco) | LazyFS: 1 115 cortes, 200 cada noche en CI | **0** escrituras confirmadas perdidas |
+| El mismo corte contra otros motores | 15 cortes por motor, misma carga | Luma 122 014 / **0** · Redis `always` 65 571 / 0 · PostgreSQL `on` 118 901 / 0 · SQLite `FULL` 65 167 / 0. En su modo rápido pierden: Redis `everysec` 28 083, PostgreSQL `off` 8 396, SQLite `NORMAL` 2 761 |
+| Reinicio real del sistema, sin sincronizar | `echo b > /proc/sysrq-trigger` en Debian 13: 50 en x86, 50 en arm64, 50 en la A1 de producción | **0** pérdidas |
+| Rodaje con cortes, borrados y reinicios | `kill -9` cada minuto durante 45 min, tope de 1 GB | 439 212 operaciones, **0** perdidas, 0 errores 5xx, 274 711 borrados sin que vuelva ninguno, RSS pico 112 MB |
+| Confirmación en arm64 | AWS t4g.small con la unidad de producción, ciclos de 2 h | 71 926 elementos y 11 988 encolados verificados tras el corte, **0** fallos |
+| Host perdido | `scripts/dr_drill.sh` contra OCI Object Storage, cada noche | lo confirmado hasta 4,8–4,9 s antes está en la máquina nueva, lista en 27–28 s |
+| Transacciones | `POST /v1/state/txn`, 200 rondas concurrentes | todo o nada, también tras reiniciar; serializable con `check` |
+
+Cada motor dice qué garantiza y con qué se compara (KV ≈ etcd, documentos ≈ MongoDB, colas ≈ SQS, blobs ≈ S3,
+RESP ≈ Redis 7) en [`GARANTIAS.md`](docs/referencia/GARANTIAS.md). Lo que **no** hay, a propósito: transacciones que
+abarquen varios motores a la vez (una clave, un blob y un mensaje en un mismo `COMMIT`); para eso, una base
+relacional. Qué cambió para llegar aquí: [`CHANGELOG.md`](docs/referencia/CHANGELOG.md).
+
+---
+
 ## Índice
 
+- [Versión estable](#estable)
 - [Instalación](#instalacion)
 - [Quickstart en 60 segundos](#quickstart)
 - [SDKs oficiales](#sdks)
@@ -55,15 +82,15 @@ Todo corre en un mismo proceso, eliminando la latencia de red entre subsistemas 
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/Jairodaniel-17/rust-kiss-vdb/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Jairodaniel-17/Luma/main/install.sh | bash
 
 # Versión concreta o destino alternativo
-curl -fsSL .../install.sh | bash -s -- --version v4.24.0 --dest ~/.local/bin
+curl -fsSL .../install.sh | bash -s -- --version v4.27.0 --dest ~/.local/bin
 ```
 
 ```powershell
 # Windows
-irm https://raw.githubusercontent.com/Jairodaniel-17/rust-kiss-vdb/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Jairodaniel-17/Luma/main/install.ps1 | iex
 ```
 
 Los scripts descargan el binario del release de GitHub para tu plataforma (Linux, Windows, macOS) y lo colocan en el `PATH`.
@@ -514,7 +541,7 @@ backups/<timestamp>/           # Respaldos (VACUUM INTO + snapshot + WAL)
 
 ## ✅ Estado actual del proyecto
 
-Implementado y verificable en el código de hoy (crate `luma` v4.24.0):
+Implementado y verificable en el código de hoy (crate `luma` v4.27.0):
 
 - **Núcleo convergente**: motor vectorial (HNSW / IVF-FLAT-Q8 / DiskANN), KV con TTL/CAS, WAL segmentado + snapshots, SQLite embebido vía actor, bus de eventos SSE, hub RAG híbrido y motor de búsqueda de texto. Todo montado en el router y cubierto por `tests/`.
 - **Object storage, colas e imágenes**: primitivas tipo R2 + Queues + Images ya montadas en `/v1/blob`, `/v1/queue`, `/v1/image`.

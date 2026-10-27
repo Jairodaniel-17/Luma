@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## ✅ v4.27.0 — Versión estable
+
+Primera versión que se declara **estable**: lista para datos de producción. Cada garantía tiene una prueba que la
+sostiene, en CI o medida en máquinas reales, y lo que no está en
+[`GARANTIAS.md`](GARANTIAS.md) no se promete. Se hizo para el ERP de Friochap (cola, caché, KV y documentos), con
+los criterios de [`docs/SPEC-friochap.md`](../SPEC-friochap.md), todos cumplidos.
+
+### Datos que se perdían o se corrompían (corregido)
+
+- **Tras un arranque sin escrituras, todo lo nuevo se perdía**: si en 30 s nadie escribía, el snapshot guardaba
+  `last_offset: 0`, el siguiente arranque numeraba desde 1 y cada evento nuevo se descartaba como duplicado. PUT y
+  SET respondían bien; GET daba 404. Pasó en producción.
+- **Escrituras confirmadas perdidas bajo concurrencia**: borrados, lotes y vectores se adelantaban en el WAL a la
+  cola de group commit y la proyección saltaba sus offsets.
+- **CAS no atómico** y ABA en índices de documentos y `LMOVE`; `INCR`/`APPEND`/`SET NX`/`EXPIRE` atómicos y `EXEC`
+  aislado en RESP.
+- **Los respaldos perdían toda clave anterior al segmento de WAL más viejo**: ahora llevan `state.export.jsonl`,
+  leído de un instante consistente. Un blob o mensaje borrado durante la copia ya no tumba el respaldo.
+- **Colas**: lease aparte con fsync; acks y borrados de blobs/S3 durables.
+- **Segmentos de WAL vacíos que nunca se borraban** (17 931 archivos de 0 bytes en un servidor).
+
+### Nuevo
+
+- **Transacciones**: `POST /v1/state/txn`, todo o nada en un solo registro del WAL; con `check` sobre lo leído son
+  serializables (sin write skew).
+- **Índice de documentos con una clave por id**: escribir ya no reescribe la lista entera (RAM del rodaje de
+  370 MB a 39 MB); migración automática al arrancar.
+- **Recuperación ante desastre más rápida**: envío del WAL y descarga del respaldo en paralelo; máquina nueva lista
+  en 27–28 s contra OCI Object Storage real.
+- RESP: tres bugs de protocolo que impedían conectar a ioredis. S3: siete bugs, entre ellos cuerpos de más de 2 MiB
+  y `Range` ignorado.
+- 23 avisos de RUSTSEC resueltos.
+
+### Cómo se probó
+
+| Prueba | Resultado |
+|---|---|
+| Corte de luz con LazyFS (1 115 cortes; 200 cada noche) | 0 escrituras confirmadas perdidas |
+| El mismo corte contra Redis, PostgreSQL y SQLite (15 cortes cada uno) | Luma 122 014 confirmadas, 0 perdidas; los tres en su modo durable, 0; en su modo rápido pierden |
+| Reinicio real sin sincronizar (`sysrq`): 50 en x86, 50 en arm64, 50 en la A1 de producción | 0 pérdidas |
+| Rodaje: `kill -9` cada minuto, borrados y reinicios, 45 min | 439 212 operaciones, 0 perdidas, 0 errores 5xx, 274 711 borrados sin resurrección, RSS pico 112 MB |
+| Confirmación en arm64 (AWS), ciclos de 2 h | 71 926 elementos y 11 988 encolados verificados, 0 fallos |
+| Host perdido contra OCI (cada noche) | RPO 4,8–4,9 s |
+
+Detalle en [`GARANTIAS.md`](GARANTIAS.md).
+
 ## 🚀 v4.26.0 — Camino de escritura: 29× y la proyección KV sobre un LSM
 
 ### Rendimiento de escritura

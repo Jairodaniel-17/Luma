@@ -1,5 +1,10 @@
 # Dónde retomar
 
+> **27/10/2026 — v4.27.0, versión estable.** El endurecimiento para el ERP de Friochap (`docs/SPEC-friochap.md`,
+> F1–F7 y CA-1…CA-9) está terminado: todos los criterios cumplidos. Resultados en `docs/referencia/GARANTIAS.md` y
+> en el README («Versión estable»); cambios en `docs/referencia/CHANGELOG.md`. Lo de abajo es el estado de la sesión
+> anterior y queda como historia.
+
 Estado al cerrar la sesión del **2026-08-23**, sobre `v4.26.0` + los commits que
 vinieron después. Este documento existe para no tener que reconstruir el contexto
 leyendo el log de git.

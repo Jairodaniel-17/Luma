@@ -1,14 +1,14 @@
 <!-- RustKissVDB: the Rust convergent data engine powering Luma (vector search + KV + SQL + events in a single binary). -->
 # Luma: The Convergent Data Platform
 
-[![CI](https://github.com/Jairodaniel-17/rust-kiss-vdb/actions/workflows/ci.yml/badge.svg)](https://github.com/Jairodaniel-17/rust-kiss-vdb/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/tag/Jairodaniel-17/rust-kiss-vdb?label=release&sort=semver)](https://github.com/Jairodaniel-17/rust-kiss-vdb/releases)
+[![CI](https://github.com/Jairodaniel-17/Luma/actions/workflows/ci.yml/badge.svg)](https://github.com/Jairodaniel-17/Luma/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/Jairodaniel-17/Luma?label=release&sort=semver)](https://github.com/Jairodaniel-17/Luma/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![Python SDK](https://img.shields.io/badge/python-luma--vdb-3775A9.svg)](sdk/)
 [![TS SDK](https://img.shields.io/badge/npm-luma--vdb-CB3837.svg)](sdk/typescript/)
 
-**Luma** (Cargo crate `luma`, version **4.24.0**, *powered by RustKissVDB*) is not just a vector database. It is a **Convergent Data Engine** written in **Rust** that unifies, in a **single binary** (`luma`), the primitives a modern AI application needs:
+**Luma** (Cargo crate `luma`, version **4.27.0**, *powered by RustKissVDB*) is not just a vector database. It is a **Convergent Data Engine** written in **Rust** that unifies, in a **single binary** (`luma`), the primitives a modern AI application needs:
 
 - **Vector search** (ANN) with swappable HNSW / IVF-FLAT-Q8 / DiskANN indexes.
 - **Key-value state** (KV) with TTL, compare-and-swap and secondary indexes.
@@ -26,8 +26,35 @@ Everything runs in one process, eliminating network latency between subsystems a
 
 ---
 
+<a id="stable"></a>
+
+## ✅ Stable release: 4.27.0
+
+Since **4.27.0** Luma is **stable**: it can hold production data. Specifically, it was validated as the queue,
+cache, KV and document store of the Friochap ERP. "Stable" here means something measurable: every guarantee has a
+test behind it, in CI or on real machines, and **anything not listed in
+[`GARANTIAS.md`](docs/referencia/GARANTIAS.md) is not promised**.
+
+| What was tested | How | Result |
+|---|---|---|
+| Power loss (whatever did not reach disk is dropped) | LazyFS: 1,115 cuts, 200 every night in CI | **0** acknowledged writes lost |
+| The same cut against other engines | 15 cuts per engine, same load | Luma 122,014 / **0** · Redis `always` 65,571 / 0 · PostgreSQL `on` 118,901 / 0 · SQLite `FULL` 65,167 / 0. Their fast modes lose data: Redis `everysec` 28,083, PostgreSQL `off` 8,396, SQLite `NORMAL` 2,761 |
+| Real system reboot without sync | `echo b > /proc/sysrq-trigger` on Debian 13: 50 on x86, 50 on arm64, 50 on the production A1 | **0** lost |
+| Soak with crashes, deletes and restarts | `kill -9` every minute for 45 min, 1 GB cap | 439,212 operations, **0** lost, 0 5xx errors, 274,711 deletes with none coming back, peak RSS 112 MB |
+| arm64 confirmation | AWS t4g.small with the production unit, 2 h cycles | 71,926 items and 11,988 enqueues verified after the crash, **0** failures |
+| Lost host | `scripts/dr_drill.sh` against OCI Object Storage, nightly | everything acknowledged up to 4.8–4.9 s earlier is on the new machine, ready in 27–28 s |
+| Transactions | `POST /v1/state/txn`, 200 concurrent rounds | all or nothing, also across restarts; serializable with `check` |
+
+Each engine states what it guarantees and what it compares to (KV ≈ etcd, documents ≈ MongoDB, queues ≈ SQS,
+blobs ≈ S3, RESP ≈ Redis 7) in [`GARANTIAS.md`](docs/referencia/GARANTIAS.md). What is **not** there, on purpose:
+transactions spanning several engines at once (a key, a blob and a message in one `COMMIT`); use a relational
+database for that. What changed to get here: [`CHANGELOG.md`](docs/referencia/CHANGELOG.md).
+
+---
+
 ## Table of contents
 
+- [Stable release](#stable)
 - [Installation](#installation)
 - [60-second quickstart](#quickstart)
 - [Official SDKs](#sdks)
@@ -55,15 +82,15 @@ Everything runs in one process, eliminating network latency between subsystems a
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/Jairodaniel-17/rust-kiss-vdb/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Jairodaniel-17/Luma/main/install.sh | bash
 
 # Specific version or custom destination
-curl -fsSL .../install.sh | bash -s -- --version v4.24.0 --dest ~/.local/bin
+curl -fsSL .../install.sh | bash -s -- --version v4.27.0 --dest ~/.local/bin
 ```
 
 ```powershell
 # Windows
-irm https://raw.githubusercontent.com/Jairodaniel-17/rust-kiss-vdb/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Jairodaniel-17/Luma/main/install.ps1 | iex
 ```
 
 The scripts download the GitHub release binary for your platform (Linux, Windows, macOS) and place it on your `PATH`.
@@ -512,7 +539,7 @@ backups/<timestamp>/           # Backups (VACUUM INTO + snapshot + WAL)
 
 ## ✅ Current project status
 
-Implemented and verifiable in today's code (crate `luma` v4.24.0):
+Implemented and verifiable in today's code (crate `luma` v4.27.0):
 
 - **Convergent core**: vector engine (HNSW / IVF-FLAT-Q8 / DiskANN), KV with TTL/CAS, segmented WAL + snapshots, embedded SQLite via actor, SSE event bus, hybrid RAG hub and text search engine. All mounted in the router and covered by `tests/`.
 - **Object storage, queues and images**: R2 + Queues + Images style primitives already mounted at `/v1/blob`, `/v1/queue`, `/v1/image`.
