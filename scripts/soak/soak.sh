@@ -11,15 +11,17 @@
 # again. Luma's RSS goes to rss.csv every minute, any 5xx to 5xx.log.
 #
 #   nohup soak.sh [hours] >/dev/null 2>&1 &      results in /root/soak
+#   MINUTES=150 CYCLE_SECS=900 nohup soak.sh ...  a shortened run
 set -uo pipefail
 
 HOURS=${1:-72}
+MINUTES=${MINUTES:-$(( HOURS * 60 ))}
 CYCLE_SECS=${CYCLE_SECS:-7200}
 W=/root/soak
 mkdir -p "$W"
 set -a; . /etc/luma/luma.env; set +a
 export CARGA_PAUSE=${CARGA_PAUSE:-0.5} CARGA_5XX=$W/5xx.log
-end=$(( $(date +%s) + HOURS * 3600 ))
+end=$(( $(date +%s) + MINUTES * 60 ))
 
 log() { echo "$(date -Is) $*" >> "$W/soak.log"; }
 check() {
@@ -31,7 +33,7 @@ check() {
 RSS=$!
 trap 'kill $RSS 2>/dev/null' EXIT
 
-log "start: $HOURS h, cycles of $CYCLE_SECS s"
+log "start: $MINUTES min, cycles of $CYCLE_SECS s"
 cycle=0 failed=0
 while [ "$(date +%s)" -lt "$end" ]; do
     cycle=$((cycle + 1))
