@@ -87,7 +87,7 @@ for _ in range(600):
     except OSError:
         pass
     time.sleep(0.1)
-sys.exit('etcd not healthy')" || { tail -20 "$WORK/engine.log"; exit 1; } ;;
+sys.exit('etcd not healthy')" || { grep -m2 -B3 -A8 -E "^(panic|fatal error|unexpected fault)|\"level\":\"(fatal|panic)\"" "$WORK/engine.log"; exit 1; } ;;
     sqlite-*) PID= ;;
     pg-*)
         if [ ! -d "$MNT/pg" ]; then
