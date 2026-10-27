@@ -46,6 +46,18 @@ class Resp:
         return line[1:].decode().strip()
 
 
+def ready(c):
+    """Redis accepts connections while it replays its AOF and answers
+    -LOADING until done; Luma only listens once replayed."""
+    for _ in range(600):
+        try:
+            if c.cmd("PING") == "PONG":
+                return c
+        except RuntimeError:
+            time.sleep(0.1)
+    raise RuntimeError("engine still loading after 60 s")
+
+
 class Pg:
     """One psql in autocommit; `\\echo` after each INSERT prints only once the
     INSERT has committed, which is the confirmation."""
@@ -64,8 +76,8 @@ class Pg:
 
 def worker(n, cycle, journal, lock):
     try:
-        client = Pg() if ENGINE.startswith("pg") else Resp()
-    except OSError:
+        client = Pg() if ENGINE.startswith("pg") else ready(Resp())
+    except (OSError, RuntimeError):
         return
     i = 0
     while True:
@@ -104,15 +116,7 @@ def verify(path):
         present = set(out.split())
         lost = [k for k in confirmed if k not in present]
     else:
-        c = Resp()
-        # Redis accepts connections while it replays its AOF and answers
-        # -LOADING until done; Luma only listens once replayed.
-        for _ in range(600):
-            try:
-                if c.cmd("PING") == "PONG":
-                    break
-            except RuntimeError:
-                time.sleep(0.1)
+        c = ready(Resp())
         lost = [k for k in confirmed if c.cmd("GET", k) != k]
     print(f"{len(confirmed)} confirmed, {len(lost)} lost")
     return len(lost)
