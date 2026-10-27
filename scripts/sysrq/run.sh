@@ -31,6 +31,9 @@ case $(uname -m) in
     *) echo "unsupported host $(uname -m)"; exit 1 ;;
 esac
 
+log() { echo "$(date +%T) $*"; }
+
+log "image"
 [ -f base.qcow2 ] || curl -sfL -o base.qcow2 \
     "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-$IMG.qcow2"
 rm -f disk.qcow2 key key.pub
@@ -57,7 +60,9 @@ wait_ssh() {
     echo "the VM did not come back"; tail -30 console.log; exit 1
 }
 
+log "booting the VM"
 wait_ssh
+log "installing Luma"
 # Throwaway secrets for a throwaway VM: Luma refuses weak ones.
 KEYS="LUMA_API_KEY=sysrq-harness-key-0123456789abcdef"  # gitleaks:allow (test only)
 MASTER="LUMA_MASTER_KEY=sysrq-harness-master-0123456789abcdef"  # gitleaks:allow (test only)
@@ -83,6 +88,7 @@ SNAPSHOT_INTERVAL_SECS=3
 ENV
     systemctl daemon-reload
     systemctl enable --now luma"
+log "reboots"
 
 for cycle in $(seq "$CYCLES"); do
     vm python3 /root/ready.py

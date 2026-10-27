@@ -31,6 +31,16 @@ jobs:
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --bin luma --locked
+      # The Debian image (~400 MB), downloaded once here and cached for the
+      # five VMs: from cloud.debian.org one VM spent its whole 15 min on it.
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/sysrq/base.qcow2
+          key: debian-13-genericcloud-amd64-v1
+      - name: Debian image
+        run: |
+          mkdir -p /tmp/sysrq
+          [ -f /tmp/sysrq/base.qcow2 ] || curl -sfL --retry 3 -o /tmp/sysrq/base.qcow2             https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
       - uses: actions/upload-artifact@v4
         with:
           name: luma-linux
@@ -52,10 +62,16 @@ jobs:
         with:
           name: luma-linux
           path: bin
+      - uses: actions/cache/restore@v4
+        with:
+          fail-on-cache-miss: true
+          path: /tmp/sysrq/base.qcow2
+          key: debian-13-genericcloud-amd64-v1
       - name: QEMU and cloud-init tools
+        # Without recommends: a slow mirror took 13 min over the full set.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils >/dev/null
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils >/dev/null
       - name: 10 reboots under load
         run: chmod +x bin/luma && CYCLES=10 bash scripts/sysrq/run.sh bin/luma
       - name: VM console on failure
