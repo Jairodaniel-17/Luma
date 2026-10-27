@@ -388,13 +388,28 @@ def purge(journal_path, threads=6):
 
 def gone(journal_path, queue_dir):
     """After a purge and a restart: nothing deleted came back."""
-    last_ok, pending, enq_ok, _, _, _ = replay_journal(journal_path)
+    last_ok, pending, enq_ok, enq_tries, _, _ = replay_journal(journal_path)
     back = [slot for slot in {**last_ok, **pending} if observed(*slot) != ABSENT[slot[0]]]
-    present = [n for n in os.listdir(queue_dir) if n.endswith(".json")] if os.path.isdir(queue_dir) else []
-    print(f"purged cycle: {len(back)} keys/blobs/docs/vectors and {len(present)} queue messages came back")
+    present = set()
+    for name in os.listdir(queue_dir) if os.path.isdir(queue_dir) else []:
+        if name.endswith(".json") and not name.startswith(".tmp-"):
+            with open(os.path.join(queue_dir, name), "rb") as f:
+                present.add(json.load(f)["id"])
+    # An enqueue in flight at a cut may have landed without its id ever being
+    # confirmed, so the purge could not ack it: as in `verify`, those may stay.
+    # A confirmed message the purge acked must not.
+    acked_back = present & enq_ok
+    unconfirmed = present - enq_ok
+    too_many = len(unconfirmed) > enq_tries - len(enq_ok)
+    print(
+        f"purged cycle: {len(back)} keys/blobs/docs/vectors and {len(acked_back)} acked queue messages came back"
+        f" ({len(unconfirmed)} never-confirmed enqueues from the cut remain)"
+    )
     for slot in back[:20]:
         print("  FAIL", slot)
-    return 1 if back or present else 0
+    for m in sorted(acked_back)[:20]:
+        print("  FAIL acked message", m)
+    return 1 if back or acked_back or too_many else 0
 
 
 if __name__ == "__main__":
