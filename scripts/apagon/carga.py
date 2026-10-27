@@ -25,6 +25,13 @@ import urllib.request
 
 BASE = os.environ.get("LUMA_URL", "http://127.0.0.1:7700")
 KEY = os.environ.get("LUMA_API_KEY", "apagon")
+# The soak (scripts/soak/run.sh) gives each cycle its own blob bucket, queue,
+# vector collection and doc collection, so a cycle is verified on its own, and
+# paces the threads; it also counts 5xx answers, which must not happen.
+NS = os.environ.get("CARGA_NS", "apagon")
+DOCS = os.environ.get("CARGA_DOCS", "ordenes")
+PAUSE = float(os.environ.get("CARGA_PAUSE", "0"))
+ERRORS = os.environ.get("CARGA_5XX")
 
 
 def call(method, path, body=None, raw=False, timeout=10):
@@ -42,6 +49,9 @@ def call(method, path, body=None, raw=False, timeout=10):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
+        if e.code >= 500 and ERRORS:
+            with open(ERRORS, "a") as f:
+                f.write(f"{time.time():.0f} {method} {path} {e.code}\n")
         return e.code, e.read()
 
 
@@ -64,6 +74,8 @@ def worker(n, cycle, journal, stop):
     """One thread, its own keys: at most one operation per key is in flight."""
     i = 0
     while not stop.is_set():
+        if PAUSE:
+            stop.wait(PAUSE)
         i += 1
         kind = i % 7
         try:
@@ -84,23 +96,23 @@ def worker(n, cycle, journal, stop):
                 key = f"c{cycle}w{n}b{i}"
                 digest = hashlib.sha256(body).hexdigest()
                 journal.write("try", "blob", key, digest)
-                status, _ = call("PUT", f"/v1/blob/apagon/{key}", body, raw=True)
+                status, _ = call("PUT", f"/v1/blob/{NS}/{key}", body, raw=True)
                 if status == 200:
                     journal.write("ok", "blob", key, digest)
                     if i % 5 == 2:
                         journal.write("try", "blobdel", key, None)
-                        status, _ = call("DELETE", f"/v1/blob/apagon/{key}")
+                        status, _ = call("DELETE", f"/v1/blob/{NS}/{key}")
                         if status == 200:
                             journal.write("ok", "blobdel", key, None)
             elif kind == 3:
                 journal.write("try", "enq", None, None)
-                status, raw = call("POST", "/v1/queue/apagon", {"body": {"i": i}})
+                status, raw = call("POST", f"/v1/queue/{NS}", {"body": {"i": i}})
                 if status == 200:
                     msg_id = json.loads(raw)["id"]
                     journal.write("ok", "enq", msg_id, None)
                     if i % 3 == 0:
                         journal.write("try", "ack", msg_id, None)
-                        status, _ = call("DELETE", f"/v1/queue/apagon/{msg_id}")
+                        status, _ = call("DELETE", f"/v1/queue/{NS}/{msg_id}")
                         if status == 200:
                             journal.write("ok", "ack", msg_id, None)
             elif kind == 5:
@@ -108,12 +120,12 @@ def worker(n, cycle, journal, stop):
                 meta = {"i": i, "w": n}
                 journal.write("try", "vec", vec_id, meta)
                 body = {"id": vec_id, "vector": [float(n + 1), float(i), 1.0, 0.5], "meta": meta}
-                status, _ = call("POST", "/v1/vector/apagon/upsert", body)
+                status, _ = call("POST", f"/v1/vector/{NS}/upsert", body)
                 if status == 200:
                     journal.write("ok", "vec", vec_id, meta)
                     if i % 4 == 1:
                         journal.write("try", "vecdel", vec_id, None)
-                        status, _ = call("POST", "/v1/vector/apagon/delete", {"id": vec_id})
+                        status, _ = call("POST", f"/v1/vector/{NS}/delete", {"id": vec_id})
                         if status == 200:
                             journal.write("ok", "vecdel", vec_id, None)
             else:
@@ -121,7 +133,7 @@ def worker(n, cycle, journal, stop):
                 estado = "abierto" if i % 2 else "cerrado"
                 doc = {"estado": estado, "n": i}
                 journal.write("try", "doc", doc_id, doc)
-                status, _ = call("PUT", f"/v1/doc/ordenes/{doc_id}", doc)
+                status, _ = call("PUT", f"/v1/doc/{DOCS}/{doc_id}", doc)
                 if status == 200:
                     journal.write("ok", "doc", doc_id, doc)
         except (urllib.error.URLError, ConnectionError, OSError):
@@ -132,7 +144,7 @@ def worker(n, cycle, journal, stop):
 
 def load(journal_path, cycle, threads=6):
     # 409 when it already exists from an earlier cycle.
-    call("POST", "/v1/vector/apagon", {"dim": 4, "metric": "cosine"})
+    call("POST", f"/v1/vector/{NS}", {"dim": 4, "metric": "cosine"})
     journal = Journal(journal_path)
     stop = threading.Event()
     pool = [
@@ -202,12 +214,12 @@ def observed(family, subject):
         raw = read(f"/v1/state/{subject}")
         return ("put", json.loads(raw)["value"]) if raw is not None else ("del", None)
     if family == "blob":
-        raw = read(f"/v1/blob/apagon/{subject}")
+        raw = read(f"/v1/blob/{NS}/{subject}")
         return ("blob", hashlib.sha256(raw).hexdigest()) if raw is not None else ("blobdel", None)
     if family == "vec":
-        raw = read(f"/v1/vector/apagon/get?id={subject}")
+        raw = read(f"/v1/vector/{NS}/get?id={subject}")
         return ("vec", json.loads(raw)["meta"]) if raw is not None else ("vecdel", None)
-    raw = read(f"/v1/doc/ordenes/{subject}")
+    raw = read(f"/v1/doc/{DOCS}/{subject}")
     return ("doc", json.loads(raw)["doc"]) if raw is not None else ("absent", None)
 
 
@@ -225,7 +237,7 @@ def verify(journal_path, queue_dir):
     # Documents must also be reachable through their index.
     by_state = {}
     for estado in ("abierto", "cerrado"):
-        status, raw = call("POST", "/v1/doc/ordenes/find", {"filter": {"estado": estado}, "limit": 100000})
+        status, raw = call("POST", f"/v1/doc/{DOCS}/find", {"filter": {"estado": estado}, "limit": 100000})
         if status == 200:
             by_state[estado] = {d["id"] for d in json.loads(raw)["documents"]}
     for (family, subject), (op, payload) in last_ok.items():

@@ -49,12 +49,13 @@ primary)
   # The full backup lands midway, so the restore needs both it and the WAL
   # shipped after it.
   sleep "${BEFORE_BACKUP:-15}"
-  python3 - <<'PY'
+  if python3 - <<'PY'
 import json, os, urllib.request
 req = urllib.request.Request(os.environ["LUMA_URL"] + "/v1/admin/backup", method="POST",
                              headers={"Authorization": "Bearer " + os.environ["LUMA_API_KEY"]})
 print("full backup", json.load(urllib.request.urlopen(req, timeout=120))["path"])
 PY
+  then :; else tail -40 /var/dr/luma.log; exit 1; fi
   sleep "${AFTER_BACKUP:-25}"
   # Peak RSS under this load (SPEC-friochap F4).
   grep VmHWM "/proc/$pid/status"
