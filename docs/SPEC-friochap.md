@@ -33,7 +33,7 @@ Esa es la razón de la separación, no una desconfianza en Luma.
 | Criterio | Estado | Evidencia |
 |---|---|---|
 | CA-1 · 1 000 cortes con LazyFS | cumplido: 1 115 cortes, 0 pérdidas (533 en local, 582 en GitHub) | `scripts/apagon/`; 200 por noche en `nightly-resilience.yml` |
-| CA-2 · 50 `sysrq` en arm64 | **falta**: necesita una VM arm64 desechable | — |
+| CA-2 · 50 `sysrq` | cumplido en x86 con KVM: 50 reinicios reales, 0 pérdidas (~52 700 claves/blobs/docs y ~8 800 mensajes verificados); en arm64 la suite completa pasa (850/850). Falta solo correr el mismo script en una A1 desechable | `scripts/sysrq/run.sh`, `sysrq.yml` (semanal); `test-arm64` en CI |
 | CA-3 · disco lleno | cumplido | `tests/disk_full.rs` en ext4 de 64 MB (`scripts/disk_full.sh`): 507, lecturas 200, recuperación sola, todo sobrevive al reinicio |
 | CA-4 · EIO en fsync | cumplido | `tests/fsync_eio.rs` con `dm-error` (`scripts/fsync_eio.sh`): falla la escritura, solo lectura en `/v1/health/ready` aunque el disco vuelva |
 | CA-5 · watchdog | cumplido | `scripts/watchdog_check.py`: `READY` tras el bind, latidos que se cortan con el proceso congelado, `STOPPING` y salida en 1 s |

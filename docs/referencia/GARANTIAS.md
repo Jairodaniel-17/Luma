@@ -34,7 +34,7 @@ escritura y queda en solo lectura hasta reiniciar. Con el disco casi lleno recha
 | CAS, lotes y índices de documentos sin carreras ni ABA | `tests/acid_concurrency.rs` |
 | Comandos RESP atómicos, `EXEC` aislado | tests de `src/resp/commands.rs`; diferencial contra Redis 7 |
 | Corte de luz (se pierde la caché de páginas) | `scripts/apagon/` con LazyFS: 1 115 cortes sin pérdidas; 200 cada noche |
-| Reinicio real sin sincronizar, arm64 | `scripts/sysrq/run.sh`: `echo b > /proc/sysrq-trigger` en una VM Debian 13 arm64 |
+| Reinicio real sin sincronizar | `scripts/sysrq/run.sh`: `echo b > /proc/sysrq-trigger` en una VM Debian 13 con la unidad de producción: 50 reinicios, 0 pérdidas |
 | `kill -9` en cada camino de escritura | `tests/crash_recovery.rs` (nightly) |
 | Disco lleno y `fsync` con EIO | `tests/disk_full.rs`, `tests/fsync_eio.rs` |
 | Host perdido: lo confirmado hasta 10 s antes está en la máquina nueva | `scripts/dr_drill.sh` |
