@@ -355,11 +355,57 @@ def verify_dr(journal_path, queue_dir, killed_at, rpo):
     return 1 if promised else 0
 
 
+def purge(journal_path, threads=6):
+    """Delete everything a cycle wrote, so the soak holds a bounded amount of
+    data (as the ERP does) instead of growing for 72 h. Every delete must be
+    answered 200 or 404; anything else is an error."""
+    last_ok, pending, enq_ok, _, acked, _ = replay_journal(journal_path)
+    paths = {"kv": "/v1/state/{}", "blob": f"/v1/blob/{NS}/{{}}", "doc": f"/v1/doc/{DOCS}/{{}}"}
+    # Vectors go with their collection, below.
+    todo = [paths[f].format(s) for f, s in {**last_ok, **pending} if f in paths]
+    todo += [f"/v1/queue/{NS}/{m}" for m in enq_ok - acked]
+    errors = []
+
+    def run(part):
+        for path in part:
+            status, raw = call("DELETE", path)
+            if status not in (200, 204, 404):
+                errors.append(f"DELETE {path}: {status} {raw[:120]!r}")
+
+    pool = [threading.Thread(target=run, args=(todo[n::threads],)) for n in range(threads)]
+    for t in pool:
+        t.start()
+    for t in pool:
+        t.join()
+    status, raw = call("DELETE", f"/v1/vector/{NS}")
+    if status not in (200, 204, 404):
+        errors.append(f"DELETE /v1/vector/{NS}: {status} {raw[:120]!r}")
+    print(f"purged {len(todo)} keys/blobs/docs/messages and vector collection {NS}: {len(errors)} errors")
+    for e in errors[:20]:
+        print("  FAIL", e)
+    return 1 if errors else 0
+
+
+def gone(journal_path, queue_dir):
+    """After a purge and a restart: nothing deleted came back."""
+    last_ok, pending, enq_ok, _, _, _ = replay_journal(journal_path)
+    back = [slot for slot in {**last_ok, **pending} if observed(*slot) != ABSENT[slot[0]]]
+    present = [n for n in os.listdir(queue_dir) if n.endswith(".json")] if os.path.isdir(queue_dir) else []
+    print(f"purged cycle: {len(back)} keys/blobs/docs/vectors and {len(present)} queue messages came back")
+    for slot in back[:20]:
+        print("  FAIL", slot)
+    return 1 if back or present else 0
+
+
 if __name__ == "__main__":
     mode, journal_path = sys.argv[1], sys.argv[2]
     if mode == "load":
         load(journal_path, int(sys.argv[3]))
     elif mode == "verify-dr":
         sys.exit(verify_dr(journal_path, sys.argv[3], float(sys.argv[4]), float(sys.argv[5])))
+    elif mode == "purge":
+        sys.exit(purge(journal_path))
+    elif mode == "gone":
+        sys.exit(gone(journal_path, sys.argv[3]))
     else:
         sys.exit(verify(journal_path, sys.argv[3]))
