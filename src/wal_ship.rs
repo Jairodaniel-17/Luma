@@ -71,6 +71,10 @@ pub fn list_segments(data_dir: &Path) -> Result<Vec<Segment>> {
 #[derive(Debug, Default)]
 pub struct ShipState {
     shipped: HashMap<String, u64>,
+    /// Hash of the snapshot last uploaded. It is rewritten in place, so its
+    /// length says nothing; uploading it on every pass was ~260 000 PUTs a
+    /// month at a 10 s interval for a snapshot that changed every few minutes.
+    snapshot: Option<u64>,
 }
 
 impl ShipState {
@@ -153,15 +157,25 @@ pub async fn ship_once(
     let snapshot = data_dir.join("snapshot.json");
     if snapshot.exists() {
         let bytes = std::fs::read(&snapshot)?;
-        let sealed = encrypt(&bytes).context("encrypting snapshot")?;
-        store
-            .put(
-                &ObjectPath::from(format!("{prefix}/snapshot.json")),
-                PutPayload::from(sealed),
-            )
-            .await
-            .context("uploading snapshot")?;
-        report.bytes += bytes.len() as u64;
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish()
+        };
+        // `skipped` counts segments only, so an unchanged snapshot is silent.
+        if state.snapshot != Some(hash) {
+            let sealed = encrypt(&bytes).context("encrypting snapshot")?;
+            store
+                .put(
+                    &ObjectPath::from(format!("{prefix}/snapshot.json")),
+                    PutPayload::from(sealed),
+                )
+                .await
+                .context("uploading snapshot")?;
+            report.bytes += bytes.len() as u64;
+            state.snapshot = Some(hash);
+        }
     }
 
     for segment in list_segments(data_dir)? {
@@ -834,5 +848,29 @@ mod tests {
         assert_eq!(count, 2, "snapshot and one segment");
         assert!(!target.path().join("files").exists());
         assert!(!target.path().join(FILES_INDEX).exists());
+    }
+
+    /// A pass with nothing new uploads nothing: not even the snapshot, which
+    /// used to go up on every pass.
+    #[tokio::test]
+    async fn an_idle_pass_uploads_nothing() {
+        let dir = data_dir();
+        let store = store();
+        let mut state = ShipState::new();
+        let first = ship_once(&store, "inst", dir.path(), &mut state, seal)
+            .await
+            .unwrap();
+        assert!(first.bytes > 0);
+        let idle = ship_once(&store, "inst", dir.path(), &mut state, seal)
+            .await
+            .unwrap();
+        assert_eq!(idle.bytes, 0, "an idle pass uploaded {} bytes", idle.bytes);
+        assert!(idle.uploaded.is_empty());
+
+        std::fs::write(dir.path().join("snapshot.json"), b"{\"offset\":9}").unwrap();
+        let changed = ship_once(&store, "inst", dir.path(), &mut state, seal)
+            .await
+            .unwrap();
+        assert!(changed.bytes > 0, "a changed snapshot must go up");
     }
 }

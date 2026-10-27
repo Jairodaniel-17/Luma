@@ -9,7 +9,7 @@ escritura y queda en solo lectura hasta reiniciar. Con el disco casi lleno recha
 
 | Motor | Atomicidad | Aislamiento | Se compara con |
 |---|---|---|---|
-| KV (`/v1/state`) | Cada operación; un lote (`/v1/state/batch_put`) es **un solo registro** del WAL: todo o nada | Por clave, linealizable. Un lote valida la revisión de cada clave (`if_revision`) antes de escribir nada; `if_revision: 0` = crear solo si no existe | Redis con `WATCH`/`MULTI`; etcd con `txn` de comparación |
+| KV (`/v1/state`) | Cada operación. `POST /v1/state/txn` es una transacción: varias claves en **un solo registro** del WAL, todo o nada. (`batch_put` no: aplica una por una y reporta cada una) | Por clave, linealizable. Una transacción bloquea sus claves y valida cada revisión antes de escribir; con `check` sobre lo que solo leyó es **serializable** | etcd `txn`; PostgreSQL `SERIALIZABLE` para transacciones optimistas |
 | Documentos (`/v1/doc`) | El documento y sus entradas de índice se escriben en el mismo lote | Por documento; un `find` nunca ve un índice que no corresponde al documento | MongoDB (un documento) |
 | Estructuras RESP (listas, hashes, sets, zsets) | Cada comando, también los de varias claves (`LMOVE`, `RENAME`, `MSET`) | `MULTI`/`EXEC` aislado **frente a otros clientes RESP**; no frente a escrituras por HTTP en las mismas claves | Redis 7 (diferencial de 327 comandos en CI) |
 | Colas (`/v1/queue`) | Encolar y confirmar (ack) son atómicos y durables | Al menos una vez: un mensaje recibido y no confirmado vuelve a ser visible al vencer su lease | Amazon SQS estándar |
@@ -21,9 +21,8 @@ escritura y queda en solo lectura hasta reiniciar. Con el disco casi lleno recha
 - **Transacciones interactivas entre motores.** No existe un `BEGIN … COMMIT` que abarque una clave, un blob y un
   mensaje. Quien lo necesita (una factura, su asiento y su salida de almacén) lo hace en una base relacional; así lo
   hace el ERP de Friochap con su SQLite (`docs/SPEC-friochap.md`).
-- **Aislamiento serializable sobre lecturas.** Un lote valida las claves que escribe, no las que solo leyó: dos
-  lotes que leen A y B y escriben cada uno en una distinta pueden pasar los dos (write skew), como en el aislamiento
-  por instantánea de PostgreSQL. Para impedirlo, el lote reescribe también la clave leída con su `if_revision`.
+- **Transacciones interactivas con bloqueo.** Las de Luma son optimistas: se lee, se arma la transacción con las
+  revisiones leídas y, si alguna cambió, responde 409 y el cliente reintenta. No hay `SELECT … FOR UPDATE`.
 - **Lecturas de una instantánea de varias claves.** Cada lectura ve lo último confirmado de su clave.
 
 ## Qué lo sostiene
@@ -32,6 +31,7 @@ escritura y queda en solo lectura hasta reiniciar. Con el disco casi lleno recha
 |---|---|
 | Ninguna escritura confirmada se pierde ni se adelanta en el WAL bajo concurrencia | `tests/acid_concurrency.rs`, también en arm64 (`test-arm64` en CI) |
 | CAS, lotes y índices de documentos sin carreras ni ABA | `tests/acid_concurrency.rs` |
+| Transacciones todo o nada, también tras reiniciar; sin write skew con `check` (200 rondas concurrentes) | `tests/acid_concurrency.rs`, `tests/http_state_vector.rs` |
 | Comandos RESP atómicos, `EXEC` aislado | tests de `src/resp/commands.rs`; diferencial contra Redis 7 |
 | Corte de luz (se pierde la caché de páginas) | `scripts/apagon/` con LazyFS: 1 115 cortes sin pérdidas; 200 cada noche |
 | Reinicio real sin sincronizar | `scripts/sysrq/run.sh`: `echo b > /proc/sysrq-trigger` en una VM Debian 13 con la unidad de producción: 50 reinicios, 0 pérdidas |

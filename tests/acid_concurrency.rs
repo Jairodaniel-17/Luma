@@ -385,3 +385,125 @@ fn startup_migration_rebuilds_stale_document_indexes() {
     // Once per index version.
     assert_eq!(luma::docstore::migrate_indexes(&e).unwrap(), 0);
 }
+
+/// Write skew, the anomaly snapshot isolation lets through: two doctors on
+/// call, each checks that the other one is still on call and goes off. Run
+/// both at once and nobody is on call, although each transaction alone kept
+/// the rule. With the key it read but does not write guarded by `Check`, the
+/// second to commit sees the first one's write and fails: serializable.
+#[test]
+fn guarded_reads_prevent_write_skew() {
+    use luma::engine::StateOp;
+    let dir = tempfile::tempdir().unwrap();
+    let e = Arc::new(engine(dir.path()));
+
+    for round in 0..200 {
+        let (alice, bob) = (
+            format!("oncall:{round}:alice"),
+            format!("oncall:{round}:bob"),
+        );
+        e.put_state(alice.clone(), serde_json::json!(true), None, None)
+            .unwrap();
+        e.put_state(bob.clone(), serde_json::json!(true), None, None)
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [(alice.clone(), bob.clone()), (bob.clone(), alice.clone())]
+            .into_iter()
+            .map(|(me, other)| {
+                let (e, barrier) = (e.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let mine = e.get_state(&me).unwrap();
+                    let theirs = e.get_state(&other).unwrap();
+                    barrier.wait();
+                    if theirs.value.as_json() != Some(&serde_json::json!(true)) {
+                        return false;
+                    }
+                    e.state_txn(vec![
+                        StateOp::Check {
+                            key: other,
+                            revision: theirs.revision,
+                        },
+                        StateOp::Put {
+                            key: me,
+                            value: serde_json::json!(false).into(),
+                            ttl_ms: None,
+                            if_revision: Some(mine.revision),
+                        },
+                    ])
+                    .is_ok()
+                })
+            })
+            .collect();
+        let went_off = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
+        assert_eq!(
+            went_off, 1,
+            "round {round}: {went_off} doctors went off call"
+        );
+        let on_call = [&alice, &bob]
+            .iter()
+            .filter(|k| e.get_state(k).unwrap().value.as_json() == Some(&serde_json::json!(true)))
+            .count();
+        assert_eq!(on_call, 1, "round {round}: nobody left on call");
+    }
+}
+
+/// All or nothing: one failed guard at the end of a transaction leaves the
+/// writes before it unwritten, live and after a restart.
+#[test]
+fn a_failed_transaction_writes_nothing() {
+    use luma::engine::StateOp;
+    let dir = tempfile::tempdir().unwrap();
+    let put = |key: &str| StateOp::Put {
+        key: key.into(),
+        value: serde_json::json!(1).into(),
+        ttl_ms: None,
+        if_revision: None,
+    };
+    {
+        let e = engine(dir.path());
+        e.put_state("stock".into(), serde_json::json!(5), None, None)
+            .unwrap();
+        let err = e.state_txn(vec![
+            put("invoice:1"),
+            put("ledger:1"),
+            StateOp::Delete {
+                key: "stock".into(),
+                if_revision: None,
+            },
+            StateOp::Check {
+                key: "price".into(),
+                revision: 7,
+            },
+        ]);
+        assert!(err.is_err(), "a failed check must fail the transaction");
+        for key in ["invoice:1", "ledger:1"] {
+            assert!(
+                e.get_state(key).is_none(),
+                "{key} written by a failed transaction"
+            );
+        }
+        assert!(
+            e.get_state("stock").is_some(),
+            "stock deleted by a failed transaction"
+        );
+
+        let revisions = e
+            .state_txn(vec![
+                put("invoice:2"),
+                StateOp::Check {
+                    key: "stock".into(),
+                    revision: 1,
+                },
+            ])
+            .unwrap();
+        assert_eq!(revisions, vec![Some(1), Some(1)]);
+    }
+    let e = engine(dir.path());
+    assert!(e.get_state("invoice:1").is_none() && e.get_state("ledger:1").is_none());
+    assert!(e.get_state("invoice:2").is_some() && e.get_state("stock").is_some());
+}

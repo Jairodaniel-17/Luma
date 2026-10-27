@@ -382,6 +382,131 @@ pub async fn put(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TxnBody {
+    pub ops: Vec<TxnOp>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum TxnOp {
+    Put {
+        key: String,
+        /// Same encoding as [`PutBody::value`].
+        value: crate::engine::stored::StoredVal,
+        ttl_ms: Option<u64>,
+        if_revision: Option<u64>,
+    },
+    Delete {
+        key: String,
+        if_revision: Option<u64>,
+    },
+    /// Write nothing, but fail the transaction unless the key is at
+    /// `revision` (0: absent). Guards what the transaction only read.
+    Check { key: String, revision: u64 },
+}
+
+impl TxnOp {
+    fn key(&self) -> &str {
+        match self {
+            TxnOp::Put { key, .. } | TxnOp::Delete { key, .. } | TxnOp::Check { key, .. } => key,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TxnResult {
+    pub key: String,
+    /// The key's revision after the transaction; `null` once deleted.
+    pub revision: Option<u64>,
+}
+
+/// POST /v1/state/txn — every op or none, as one WAL record.
+///
+/// `batch_put` applies its ops one by one and reports each, so a failure
+/// halfway leaves the first ones written: useful for bulk loads, not for an
+/// invoice and its stock movement. This is the transaction.
+pub async fn txn(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
+    axum::Json(body): axum::Json<TxnBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let bad = |message: String| ApiError::new(StatusCode::BAD_REQUEST, "invalid_argument", message);
+    if body.ops.is_empty() {
+        return Err(bad("ops required".into()));
+    }
+    if body.ops.len() > state.config.max_state_batch {
+        return Err(bad(format!(
+            "at most {} ops per transaction",
+            state.config.max_state_batch
+        )));
+    }
+    let mut keys = Vec::with_capacity(body.ops.len());
+    let mut ops = Vec::with_capacity(body.ops.len());
+    for op in body.ops {
+        if op.key().len() > state.config.max_key_len {
+            return Err(bad(format!("key too long: {}", op.key())));
+        }
+        keys.push(op.key().to_string());
+        ops.push(match op {
+            TxnOp::Put {
+                key,
+                value,
+                ttl_ms,
+                if_revision,
+            } => {
+                let size = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
+                if size > state.config.max_json_bytes {
+                    return Err(ApiError::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!("value too large: {key}"),
+                    ));
+                }
+                crate::engine::StateOp::Put {
+                    key: scope_key(&ctx, &key),
+                    value,
+                    ttl_ms,
+                    if_revision,
+                }
+            }
+            TxnOp::Delete { key, if_revision } => crate::engine::StateOp::Delete {
+                key: scope_key(&ctx, &key),
+                if_revision,
+            },
+            TxnOp::Check { key, revision } => crate::engine::StateOp::Check {
+                key: scope_key(&ctx, &key),
+                revision,
+            },
+        });
+    }
+    match state.engine.state_txn(ops) {
+        Ok(revisions) => Ok(axum::Json(serde_json::json!({
+            "results": keys
+                .into_iter()
+                .zip(revisions)
+                .map(|(key, revision)| TxnResult { key, revision })
+                .collect::<Vec<_>>(),
+        }))),
+        // Nothing was written: the client re-reads and retries.
+        Err(EngineError::State(StateError::RevisionMismatch)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "revision_mismatch",
+            "a revision changed; nothing was written",
+        )),
+        Err(EngineError::Persistence(_)) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "persistence_error",
+            "failed to persist event",
+        )),
+        Err(_) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        )),
+    }
+}
+
 pub async fn batch_put(
     State(state): State<AppState>,
     Extension(ctx): Extension<TenantContext>,

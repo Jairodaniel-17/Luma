@@ -2666,6 +2666,10 @@ paths:
       security:
       - bearerAuth: []
       summary: Batch put keys
+      description: >-
+        Applies the operations one by one and reports each: a failure halfway
+        leaves the earlier ones written. For all-or-nothing use
+        `/v1/state/txn`.
       requestBody:
         required: true
         content:
@@ -2684,6 +2688,72 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StateBatchResponse'
+  /v1/state/txn:
+    post:
+      tags:
+      - State Management
+      security:
+      - bearerAuth: []
+      summary: Atomic transaction over several keys
+      description: >-
+        Every op or none, written as one WAL record and fsynced before the
+        reply. All keys are locked and every guard is checked before anything
+        is written. `check` writes nothing but fails the transaction unless the
+        key is at `revision` (0 = must not exist): guarding the keys a
+        transaction only read makes it serializable (no write skew).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ops]
+              properties:
+                ops:
+                  type: array
+                  items:
+                    type: object
+                    required: [op, key]
+                    properties:
+                      op:
+                        type: string
+                        enum: [put, delete, check]
+                      key:
+                        type: string
+                      value:
+                        description: For `put`.
+                      ttl_ms:
+                        type: integer
+                        format: int64
+                      if_revision:
+                        type: integer
+                        format: int64
+                        description: For `put` and `delete`; 0 = only if absent.
+                      revision:
+                        type: integer
+                        format: int64
+                        description: For `check`.
+      responses:
+        '200':
+          description: Committed. The revision of each key afterwards (null once deleted).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        revision:
+                          type: integer
+                          format: int64
+                          nullable: true
+        '409':
+          description: A revision did not match; nothing was written.
   /v1/state/{key}:
     get:
       tags:

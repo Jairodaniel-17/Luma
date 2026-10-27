@@ -315,3 +315,51 @@ async fn vector_diskann_build_status_and_tune() {
 
     let _ = shutdown.send(());
 }
+
+/// `POST /v1/state/txn`: all ops or none, 409 on a changed revision.
+#[tokio::test]
+async fn state_txn_is_all_or_nothing() {
+    let (base, shutdown) = start().await;
+    let client = reqwest::Client::new();
+    let txn = |ops: serde_json::Value| {
+        client
+            .post(format!("{base}/v1/state/txn"))
+            .bearer_auth("test")
+            .json(&serde_json::json!({ "ops": ops }))
+            .send()
+    };
+
+    let ok = txn(serde_json::json!([
+        {"op": "put", "key": "inv:1", "value": {"total": 10}},
+        {"op": "put", "key": "stock:a", "value": 4, "if_revision": 0},
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(ok.status(), 200);
+    let body: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(body["results"][1]["revision"], 1);
+
+    // The check fails, so neither the put before it nor the delete happen.
+    let conflict = txn(serde_json::json!([
+        {"op": "put", "key": "inv:2", "value": {"total": 3}},
+        {"op": "delete", "key": "stock:a"},
+        {"op": "check", "key": "inv:1", "revision": 9},
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(conflict.status(), 409);
+    for (key, present) in [("inv:2", false), ("stock:a", true)] {
+        let got = client
+            .get(format!("{base}/v1/state/{key}"))
+            .bearer_auth("test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            got.status() == 200,
+            present,
+            "{key} after a failed transaction"
+        );
+    }
+    let _ = shutdown.send(());
+}

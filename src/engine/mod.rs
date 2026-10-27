@@ -281,11 +281,13 @@ const VECTOR_MANIFEST_PREFIX: &str = "vector:";
 const VECTOR_MANIFEST_SUFFIX: &str = ":manifest";
 const VECTOR_MANIFEST_SCAN_LIMIT: usize = 4096;
 
-/// One mutation inside an atomic batch.
+/// One operation of an atomic batch (`Engine::state_txn`).
 ///
-/// Deliberately not a general transaction API: it exists so a two-key move can
-/// be one durable unit, and widening it invites callers to build transactions
-/// the storage layer does not otherwise promise.
+/// A batch is an optimistic transaction: every key is locked, every guard is
+/// checked, and only then is everything written as one WAL record. `Check`
+/// guards a key the transaction read but does not write; without it, two
+/// transactions that read the same keys and write different ones both commit
+/// (write skew). With every read guarded, the batch is serializable.
 #[derive(Debug, Clone)]
 pub enum StateOp {
     Put {
@@ -302,6 +304,9 @@ pub enum StateOp {
         /// Compare-and-swap guard, as for `Put`.
         if_revision: Option<u64>,
     },
+    /// Write nothing; fail the batch unless `key` is at `revision` (0: the key
+    /// must not exist).
+    Check { key: String, revision: u64 },
 }
 
 /// What `Engine::update_state` does with the key once it has seen it.
@@ -320,7 +325,9 @@ pub enum StateChange {
 impl StateOp {
     fn key(&self) -> &str {
         match self {
-            StateOp::Put { key, .. } | StateOp::Delete { key, .. } => key,
+            StateOp::Put { key, .. } | StateOp::Delete { key, .. } | StateOp::Check { key, .. } => {
+                key
+            }
         }
     }
 }
@@ -918,8 +925,14 @@ impl Engine {
     /// An empty batch is a no-op rather than an empty WAL record: replaying
     /// nothing is not worth a checksum.
     pub fn put_state_batch(&self, ops: Vec<StateOp>) -> Result<(), EngineError> {
+        self.state_txn(ops).map(|_| ())
+    }
+
+    /// Run `ops` as one transaction: all of them or none. Returns, per op, the
+    /// key's revision afterwards (`None` for a delete).
+    pub fn state_txn(&self, ops: Vec<StateOp>) -> Result<Vec<Option<u64>>, EngineError> {
         if ops.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         // Every key of the batch is locked from the revision checks through the
         // commit, so no other writer can move one of them in between.
@@ -970,7 +983,7 @@ impl Engine {
     }
 
     /// The body of `put_state_batch`. The caller holds every key's lock.
-    fn batch_locked(&self, ops: Vec<StateOp>) -> Result<(), EngineError> {
+    fn batch_locked(&self, ops: Vec<StateOp>) -> Result<Vec<Option<u64>>, EngineError> {
         let now = now_ms();
 
         // Phase 1: validate and allocate. Nothing is written yet, so a
@@ -979,6 +992,7 @@ impl Engine {
         // checked against the first write, as if the ops ran one after another.
         let mut in_batch: HashMap<&str, Option<u64>> = HashMap::new();
         let mut prepared = Vec::with_capacity(ops.len());
+        let mut revisions = Vec::with_capacity(ops.len());
         for op in &ops {
             let key = op.key();
             let current = match in_batch.get(key) {
@@ -996,6 +1010,7 @@ impl Engine {
                     let revision = current.map_or(1, |r| r.saturating_add(1));
                     let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
                     in_batch.insert(key, Some(revision));
+                    revisions.push(Some(revision));
                     prepared.push(serde_json::json!({
                         "op": "put",
                         "key": key,
@@ -1007,9 +1022,18 @@ impl Engine {
                 StateOp::Delete { key, if_revision } => {
                     check_revision(current, *if_revision)?;
                     in_batch.insert(key, None);
+                    revisions.push(None);
                     prepared.push(serde_json::json!({ "op": "delete", "key": key }));
                 }
+                StateOp::Check { revision, .. } => {
+                    check_revision(current, Some(*revision))?;
+                    revisions.push(current);
+                }
             }
+        }
+        // Only checks: everything held, nothing to write.
+        if prepared.is_empty() {
+            return Ok(revisions);
         }
 
         // Phase 2: one record, one publish, one projection commit.
@@ -1022,7 +1046,8 @@ impl Engine {
         if let Some(db) = &self.0.state_db {
             db.apply_state_batch(&event)?;
         } else {
-            for (op, entry) in ops.iter().zip(prepared.iter()) {
+            let writes = ops.iter().filter(|op| !matches!(op, StateOp::Check { .. }));
+            for (op, entry) in writes.zip(prepared.iter()) {
                 match op {
                     StateOp::Put { key, value, .. } => {
                         let revision = entry["revision"].as_u64().unwrap_or(1);
@@ -1037,6 +1062,7 @@ impl Engine {
                     StateOp::Delete { key, .. } => {
                         let _ = self.0.state.delete(key);
                     }
+                    StateOp::Check { .. } => {}
                 }
             }
         }
@@ -1048,7 +1074,7 @@ impl Engine {
                 self.metrics().inc_state_put();
             }
         }
-        Ok(())
+        Ok(revisions)
     }
 
     /// The live revision of `key`, or `None` if it does not exist or expired.

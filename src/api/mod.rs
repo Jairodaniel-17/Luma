@@ -432,6 +432,7 @@ pub fn router_and_state(deps: RouterDeps) -> (Router<()>, AppState) {
             get(routes_state::query_index),
         )
         .route("/v1/state/batch_put", post(routes_state::batch_put))
+        .route("/v1/state/txn", post(routes_state::txn))
         .route("/v1/state/:key", get(routes_state::get))
         .route("/v1/state/:key", put(routes_state::put))
         .route("/v1/state/:key", delete(routes_state::delete))
