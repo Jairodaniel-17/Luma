@@ -75,7 +75,7 @@ start() {
     etcd)
         etcd --data-dir "$MNT/etcd" --listen-client-urls http://127.0.0.1:2379 \
             --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:2380 \
-            >>"$WORK/engine.log" 2>&1 &
+            --experimental-initial-mmap-size=0 >>"$WORK/engine.log" 2>&1 &
         PID=$!; wait_port 2379
         # The port opens before etcd serves: requests get "connection reset".
         python3 -c "
