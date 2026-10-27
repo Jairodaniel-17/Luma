@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 ENGINE = sys.argv[2]
 RESP_PORT = {"luma": 6390, "redis-always": 6380, "redis-everysec": 6380}
@@ -104,6 +105,14 @@ def verify(path):
         lost = [k for k in confirmed if k not in present]
     else:
         c = Resp()
+        # Redis accepts connections while it replays its AOF and answers
+        # -LOADING until done; Luma only listens once replayed.
+        for _ in range(600):
+            try:
+                if c.cmd("PING") == "PONG":
+                    break
+            except RuntimeError:
+                time.sleep(0.1)
         lost = [k for k in confirmed if c.cmd("GET", k) != k]
     print(f"{len(confirmed)} confirmed, {len(lost)} lost")
     return len(lost)

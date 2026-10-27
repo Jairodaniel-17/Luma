@@ -8,6 +8,11 @@ name: Durability against other engines
 
 on:
   workflow_dispatch:
+    inputs:
+      engines:
+        description: 'JSON list, e.g. ["luma","redis-always"]. Empty runs all.'
+        required: false
+        default: ""
   schedule:
     - cron: "11 5 * * 0"
 
@@ -19,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [luma, redis-always, redis-everysec, pg-on, pg-off]
+        engine: ${{ fromJSON(inputs.engines || '["luma","redis-always","redis-everysec","pg-on","pg-off"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
