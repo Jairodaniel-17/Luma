@@ -164,23 +164,40 @@ pub async fn download(
         keys
     };
 
+    // In parallel, like the upload: one object at a time from a real remote
+    // put minutes on the recovery time of a backup of a few thousand files.
     let mut restored = 0;
-    for key in listing {
-        let relative = key
-            .as_ref()
-            .strip_prefix(&format!("{prefix}/"))
-            .ok_or_else(|| anyhow!("object `{key}` is not under `{prefix}`"))?
-            .to_string();
+    {
+        use futures_util::StreamExt as _;
+        let (prefix, decrypt) = (&prefix, &decrypt);
+        let mut gets = futures_util::stream::iter(
+            listing
+                .into_iter()
+                .map(|key| async move {
+                    let relative = key
+                        .as_ref()
+                        .strip_prefix(&format!("{prefix}/"))
+                        .ok_or_else(|| anyhow!("object `{key}` is not under `{prefix}`"))?
+                        .to_string();
 
-        let sealed = store.get(&key).await?.bytes().await?;
-        let plain = decrypt(&sealed).with_context(|| format!("decrypting {relative}"))?;
+                    let sealed = store.get(&key).await?.bytes().await?;
+                    let plain =
+                        decrypt(&sealed).with_context(|| format!("decrypting {relative}"))?;
 
-        let target = local.join(&relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+                    let target = local.join(&relative);
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&target, plain)?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .collect::<Vec<_>>(),
+        )
+        .buffer_unordered(crate::wal_ship::PARALLEL_REQUESTS);
+        while let Some(done) = gets.next().await {
+            done?;
+            restored += 1;
         }
-        std::fs::write(&target, plain)?;
-        restored += 1;
     }
 
     tracing::info!(prefix, objects = restored, "backup downloaded");

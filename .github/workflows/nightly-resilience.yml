@@ -353,6 +353,10 @@ jobs:
         run: DRILLS=2 bash scripts/dr_drill.sh bin
       - name: Delete the drill's objects
         if: always()
+        # OCI rejects the CRC checksums newer AWS CLIs add by default.
+        env:
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: >-
           aws s3 rm --recursive "$BACKUP_REMOTE_URL" --endpoint-url "$BACKUP_REMOTE_ENDPOINT"
           --region "$BACKUP_REMOTE_REGION" --only-show-errors
