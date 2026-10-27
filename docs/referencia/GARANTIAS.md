@@ -57,3 +57,15 @@ que no llegó a disco, se reinicia y se cuentan las confirmadas que faltan. 15 c
 | SQLite (WAL), `synchronous=NORMAL` | 65 236 | 2 828 |
 
 Las tres últimas son el control: no prometen durabilidad, y que pierdan muestra que el corte llega hasta lo no escrito.
+
+**etcd** no entra en esa corrida: bbolt mapea su archivo en memoria y falla sobre el montaje FUSE de LazyFS («unexpected
+fault address»). Se midió con reinicios reales: `scripts/sysrq/etcd.sh`, la misma carga y `echo b >
+/proc/sysrq-trigger` en Debian 13 arm64 (AWS t4g.small, disco EBS), 27/10/2026:
+
+| Motor | Reinicios | Escrituras confirmadas | Perdidas |
+|---|---|---|---|
+| etcd 3.5.17 (`fsync` por commit, lo normal) | 20 | 36 077 | 0 |
+| etcd 3.5.17, `--unsafe-no-fsync` (control) | 10 | 16 447 | 8 599 |
+
+El control también vale para los 50 reinicios de Luma en arm64 de arriba: en esa máquina, un reinicio real sí borra
+lo que no se sincronizó.
