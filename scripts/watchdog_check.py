@@ -21,7 +21,8 @@ import tempfile
 import time
 import urllib.request
 
-LUMA = sys.argv[1]
+# Absolute: the server is started from a temp dir, where a relative path breaks.
+LUMA = os.path.abspath(sys.argv[1])
 WATCHDOG_SEC = 2.0
 work = tempfile.mkdtemp()
 sock_path = os.path.join(work, "notify.sock")
