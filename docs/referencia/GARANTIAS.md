@@ -58,6 +58,10 @@ que no llegó a disco, se reinicia y se cuentan las confirmadas que faltan. 15 c
 
 Las tres últimas son el control: no prometen durabilidad, y que pierdan muestra que el corte llega hasta lo no escrito.
 
+Repetida el mismo 27/10 sobre `7ae522a` (índice de documentos nuevo, run 40530797942), con el mismo resultado: Luma
+122 014 confirmadas y 0 perdidas; Redis `always` 65 571/0; PostgreSQL `on` 118 901/0; SQLite `FULL` 65 167/0; y los
+controles Redis `everysec` 153 069/28 083, PostgreSQL `off` 159 523/8 396 y SQLite `NORMAL` 63 981/2 761.
+
 **etcd** no entra en esa corrida: bbolt mapea su archivo en memoria y falla sobre el montaje FUSE de LazyFS («unexpected
 fault address»). Se midió con reinicios reales: `scripts/sysrq/etcd.sh`, la misma carga y `echo b >
 /proc/sysrq-trigger` en Debian 13 arm64 (AWS t4g.small, disco EBS), 27/10/2026:
