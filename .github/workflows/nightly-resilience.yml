@@ -19,6 +19,10 @@ on:
         description: "Crash iterations per engine"
         required: false
         default: "50"
+      only:
+        description: "Run only these jobs, comma-separated ids (e.g. lost-host,disk-faults). Empty runs all."
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +30,7 @@ env:
 jobs:
   crash-recovery:
     name: Crash recovery matrix
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',crash-recovery,') }}
     runs-on: ubuntu-latest
     # A hung server would otherwise sit here until the account default expires.
     timeout-minutes: 15
@@ -46,6 +51,7 @@ jobs:
 
   durability-invariants:
     name: Durability invariants
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',durability-invariants,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -66,6 +72,7 @@ jobs:
 
   forward-compatibility:
     name: Reads what the last release wrote
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',forward-compatibility,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -87,6 +94,7 @@ jobs:
 
   atomicity:
     name: Multi-key atomicity
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',atomicity,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -103,6 +111,7 @@ jobs:
 
   parser-fuzz:
     name: Parser fuzzing
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',parser-fuzz,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -129,6 +138,7 @@ jobs:
 
   differential:
     name: RESP differential, extended
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',differential,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -152,6 +162,7 @@ jobs:
 
   clients:
     name: Client E2E, both targets
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',clients,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -201,6 +212,7 @@ jobs:
 
   ioredis:
     name: ioredis (Node), both targets
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',ioredis,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The nightly is what the GA criterion for the RESP listener counts, so it
@@ -256,6 +268,7 @@ jobs:
 
   audit:
     name: Advisories
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',audit,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -274,6 +287,7 @@ jobs:
     # a cut). SPEC-friochap CA-1, the one-off 1 000, was met on 2026-10-27:
     # 1 115 cuts, no loss. LazyFS throws away whatever was not fsynced, which
     # is what a power cut does to the page cache and kill -9 never reaches.
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',power-cuts,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -297,6 +311,7 @@ jobs:
     name: Lost host, systemd watchdog
     # SPEC-friochap F6 and F3: a host rebuilt from MinIO alone, and systemd's
     # watchdog seeing a frozen process.
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',lost-host,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -316,6 +331,7 @@ jobs:
     name: Full disk, EIO on fsync
     # SPEC-friochap F2: a 64 MB ext4 fills up, a device-mapper disk starts
     # answering EIO. Docker, for the privileges loop devices and dm need.
+    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',disk-faults,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
