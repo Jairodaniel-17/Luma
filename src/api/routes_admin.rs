@@ -20,7 +20,10 @@ pub async fn backup(
     Extension(ctx): Extension<TenantContext>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_role(&ctx, "admin")?;
-    let internal = |e: String| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e);
+    let internal = |e: String| {
+        tracing::error!("backup failed: {e}");
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e)
+    };
     state
         .engine
         .force_snapshot()

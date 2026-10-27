@@ -63,6 +63,12 @@ pub struct BackupManifest {
 pub const STATE_EXPORT: &str = "state.export.jsonl";
 
 /// Copy a directory tree, returning how many files were written.
+///
+/// The server keeps running during a backup: a blob deleted or a queue message
+/// acked between the listing and the copy is gone, and is simply not in the
+/// backup (it is not in the data either). Failing on it made `POST
+/// /v1/admin/backup` answer 500 under any write load. `.tmp-` files are writes
+/// still in progress, not confirmed: skipped.
 fn copy_tree(src: &Path, dst: &Path) -> Result<usize> {
     if !src.is_dir() {
         return Ok(0);
@@ -70,12 +76,25 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<usize> {
     fs::create_dir_all(dst)?;
     let mut copied = 0;
     for entry in fs::read_dir(src)?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(".tmp-") {
+            continue;
+        }
         let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if file_type.is_dir() {
             copied += copy_tree(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-            copied += 1;
+            continue;
+        }
+        match fs::copy(entry.path(), &target) {
+            Ok(_) => copied += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = fs::remove_file(&target);
+            }
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(copied)
@@ -501,5 +520,37 @@ pub async fn ship_if_configured(config: &Config, dest: &Path) {
     match crate::backup_remote::ship(&target, dest, config.backup_retention, &secrets).await {
         Ok(keys) => tracing::info!(objects = keys.len(), "backup shipped off-host"),
         Err(e) => tracing::error!("off-host backup failed, local copy retained: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_tree_skips_writes_in_progress() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        fs::create_dir_all(src.path().join("b1")).unwrap();
+        fs::write(src.path().join("b1/keep"), b"k").unwrap();
+        fs::write(src.path().join("b1/.tmp-partial"), b"p").unwrap();
+        assert_eq!(copy_tree(src.path(), dst.path()).unwrap(), 1);
+        assert!(dst.path().join("b1/keep").exists());
+        assert!(!dst.path().join("b1/.tmp-partial").exists());
+    }
+
+    /// A file that vanishes between the listing and the copy (a blob deleted,
+    /// a message acked while the server runs) is skipped, not a failed backup.
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_skips_a_file_gone_mid_copy() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("keep"), b"k").unwrap();
+        // A dangling symlink lists like a file and fails to copy with NotFound,
+        // exactly like a file removed after `read_dir`.
+        std::os::unix::fs::symlink(src.path().join("gone"), src.path().join("acked")).unwrap();
+        assert_eq!(copy_tree(src.path(), dst.path()).unwrap(), 1);
+        assert!(!dst.path().join("acked").exists());
     }
 }
