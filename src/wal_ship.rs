@@ -234,6 +234,10 @@ const SHIPPED_TREES: &[&str] = &["blobs", "queues"];
 /// The list of shipped files, so a restart knows what is already up and a
 /// restore knows what exists (and so what was deleted).
 const FILES_INDEX: &str = "files-index.json";
+/// Objects uploaded, deleted or downloaded at once. One at a time, a real
+/// remote (~100-200 ms per request) moves 5-10 files a second: a busy queue
+/// outran it and the recovery point slipped from one interval to minutes.
+pub const PARALLEL_REQUESTS: usize = 32;
 
 /// What has been shipped of the blob and queue trees: relative path to
 /// `(length, modified time in ns)`. Loaded from the remote index on the first
@@ -311,41 +315,90 @@ pub async fn ship_files(
         state.loaded = true;
     }
 
+    use futures_util::StreamExt as _;
     let local = local_files(data_dir)?;
     let mut changed = 0;
-    for (relative, stamp) in &local {
-        if state.shipped.get(relative) == Some(stamp) {
-            continue;
+    let mut first_error = None;
+
+    let encrypt = &encrypt;
+    let pending: Vec<(&String, &(u64, u128))> = local
+        .iter()
+        .filter(|(relative, stamp)| state.shipped.get(*relative) != Some(*stamp))
+        .collect();
+    let mut uploads = futures_util::stream::iter(
+        pending
+            .into_iter()
+            .map(|(relative, stamp)| async move {
+                // Gone since the listing (acked, deleted): the next pass deletes it.
+                let Ok(bytes) = std::fs::read(data_dir.join(relative)) else {
+                    return Ok(None);
+                };
+                let sealed = encrypt(&bytes).with_context(|| format!("encrypting {relative}"))?;
+                store
+                    .put(
+                        &ObjectPath::from(format!("{prefix}/files/{relative}")),
+                        PutPayload::from(sealed),
+                    )
+                    .await
+                    .with_context(|| format!("uploading {relative}"))?;
+                Ok::<_, anyhow::Error>(Some((relative, stamp)))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .buffer_unordered(PARALLEL_REQUESTS);
+    // What did go up is recorded even when something else failed, so the
+    // retry only sends the rest.
+    let mut done_ok = Vec::new();
+    while let Some(done) = uploads.next().await {
+        match done {
+            Ok(Some(file)) => done_ok.push(file),
+            Ok(None) => {}
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
         }
-        // Gone since the listing (acked, deleted): the next pass deletes it.
-        let Ok(bytes) = std::fs::read(data_dir.join(relative)) else {
-            continue;
-        };
-        let sealed = encrypt(&bytes).with_context(|| format!("encrypting {relative}"))?;
-        store
-            .put(
-                &ObjectPath::from(format!("{prefix}/files/{relative}")),
-                PutPayload::from(sealed),
-            )
-            .await
-            .with_context(|| format!("uploading {relative}"))?;
+    }
+    drop(uploads);
+    for (relative, stamp) in done_ok {
         state.shipped.insert(relative.clone(), *stamp);
         changed += 1;
     }
+
     let gone: Vec<String> = state
         .shipped
         .keys()
         .filter(|k| !local.contains_key(*k))
         .cloned()
         .collect();
-    for relative in gone {
-        let key = ObjectPath::from(format!("{prefix}/files/{relative}"));
-        match store.delete(&key).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-            Err(e) => return Err(e).with_context(|| format!("deleting {relative}")),
+    let mut deletes = futures_util::stream::iter(
+        gone.into_iter()
+            .map(|relative| async move {
+                let key = ObjectPath::from(format!("{prefix}/files/{relative}"));
+                match store.delete(&key).await {
+                    Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(relative),
+                    Err(e) => Err(e).with_context(|| format!("deleting {relative}")),
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .buffer_unordered(PARALLEL_REQUESTS);
+    let mut removed = Vec::new();
+    while let Some(done) = deletes.next().await {
+        match done {
+            Ok(relative) => removed.push(relative),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
         }
+    }
+    drop(deletes);
+    for relative in removed {
         state.shipped.remove(&relative);
         changed += 1;
+    }
+    if let Some(e) = first_error {
+        // No index this pass: it must never list a file that is not up.
+        return Err(e);
     }
     if changed > 0 {
         let index = encrypt(&serde_json::to_vec(&state.shipped)?)?;
@@ -373,18 +426,32 @@ pub async fn restore_files(
     };
     let index: std::collections::BTreeMap<String, (u64, u128)> =
         serde_json::from_slice(&decrypt(&found.bytes().await?)?)?;
-    for relative in index.keys() {
-        let sealed = store
-            .get(&ObjectPath::from(format!("{prefix}/files/{relative}")))
-            .await
-            .with_context(|| format!("downloading {relative}"))?
-            .bytes()
-            .await?;
-        let target = data_dir.join(relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+    {
+        use futures_util::StreamExt as _;
+        let decrypt = &decrypt;
+        let mut downloads = futures_util::stream::iter(
+            index
+                .keys()
+                .map(|relative| async move {
+                    let sealed = store
+                        .get(&ObjectPath::from(format!("{prefix}/files/{relative}")))
+                        .await
+                        .with_context(|| format!("downloading {relative}"))?
+                        .bytes()
+                        .await?;
+                    let target = data_dir.join(relative);
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&target, decrypt(&sealed)?)?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .collect::<Vec<_>>(),
+        )
+        .buffer_unordered(PARALLEL_REQUESTS);
+        while let Some(done) = downloads.next().await {
+            done?;
         }
-        std::fs::write(&target, decrypt(&sealed)?)?;
     }
     for relative in local_files(data_dir)?.keys() {
         if !index.contains_key(relative) {
@@ -473,13 +540,56 @@ pub fn spawn(config: crate::config::Config) {
         "WAL shipping enabled; worst-case data loss on host failure is one interval"
     );
 
+    let stream = stream_prefix(&target.prefix);
+    let data_dir = PathBuf::from(data_dir);
+    // Blobs and queues ship on their own task: a long pass of files (a burst
+    // of uploads, a slow remote) must never hold the WAL back, whose interval
+    // is the promise.
+    {
+        let store = target.store.clone();
+        let stream = stream.clone();
+        let data_dir = data_dir.clone();
+        tokio::spawn(async move {
+            let secrets = crate::crypto::SecretBox::from_env();
+            let mut files = FileShipState::default();
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                // Skipped while fenced: another node owns the prefix now.
+                if !crate::fencing::standing(&store, &stream, &data_dir)
+                    .await
+                    .is_ok_and(|s| matches!(s, crate::fencing::Standing::Current))
+                {
+                    continue;
+                }
+                let started = std::time::Instant::now();
+                match ship_files(
+                    &store,
+                    &stream,
+                    &data_dir,
+                    &mut files,
+                    |bytes| secrets.encrypt_bytes(bytes),
+                    |bytes| secrets.decrypt_bytes(bytes),
+                )
+                .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(
+                        files = n,
+                        lag_ms = started.elapsed().as_millis() as u64,
+                        "blobs and queues shipped"
+                    ),
+                    Err(e) => tracing::error!("file shipping failed, will retry: {e}"),
+                }
+            }
+        });
+    }
+
     tokio::spawn(async move {
         let secrets = crate::crypto::SecretBox::from_env();
         let mut state = ShipState::new();
-        let mut files = FileShipState::default();
-        let stream = stream_prefix(&target.prefix);
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
-        let data_dir = PathBuf::from(data_dir);
         loop {
             ticker.tick().await;
             let started = std::time::Instant::now();
@@ -501,27 +611,6 @@ pub fn spawn(config: crate::config::Config) {
                 // Killing the task on a transient network error would silently
                 // stop shipping for the lifetime of the process.
                 Err(e) => tracing::error!("WAL shipping failed, will retry: {e}"),
-            }
-            // Blobs and queues, which the WAL does not carry. Skipped while
-            // fenced: another node owns the prefix now.
-            if crate::fencing::standing(&target.store, &stream, &data_dir)
-                .await
-                .is_ok_and(|s| matches!(s, crate::fencing::Standing::Current))
-            {
-                match ship_files(
-                    &target.store,
-                    &stream,
-                    &data_dir,
-                    &mut files,
-                    |bytes| secrets.encrypt_bytes(bytes),
-                    |bytes| secrets.decrypt_bytes(bytes),
-                )
-                .await
-                {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(files = n, "blobs and queues shipped"),
-                    Err(e) => tracing::error!("file shipping failed, will retry: {e}"),
-                }
             }
         }
     });

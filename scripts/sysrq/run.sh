@@ -70,6 +70,8 @@ wait_ssh() {
 
 log "booting the VM"
 wait_ssh
+boots() { vm "journalctl --list-boots --no-pager | tail -n +2 | wc -l"; }
+before=$(boots)
 log "installing Luma"
 # Throwaway secrets for a throwaway VM: Luma refuses weak ones.
 KEYS="LUMA_API_KEY=sysrq-harness-key-0123456789abcdef"  # gitleaks:allow (test only)
@@ -97,10 +99,9 @@ ENV
     systemctl daemon-reload
     systemctl enable --now luma
     sync"
-# Before any cut the VM must have booted exactly once: a reboot nobody asked
-# for here (a guest panic) would pass for a result of the test.
-boots=$(vm "journalctl --list-boots --no-pager | tail -n +2 | wc -l")
-[ "$boots" = 1 ] || { echo "the VM rebooted on its own ($boots boots) before the test"; exit 1; }
+# No reboot nobody asked for during the install (a guest panic), or it would
+# pass for a result of the test.
+[ "$(boots)" = "$before" ] || { echo "the machine rebooted on its own during the install"; exit 1; }
 log "reboots"
 
 for cycle in $(seq "$CYCLES"); do

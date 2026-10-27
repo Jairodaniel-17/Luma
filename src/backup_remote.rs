@@ -83,17 +83,30 @@ pub async fn upload(
         ));
     }
 
-    let mut written = Vec::with_capacity(files.len());
-    let mut manifest: Option<(String, PathBuf)> = None;
+    let (manifest, data): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(relative, _)| relative == MANIFEST_OBJECT);
+    let manifest = manifest.into_iter().next();
 
-    for (relative, path) in files {
-        if relative == MANIFEST_OBJECT {
-            manifest = Some((relative, path));
-            continue;
+    // In parallel: a backup is thousands of blobs and queue messages, and one
+    // request at a time to a real remote takes minutes.
+    let mut written = Vec::with_capacity(data.len() + 1);
+    {
+        use futures_util::StreamExt as _;
+        let encrypt = &encrypt;
+        let mut puts = futures_util::stream::iter(
+            data.into_iter()
+                .map(|(relative, path)| async move {
+                    put_one(store, prefix, &relative, &path, encrypt).await
+                })
+                .collect::<Vec<_>>(),
+        )
+        .buffer_unordered(crate::wal_ship::PARALLEL_REQUESTS);
+        while let Some(key) = puts.next().await {
+            written.push(key?);
         }
-        let key = put_one(store, prefix, &relative, &path, &encrypt).await?;
-        written.push(key);
     }
+    written.sort();
 
     let (relative, path) = manifest.ok_or_else(|| {
         anyhow!("local backup has no manifest.json; run `luma backup` rather than uploading a hand-made directory")
