@@ -4,7 +4,9 @@ name: Durability against other engines
 # PostgreSQL, etcd and SQLite: what "on par with other engines" means in
 # numbers. The lossy settings (Redis appendfsync everysec, Postgres
 # synchronous_commit=off, SQLite synchronous=NORMAL) are the control that the
-# cuts are deep enough to lose data. See
+# cuts are deep enough to lose data. etcd is not in the default list: its
+# storage (bbolt) memory-maps the file and dies with "unexpected fault" on
+# LazyFS's FUSE mount, so the harness cannot cut under it. See
 # scripts/apagon/comparar.sh.
 
 on:
@@ -25,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: ${{ fromJSON(inputs.engines || '["luma","redis-always","redis-everysec","pg-on","pg-off","etcd","sqlite-full","sqlite-normal"]') }}
+        engine: ${{ fromJSON(inputs.engines || '["luma","redis-always","redis-everysec","pg-on","pg-off","sqlite-full","sqlite-normal"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Install stable
