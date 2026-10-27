@@ -76,7 +76,18 @@ start() {
         etcd --data-dir "$MNT/etcd" --listen-client-urls http://127.0.0.1:2379 \
             --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:2380 \
             >>"$WORK/engine.log" 2>&1 &
-        PID=$!; wait_port 2379 ;;
+        PID=$!; wait_port 2379
+        # The port opens before etcd serves: requests get "connection reset".
+        python3 -c "
+import sys, time, urllib.request
+for _ in range(600):
+    try:
+        if b'\"true\"' in urllib.request.urlopen('http://127.0.0.1:2379/health', timeout=2).read():
+            sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(0.1)
+sys.exit('etcd not healthy')" || { tail -20 "$WORK/engine.log"; exit 1; } ;;
     sqlite-*) PID= ;;
     pg-*)
         if [ ! -d "$MNT/pg" ]; then
