@@ -28,21 +28,26 @@ Esa es la razón de la separación, no una desconfianza en Luma.
   sitio equivocado, dos de ellos con pérdida silenciosa de datos (`c184423`: tras un arranque sin escrituras, lo nuevo
   se perdía; `6b0ddfe`: segmentos de WAL vacíos que nunca se borraban).
 
-## Estado al 26/10/2026
+## Estado al 27/10/2026
 
 | Criterio | Estado | Evidencia |
 |---|---|---|
 | CA-1 · 1 000 cortes con LazyFS | cumplido: 1 115 cortes, 0 pérdidas (533 en local, 582 en GitHub) | `scripts/apagon/`; 200 por noche en `nightly-resilience.yml` |
-| CA-2 · 50 `sysrq` | cumplido en x86 con KVM: 50 reinicios reales, 0 pérdidas (~52 700 claves/blobs/docs y ~8 800 mensajes verificados); en arm64 la suite completa pasa (850/850). Falta solo correr el mismo script en una A1 desechable | `scripts/sysrq/run.sh`, `sysrq.yml` (semanal); `test-arm64` en CI |
+| CA-2 · 50 `sysrq` | cumplido en x86 con KVM y en **arm64**: 50 + 50 reinicios reales, 0 pérdidas. arm64: Debian 13 en una VM Graviton (AWS t4g.small, disco EBS) con la unidad de producción, ~21 600 claves/blobs/docs y ~3 700 mensajes verificados. Queda repetirlo en la A1 de producción antes de abrirla (mismo script con `HOST=`) | `scripts/sysrq/run.sh` (`HOST=` reinicia una máquina existente), `sysrq.yml` (semanal); `test-arm64` en CI |
 | CA-3 · disco lleno | cumplido | `tests/disk_full.rs` en ext4 de 64 MB (`scripts/disk_full.sh`): 507, lecturas 200, recuperación sola, todo sobrevive al reinicio |
 | CA-4 · EIO en fsync | cumplido | `tests/fsync_eio.rs` con `dm-error` (`scripts/fsync_eio.sh`): falla la escritura, solo lectura en `/v1/health/ready` aunque el disco vuelva |
 | CA-5 · watchdog | cumplido | `scripts/watchdog_check.py`: `READY` tras el bind, latidos que se cortan con el proceso congelado, `STOPPING` y salida en 1 s |
-| CA-6 · RSS y `MemoryMax` | **falta la carga real de Friochap**; con la carga sintética el pico fue de 60–250 MB (`scripts/apagon/dr.sh`) | — |
+| CA-6 · RSS y `MemoryMax` | cumplido: con la prueba de carga del ERP (26/10: 70 de oficina + 50 técnicos, 1 CPU / 4 GB, ERP + Luma + Litestream) Luma llegó a **17 MB**; con la carga de estrés del ensayo de host perdido, a 264–353 MB. `MemoryMax=1G` deja más del 50 % de margen sobre el peor | PLT-06 del ERP; `scripts/apagon/dr.sh` (VmHWM) |
 | CA-7 · actualizar con carga | cumplido | v4.26.0 → nueva bajo carga, 10 ciclos sin pérdidas; `tests/golden_data_dir.rs` lee un `data_dir` grabado por v4.26.0 |
-| CA-8 · otra máquina desde el remoto | cumplido con MinIO; falta repetirlo contra R2 en la VM | `scripts/dr_drill.sh`: 0 fallas, todo lo confirmado hasta 2,5–7,9 s antes del corte está (promesa: 10 s); RTO 2–16 s (16 s con ~27 600 objetos en GitHub) |
+| CA-8 · otra máquina desde el remoto | cumplido contra **OCI Object Storage** (Toronto, API S3, el remoto que usará Friochap) y con MinIO | OCI: 0 fallas, todo lo confirmado hasta 4,8–4,9 s antes del corte está (promesa: 10 s), RTO 27–28 s con ~26 500 objetos; `lost-host-oci` en `nightly-resilience.yml` cada noche (secretos `OCI_S3_*`). MinIO: 2,5–7,9 s, RTO 2–16 s (`scripts/dr_drill.sh`) |
 | CA-9 · rodaje de 72 h | **falta** (semana del 16/11) | — |
 
 Corregido en el camino, con pérdida o corrupción de datos de por medio:
+- Contra un remoto real (OCI, ~150 ms por pedido) los blobs y mensajes se subían de a uno: una pasada tardaba minutos,
+  el envío del WAL esperaba detrás y la pérdida máxima prometida de 10 s no se cumplía con carga. Ahora subidas y
+  bajadas van de a 32 y el WAL tiene su propio ciclo. Restaurar 2 900 objetos bajó de 172 s a 41 s.
+- `POST /v1/admin/backup` respondía 500 si un blob o un mensaje se borraba mientras se copiaba (con carga, casi
+  siempre): lo que desaparece durante la copia se salta, y las escrituras a medio hacer (`.tmp-`) no se copian.
 - Escrituras confirmadas que se perdían porque deletes, lotes y vectores se adelantaban en el WAL a la cola de group
   commit. CAS no atómico, ABA en índices de documentos y `LMOVE`, INCR/APPEND/SET NX sin atomicidad (`tests/acid_concurrency.rs`).
 - Los respaldos perdían toda clave anterior al segmento de WAL más viejo que quedaba: no llevaban la proyección KV. Ahora
