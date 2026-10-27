@@ -88,14 +88,18 @@ su journaling de metadatos y no en un flush que hagamos nosotros.
 | SQLite | `VACUUM INTO` — copia consistente sin parar el actor |
 | `snapshot.json` | copia directa |
 | Segmentos del WAL | todos los `events-*.log` presentes |
-| `state.lsm` (proyección KV) | **no se copia** — ver abajo |
+| `state.lsm` (proyección KV) | **no se copia**: se exporta a `state.export.jsonl` desde una lectura consistente — ver abajo |
 | `vectors/` | árbol completo: manifest, runs y mmaps |
 | `blobs/` | árbol completo |
 | `queues/` | árbol completo |
 | Estructuras (listas, hashes, sets, zsets) | van dentro del WAL y el snapshot: se guardan bajo el prefijo `struct:` del KV. Hay test de round-trip completo |
 
-> **Por qué la proyección no se copia.** Es una proyección del WAL: el restore lo
-> reconstruye. Una versión anterior sí lo copiaba, para que el restore arrancara
+> **Por qué la proyección no se copia sino que se exporta.** Copiar el
+> directorio en caliente da una copia rota (abajo). Pero no basta con el WAL: la
+> retención lo poda, y un respaldo sin el KV perdía las claves anteriores al
+> segmento más viejo. Por eso se exporta, antes de copiar el WAL, y el restore
+> la importa y reproduce el WAL encima. Lo que sigue explica por qué no se
+> copia. Una versión anterior sí lo copiaba, para que el restore arrancara
 > servido en vez de replayando, y estaba mal por partida doble: el fichero está
 > abierto y mapeado por el engine en marcha, así que en Windows la copia falla
 > con violación de compartición —rompiendo `luma backup` entero— y en Linux

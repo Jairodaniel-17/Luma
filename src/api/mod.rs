@@ -139,6 +139,71 @@ fn scoped_resource_name(path: &str) -> Option<&str> {
     None
 }
 
+/// Free space below which writes are refused: 2 % of the disk, and at least
+/// 256 MiB unless that is more than a tenth of a small disk. The margin is for
+/// what must still work when the disk is nearly full: WAL rotation, snapshots,
+/// and recovery at the next start.
+pub(crate) fn write_floor(total: u64) -> u64 {
+    (total / 50).max((256 * 1024 * 1024).min(total / 10))
+}
+
+/// POSTs that only read. Everything else that is not a GET or HEAD writes.
+fn is_read_post(path: &str) -> bool {
+    path == "/search"
+        || [
+            "/find",
+            "/search",
+            "/search_batch",
+            "/rerank",
+            "/query",
+            "/aggregate",
+        ]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+/// Refuse writes this node cannot make durable, before they reach a handler:
+/// **503** once a failed fsync put the WAL in read-only mode, **507** when the
+/// disk is nearly full. Reads keep being served in both cases, and a 507
+/// clears by itself once space is freed.
+///
+/// Checked up front rather than by mapping each write's own error, so a full
+/// disk is one clear answer instead of a different 500 per handler, and the
+/// margin keeps the disk from ever reaching the point where the WAL itself
+/// cannot be written.
+async fn write_gate(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, errors::ApiError> {
+    let method = req.method();
+    let reads = method == axum::http::Method::GET
+        || method == axum::http::Method::HEAD
+        || method == axum::http::Method::OPTIONS
+        || (method == axum::http::Method::POST && is_read_post(req.uri().path()));
+    if !reads {
+        if state.engine.health() == "read_only" {
+            return Err(errors::ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "read_only",
+                "a WAL fsync failed; writes are refused until Luma is restarted",
+            ));
+        }
+        if let Some(dir) = &state.config.data_dir {
+            if let Some((free, total)) = crate::durability::disk_space(std::path::Path::new(dir)) {
+                if free < write_floor(total) {
+                    return Err(errors::ApiError::new(
+                        StatusCode::INSUFFICIENT_STORAGE,
+                        "insufficient_storage",
+                        "the disk is nearly full; writes resume once space is freed",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(next.run(req).await)
+}
+
 /// Per-organization data isolation. Runs after authentication (so the
 /// [`TenantContext`] is present) and enforces that a collection/namespace is
 /// only ever accessed by the org that first created it. Platform admins (no
@@ -284,6 +349,7 @@ pub fn router_and_state(deps: RouterDeps) -> (Router<()>, AppState) {
         .merge(routes_docs::routes_docs())
         .route("/v1/health", get(routes_state::health))
         .route("/v1/health/primary", get(routes_state::health_primary))
+        .route("/v1/health/ready", get(routes_state::health_ready))
         .route("/v1/metrics", get(routes_state::metrics))
         // ---- Enterprise accounts: register / login are public; the rest need a token ----
         .route("/v1/auth/register", post(routes_accounts::register))
@@ -492,7 +558,6 @@ pub fn router_and_state(deps: RouterDeps) -> (Router<()>, AppState) {
             "/v1/config/embedding/probe",
             post(routes_config::probe_embedding),
         )
-        .route("/v1/admin/backup", post(routes_admin::backup))
         .route("/v1/admin/audit", get(routes_admin::get_audit_log))
         .route("/v1/admin/resp", get(routes_admin::resp_activity))
         .route(
@@ -513,6 +578,10 @@ pub fn router_and_state(deps: RouterDeps) -> (Router<()>, AppState) {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(state.config.request_timeout_secs),
         ))
+        // After the timeout on purpose (a layer wraps only the routes already
+        // added): a full backup takes as long as the data is big, and cutting
+        // it at 30 s answered 408 to a backup that was still being written.
+        .route("/v1/admin/backup", post(routes_admin::backup))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
@@ -522,6 +591,10 @@ pub fn router_and_state(deps: RouterDeps) -> (Router<()>, AppState) {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             tenant_isolation_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            write_gate,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

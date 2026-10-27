@@ -47,7 +47,7 @@
 //! 50 000 inserts measured at 18.3 MiB.
 
 use crate::engine::events::EventRecord;
-use crate::engine::state::{StateError, StateItem};
+use crate::engine::state::StateItem;
 use anyhow::Context;
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 use std::path::Path;
@@ -174,39 +174,6 @@ impl StateDb {
             }
         }
         Ok(out)
-    }
-
-    pub fn prepare_put_revision(
-        &self,
-        key: &str,
-        if_revision: Option<u64>,
-    ) -> Result<u64, StateError> {
-        let now = now_ms();
-        // A read failure is treated as absent rather than propagated: the caller
-        // only accepts a revision or a mismatch, and inventing a revision from a
-        // failed read is worse than refusing the compare-and-swap.
-        let current = self
-            .read(key)
-            .ok()
-            .flatten()
-            .filter(|v| v.expires_at_ms.is_none_or(|e| e > now));
-
-        match current {
-            Some(v) => {
-                if let Some(expected) = if_revision {
-                    if v.revision != expected {
-                        return Err(StateError::RevisionMismatch);
-                    }
-                }
-                Ok(v.revision.saturating_add(1))
-            }
-            None => {
-                if if_revision.is_some() {
-                    return Err(StateError::RevisionMismatch);
-                }
-                Ok(1)
-            }
-        }
     }
 
     pub fn apply_state_updated(&self, ev: &EventRecord) -> anyhow::Result<()> {
@@ -365,6 +332,83 @@ impl StateDb {
             .persist(PersistMode::SyncAll)
             .context("persist the LSM journal")?;
         self.applied_offset()
+    }
+
+    /// Write every stored key to `out` as of one instant, with the offset that
+    /// instant reflects, and fsync it. Returns that offset.
+    ///
+    /// What a backup needs to restore keys whose WAL segments retention has
+    /// already pruned. The backup used to leave the projection out and count on
+    /// the WAL to rebuild it, and lost every key older than the retained WAL.
+    /// A read snapshot rather than a file copy: copying an LSM that is being
+    /// written gives a torn copy. Writes after the instant are in the WAL the
+    /// backup copies afterwards, and replay applies them on top.
+    ///
+    /// Format: JSON lines, a header `{"applied_offset":n}` and then one
+    /// `{"k":key,"v":stored}` per key.
+    pub fn export(&self, out: &Path) -> anyhow::Result<u64> {
+        use std::io::Write as _;
+        let instant = self.keyspace.instant();
+        let state = self.state.snapshot_at(instant);
+        let meta = self.meta.snapshot_at(instant);
+        let offset = meta
+            .get(META_APPLIED_OFFSET)?
+            .map(|raw| u64::from_le_bytes(raw.as_ref().try_into().unwrap_or([0; 8])))
+            .unwrap_or(0);
+
+        let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
+        writeln!(file, "{}", serde_json::json!({ "applied_offset": offset }))?;
+        for entry in state.iter() {
+            let (key, value) = entry?;
+            let key = std::str::from_utf8(&key).context("non-UTF-8 key")?;
+            write!(file, "{{\"k\":{},\"v\":", serde_json::to_string(key)?)?;
+            file.write_all(&value)?;
+            file.write_all(b"}\n")?;
+        }
+        file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        Ok(offset)
+    }
+
+    /// Load an `export` into an empty projection in `data_dir`, so the next
+    /// start replays only the WAL after the exported offset.
+    pub fn import(data_dir: &Path, from: &Path) -> anyhow::Result<u64> {
+        use std::io::BufRead as _;
+        let db = Self::open(data_dir)?;
+        anyhow::ensure!(
+            db.state.is_empty()?,
+            "refusing to import into a projection that already holds keys"
+        );
+        let mut lines = std::io::BufReader::new(std::fs::File::open(from)?).lines();
+        let header: serde_json::Value =
+            serde_json::from_str(&lines.next().context("empty state export")??)?;
+        let offset = header["applied_offset"]
+            .as_u64()
+            .context("state export without applied_offset")?;
+
+        let mut batch = db.keyspace.batch();
+        let mut staged = 0;
+        for line in lines {
+            let line = line?;
+            let entry: serde_json::Value = serde_json::from_str(&line)?;
+            let key = entry["k"].as_str().context("export entry without key")?;
+            let stored: StoredValue = serde_json::from_value(entry["v"].clone())?;
+            if let Some(at) = stored.expires_at_ms {
+                batch.insert(&db.expires, expires_key(at, key.as_bytes()), [0u8]);
+            }
+            batch.insert(&db.state, key.as_bytes(), serde_json::to_vec(&stored)?);
+            staged += 1;
+            if staged % 10_000 == 0 {
+                batch.commit()?;
+                batch = db.keyspace.batch();
+            }
+        }
+        // The offset goes in last: a crash during the import leaves a
+        // projection at offset 0, which replays from the start instead of
+        // skipping what was never imported.
+        batch.insert(&db.meta, META_APPLIED_OFFSET, offset.to_le_bytes());
+        batch.commit()?;
+        db.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(offset)
     }
 
     pub fn applied_offset(&self) -> anyhow::Result<u64> {
@@ -609,20 +653,5 @@ mod tests {
             .map(|item| item.key)
             .collect();
         assert_eq!(keys, vec!["a:1", "a:2"], "b:1 is past the boundary");
-    }
-
-    #[test]
-    fn a_revision_guard_refuses_a_stale_expectation() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(dir.path()).unwrap();
-        assert_eq!(db.prepare_put_revision("new", None).unwrap(), 1);
-        assert!(
-            db.prepare_put_revision("new", Some(1)).is_err(),
-            "a compare-and-swap against a key that does not exist must fail"
-        );
-
-        db.apply_state_updated(&ev(1, "k", 1)).unwrap();
-        assert_eq!(db.prepare_put_revision("k", Some(1)).unwrap(), 2);
-        assert!(db.prepare_put_revision("k", Some(99)).is_err());
     }
 }

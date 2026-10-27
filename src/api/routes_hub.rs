@@ -77,6 +77,15 @@ pub async fn search(
 
     let sql_filter = payload.get("sql_filter").and_then(|v| v.as_str());
     let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    // Same bound as `k` on vector search: the limit sizes the candidate set,
+    // and a client-chosen 10^12 must not become an allocation.
+    if limit == 0 || limit > state.config.max_k {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            format!("limit must be between 1 and {}", state.config.max_k),
+        ));
+    }
     let include_plan = payload
         .get("include_plan")
         .and_then(|v| v.as_bool())

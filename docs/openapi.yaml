@@ -2445,6 +2445,30 @@ components:
           example: Configuration saved to luma.toml. A server restart is required for changes to take effect.
 
 paths:
+  /v1/health/ready:
+    get:
+      tags:
+      - Meta
+      summary: 200 while this node can take writes
+      description: 'Answers 503 with the reason: read_only once a failed WAL fsync
+        has put the node in read-only mode (only a restart clears it), disk_full while
+        writes are refused for space (507), disk_low under 10 % free disk. What a monitor should poll: /v1/health stays 200 as long as
+        the process is up.
+
+        '
+      security: []
+      responses:
+        '200':
+          description: Writable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '503':
+          description: Read-only after a failed fsync, or disk nearly full
   /v1/health/primary:
     get:
       tags:

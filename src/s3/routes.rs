@@ -1380,8 +1380,16 @@ pub async fn object_delete(
 
     let path = object_path(&state, &bucket, &key)?;
     let freed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    // S3 delete is idempotent: a missing object is a 204, not a 404.
-    if std::fs::remove_file(&path).is_ok() {
+    // S3 delete is idempotent: a missing object is a 204, not a 404. A delete
+    // that failed is a 500, not a 204 the client would take as done.
+    let removed = match crate::durability::remove_durable(&path).await {
+        Ok(removed) => removed,
+        Err(e) => {
+            tracing::error!("s3 delete failed: {e}");
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+    if removed {
         crate::api::quotas::record_blob_delta(
             state.sqlite.as_ref(),
             &tenant_context(&caller),

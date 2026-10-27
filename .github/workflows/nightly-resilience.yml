@@ -262,11 +262,63 @@ jobs:
       # be vulnerable by morning without a single commit.
       - run: cargo audit
 
+  power-cuts:
+    name: Power cuts (${{ matrix.shard }}/10)
+    # SPEC-friochap CA-1: 1 000 cuts a night, as ten jobs of 100 in parallel.
+    # LazyFS throws away whatever was not fsynced, which is what a power cut
+    # does to the page cache and what kill -9 never reaches.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the binary under test
+        run: cargo build --release --bin luma --locked && mkdir -p bin && cp target/release/luma bin/
+      - name: LazyFS image
+        run: docker build -q -t luma-apagon scripts/apagon
+      - name: 100 power cuts under load
+        run: |
+          docker run --rm --privileged --device /dev/fuse -e CYCLES=100             -v "$PWD/bin:/luma" -v "$PWD/scripts/apagon:/apagon" luma-apagon bash /apagon/run.sh
+
+  power-loss:
+    name: Full disk, EIO, lost host, watchdog
+    # SPEC-friochap F2, F3 and F6: a 64 MB ext4 fills up, a device-mapper disk
+    # starts answering EIO, a host is rebuilt from MinIO alone, and systemd's
+    # watchdog sees a frozen process. Docker, because each needs privileges the
+    # runner gives a container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the binary under test
+        run: cargo build --release --bin luma --locked && mkdir -p bin && cp target/release/luma bin/
+      - name: LazyFS image
+        run: docker build -q -t luma-apagon scripts/apagon
+      - name: Host lost, rebuilt from the remote (RPO 10 s)
+        run: DRILLS=2 bash scripts/dr_drill.sh bin
+      - name: Full disk
+        run: |
+          docker run --rm --privileged -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-docker             rust:1-slim-bookworm bash scripts/disk_full.sh
+      - name: EIO on fsync
+        run: |
+          docker run --rm --privileged -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-docker             rust:1-slim-bookworm bash scripts/fsync_eio.sh
+      - name: systemd watchdog
+        run: python3 scripts/watchdog_check.py bin/luma
+
   summary:
     name: Nightly result
     needs:
       [
         crash-recovery,
+        power-cuts,
+        power-loss,
         ioredis,
         durability-invariants,
         forward-compatibility,

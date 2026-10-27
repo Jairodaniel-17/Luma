@@ -65,6 +65,15 @@ struct Inner {
     /// is on, a floor of 0 means "prune nothing" (nothing is durable yet) — the
     /// opposite of the legacy count-only pruning used when gating is off.
     floor_gated: AtomicBool,
+    /// Set when an fsync of the WAL failed. From then on the WAL refuses every
+    /// write until the process restarts and recovers from what is on disk.
+    ///
+    /// After a failed fsync the kernel may already have dropped the dirty
+    /// pages and marked them clean, so a retried fsync can report success for
+    /// data that never reached the disk (the PostgreSQL "fsyncgate" finding).
+    /// Carrying on would confirm writes on top of a hole; refusing them is the
+    /// only answer that does not lie to a caller.
+    poisoned: AtomicBool,
 }
 
 /// Legacy WAL record: the event (including any `data.vector` as a JSON number
@@ -147,6 +156,7 @@ impl Persist {
             sync_mode,
             durable_floor: AtomicU64::new(0),
             floor_gated: AtomicBool::new(false),
+            poisoned: AtomicBool::new(false),
         })))
     }
 
@@ -204,15 +214,17 @@ impl Persist {
         let Some(buf) = &self.0.group_buffer else {
             return Ok(());
         };
-        let lines: Vec<Vec<u8>> = {
-            let mut guard = buf.lock();
-            if guard.pending.is_empty() {
-                return Ok(());
-            }
-            let drained = std::mem::take(&mut guard.pending);
-            guard.last_flush_ms = now_ms();
-            drained
-        };
+        // The buffer stays locked through the write. Released earlier, a second
+        // flusher (or the commit leader in `write_batch_synced`) could take newer
+        // lines and reach the WAL first, and the file would hold offsets out of
+        // order — which replay, skipping anything at or below what it already
+        // applied, turns into lost writes.
+        let mut guard = buf.lock();
+        if guard.pending.is_empty() {
+            return Ok(());
+        }
+        let lines = std::mem::take(&mut guard.pending);
+        guard.last_flush_ms = now_ms();
         self.write_lines_to_wal(&lines, true)
     }
 
@@ -234,12 +246,44 @@ impl Persist {
         if lines.is_empty() {
             return Ok(());
         }
+        // In group mode a direct append may still sit in the buffer with a lower
+        // offset than these lines. It goes first, in the same write, so file
+        // order stays offset order.
+        if let Some(buf) = &self.0.group_buffer {
+            let mut guard = buf.lock();
+            if !guard.pending.is_empty() {
+                let mut all = std::mem::take(&mut guard.pending);
+                guard.last_flush_ms = now_ms();
+                all.extend(lines.iter().cloned());
+                return self.write_lines_to_wal(&all, true);
+            }
+        }
         self.write_lines_to_wal(lines, true)
+    }
+
+    /// Whether a failed fsync has put the WAL in read-only mode (see
+    /// `Inner::poisoned`). Health checks report it; only a restart clears it.
+    pub fn is_read_only(&self) -> bool {
+        self.0.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison(&self, why: &std::io::Error) {
+        if !self.0.poisoned.swap(true, Ordering::AcqRel) {
+            tracing::error!(
+                "WAL is read-only from now on: {why}. Writes are refused until a restart \
+                 recovers from the log on disk"
+            );
+        }
     }
 
     /// Write a batch of serialized JSON lines to the current WAL segment.
     fn write_lines_to_wal(&self, lines: &[Vec<u8>], sync: bool) -> std::io::Result<()> {
         let _g = self.0.wal_lock.lock();
+        if self.is_read_only() {
+            return Err(std::io::Error::other(
+                "the WAL is read-only after a failed fsync; restart to recover",
+            ));
+        }
 
         let mut seg = *self.0.current_segment.lock();
         let mut path = self.segment_path(seg);
@@ -258,13 +302,27 @@ impl Persist {
         }
 
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let start = file.metadata()?.len();
+        let mut batch = Vec::with_capacity(total_bytes as usize);
         for line in lines {
-            file.write_all(line)?;
-            file.write_all(b"\n")?;
+            batch.extend_from_slice(line);
+            batch.push(b'\n');
         }
-        file.flush()?;
+        if let Err(e) = file.write_all(&batch) {
+            // A write that failed halfway (disk full) left part of a record.
+            // It is cut back off: left in place, every record appended after
+            // it would sit behind a corrupt line that replay stops at, and
+            // those confirmed writes would be lost on the next restart.
+            if let Err(cut) = file.set_len(start) {
+                self.poison(&cut);
+            }
+            return Err(e);
+        }
         if sync {
-            file.sync_data()?;
+            if let Err(e) = file.sync_data() {
+                self.poison(&e);
+                return Err(e);
+            }
         }
 
         self.enforce_retention_locked(seg)?;

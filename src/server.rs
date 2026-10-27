@@ -107,6 +107,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let shutdown_token = CancellationToken::new();
     let engine = Engine::new(config.clone(), shutdown_token.clone())?;
+    // Before serving: repairs document indexes written by an older Luma.
+    let reindexed = luma::docstore::migrate_indexes(&engine)?;
+    if reindexed > 0 {
+        tracing::info!(documents = reindexed, "document indexes rebuilt");
+    }
 
     let data_dir = config
         .data_dir
@@ -136,7 +141,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::new(config.bind_addr, config.port);
 
     // Opt-in periodic backups (SQLite + snapshot + WAL).
-    luma::backup::spawn_backup_task(config.clone());
+    luma::backup::spawn_backup_task(config.clone(), engine.clone());
     // Continuous WAL shipping: bounds the recovery point to one interval
     // instead of to the gap between full backups.
     luma::wal_ship::spawn(config.clone());
@@ -229,6 +234,7 @@ async fn serve_plain(
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    luma::sdnotify::ready(Some(addr));
     // into_make_service_with_connect_info supplies the ConnectInfo<SocketAddr>
     // the rate limiter's peer-IP key extractor needs (otherwise every request 500s).
     axum::serve(
@@ -292,6 +298,7 @@ async fn serve_tls(
         )?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_cfg));
     let listener = TcpListener::bind(addr).await?;
+    luma::sdnotify::ready(None);
 
     loop {
         let (tcp_stream, peer_addr) = tokio::select! {
@@ -462,9 +469,13 @@ async fn shutdown_signal(token: CancellationToken) {
     }
 
     token.cancel();
+    luma::sdnotify::notify("STOPPING=1");
 
+    // Requests in flight get ten seconds to finish. Every write that already
+    // answered OK is in the WAL, so cutting the rest short loses nothing that
+    // was confirmed.
     tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         tracing::warn!("Graceful shutdown timed out. Forcing exit.");
         std::process::exit(0);
     });

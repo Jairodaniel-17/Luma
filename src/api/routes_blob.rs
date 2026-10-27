@@ -279,13 +279,15 @@ pub async fn delete(
         .map(|meta| meta.len())
         .unwrap_or(0);
 
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => {
+    // Durable, so a delete that returned OK does not bring the object back
+    // after a power cut.
+    match crate::durability::remove_durable(&path).await {
+        Ok(true) => {
             crate::api::quotas::record_blob_delta(state.sqlite.as_ref(), &ctx, -(freed as i64))
                 .await;
         }
         // Idempotent: deleting what is not there frees nothing.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(false) => {}
         Err(_) => return Err(io_error("failed to delete blob")),
     }
 

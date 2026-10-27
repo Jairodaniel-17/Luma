@@ -30,6 +30,9 @@
 //! - **Members are bytes.** Not strings: Redis members are binary, and a
 //!   pickled Celery payload is not valid UTF-8.
 
+use crate::engine::state::StateItem;
+use crate::engine::stored::StoredVal;
+use crate::engine::{EngineError, StateChange};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -76,6 +79,17 @@ pub enum StructureError {
     /// bug: the symptom looked like a client mistake.
     #[error("stored structure could not be read: {0}")]
     Corrupt(String),
+    /// The write could not be made durable (disk full, I/O error). Never
+    /// reported as `WRONGTYPE`: the client did nothing wrong, and the data
+    /// it sent was not stored.
+    #[error("storage error: {0}")]
+    Storage(String),
+}
+
+impl From<EngineError> for StructureError {
+    fn from(e: EngineError) -> Self {
+        StructureError::Storage(e.to_string())
+    }
 }
 
 /// Serde helpers that carry byte strings through JSON as base64.
@@ -884,9 +898,6 @@ fn normalize_index(index: i64, len: i64) -> i64 {
 /// the plain keyspace does not enumerate structures.
 pub const STRUCTURE_PREFIX: &str = "struct:";
 
-/// A compare-and-swap that lost; the caller re-reads and tries again.
-struct Retry;
-
 /// Serialize a structure for storage.
 fn encode(structure: &Structure) -> Result<serde_json::Value, StructureError> {
     serde_json::to_value(structure).map_err(|_| StructureError::WrongType)
@@ -943,82 +954,58 @@ impl<'a> Structures<'a> {
             }
             return Ok(None);
         };
-        let Some(json) = item.value.as_json() else {
-            return Err(StructureError::WrongType);
-        };
-        // A value that is not a structure at all is a type error; a value that
-        // *is* one but will not parse is corruption, and saying so is the
-        // difference between a client fixing its command and an operator
-        // looking at the data.
-        let structure = match serde_json::from_value::<Structure>(json.clone()) {
-            Ok(structure) => structure,
-            Err(e) if json.get("kind").is_some() => {
-                return Err(StructureError::Corrupt(e.to_string()))
-            }
-            Err(_) => return Err(StructureError::WrongType),
-        };
-        Ok(Some((structure, item.revision)))
+        Ok(Some((decode(&item)?, item.revision)))
     }
 
     /// Apply `change` to the structure at `key`, creating it with `empty` when
     /// absent, and persist the result.
     ///
-    /// Retries on a revision conflict. The bound is deliberate: an unbounded
-    /// retry loop under heavy contention is an outage that looks like a hang, so
-    /// exhausting it surfaces as an error the caller can report.
+    /// The read, the change and the write are one atomic step under the key's
+    /// lock (`Engine::update_state`). It used to be a compare-and-swap loop
+    /// whose create path wrote unguarded, so two `LPUSH`es racing on a new key
+    /// could both "create" it and one element was lost; the loop could also run
+    /// out of attempts under contention, which Redis never does.
     pub fn mutate<T, F>(
         &self,
         key: &str,
         empty: fn() -> Structure,
-        mut change: F,
+        change: F,
     ) -> Result<Applied<T>, StructureError>
     where
-        F: FnMut(&mut Structure) -> Result<T, StructureError>,
+        F: FnOnce(&mut Structure) -> Result<T, StructureError>,
     {
-        const MAX_ATTEMPTS: usize = 16;
-        for _ in 0..MAX_ATTEMPTS {
-            let existing = self.load(key)?;
-            let (mut structure, expected) = match existing {
-                Some((structure, revision)) => (structure, Some(revision)),
-                None => (empty(), None),
+        self.engine.update_state(&structure_key(key), |item| {
+            let mut structure = match item {
+                Some(item) => decode(item)?,
+                None if self.engine.get_state(key).is_some() => {
+                    return Err(StructureError::WrongType)
+                }
+                None => empty(),
             };
-
             let outcome = change(&mut structure)?;
 
             // An emptied structure is deleted, matching Redis: a list with no
             // elements does not exist, and leaving an empty husk behind would
             // make EXISTS and TYPE disagree with LLEN.
             if structure.is_empty() {
-                if expected.is_some() {
-                    let _ = self.engine.delete_state(&structure_key(key));
-                }
-                return Ok(Applied {
+                let applied = Applied {
                     value: outcome,
                     revision: 0,
-                });
+                };
+                return Ok((StateChange::Delete, applied));
             }
-
-            let encoded =
-                serde_json::to_value(&structure).map_err(|_| StructureError::WrongType)?;
-            match self
-                .engine
-                .put_state(structure_key(key), encoded, None, expected)
-            {
-                Ok(item) => {
-                    return Ok(Applied {
-                        value: outcome,
-                        revision: item.revision,
-                    })
-                }
-                // Someone else wrote between our read and our write: start over
-                // from their value rather than clobbering it.
-                Err(crate::engine::EngineError::State(
-                    crate::engine::StateError::RevisionMismatch,
-                )) => continue,
-                Err(_) => return Err(StructureError::WrongType),
-            }
-        }
-        Err(StructureError::TooManyEntries)
+            let applied = Applied {
+                value: outcome,
+                revision: item.map_or(1, |i| i.revision.saturating_add(1)),
+            };
+            // The key's expiry survives the write, as it does for LPUSH or
+            // HSET in Redis.
+            let put = StateChange::Put {
+                value: StoredVal::Json(encode(&structure)?),
+                expires_at_ms: item.and_then(|i| i.expires_at_ms),
+            };
+            Ok((put, applied))
+        })
     }
 
     /// Delete a structure. Returns whether it existed.
@@ -1031,16 +1018,16 @@ impl<'a> Structures<'a> {
     /// dropped the element — the one failure the primitive is meant to
     /// prevent.
     ///
-    /// Both keys are read, the change is computed, and both are written in one
-    /// WAL record guarded by a compare-and-swap on each. A concurrent writer on
-    /// either key restarts the whole attempt rather than clobbering it.
+    /// Both keys are locked, read, changed and written in one WAL record
+    /// (`Engine::update_states`). It used to be a compare-and-swap on each
+    /// key, which ABA defeated: a source emptied (and so deleted) and pushed
+    /// to again restarts at revision 1, the stale guard matched, and the move
+    /// duplicated one element and dropped another.
     ///
     /// Returns the moved element, or `None` when the source is empty.
     ///
-    /// `source == destination` is handled by the same path: the rotation idiom
-    /// `RPOPLPUSH mylist mylist` reads one structure, rotates it, and writes it
-    /// once. Treating it as two keys would prepare two revisions for the same
-    /// key and the second write would fail its own compare-and-swap.
+    /// `source == destination` is the rotation idiom `RPOPLPUSH mylist
+    /// mylist`: one key, read once, rotated, written once.
     pub fn move_element(
         &self,
         source: &str,
@@ -1050,46 +1037,37 @@ impl<'a> Structures<'a> {
     ) -> Result<Option<Bytes>, StructureError> {
         use crate::engine::StateOp;
 
-        const MAX_ATTEMPTS: usize = 16;
-        for _ in 0..MAX_ATTEMPTS {
-            let same_key = source == destination;
-
-            let (mut src, src_revision) = match self.load(source)? {
-                Some((structure, revision)) => (structure, Some(revision)),
+        let same_key = source == destination;
+        let mut keys = vec![structure_key(source)];
+        if !same_key {
+            keys.push(structure_key(destination));
+        }
+        self.engine.update_states(&keys, |items| {
+            let Some(src_item) = items[0].as_ref() else {
                 // Nothing to move. Not an error: `RPOPLPUSH` on an empty
-                // source is a nil.
-                None => return Ok(None),
-            };
-
-            if same_key {
-                let popped = if from_left {
-                    src.lpop(1)?
-                } else {
-                    src.rpop(1)?
-                };
-                let Some(element) = popped.into_iter().next() else {
-                    return Ok(None);
-                };
-                let values = vec![element.clone()];
-                if to_left {
-                    src.lpush(values)?;
-                } else {
-                    src.rpush(values)?;
+                // source is a nil. Unless the name holds a string.
+                if self.engine.get_state(source).is_some() {
+                    return Err(StructureError::WrongType);
                 }
-                match self.write_one(source, &src, src_revision) {
-                    Ok(()) => return Ok(Some(element)),
-                    Err(Retry) => continue,
-                }
-            }
-
-            let (mut dst, dst_revision) = match self.load(destination)? {
-                Some((structure, revision)) => (structure, Some(revision)),
-                None => (Structure::empty_list(), None),
+                return Ok((Vec::new(), None));
             };
-
+            let mut src = decode(src_item)?;
+            let mut dst = if same_key {
+                None
+            } else {
+                Some(match items[1].as_ref() {
+                    Some(item) => decode(item)?,
+                    None if self.engine.get_state(destination).is_some() => {
+                        return Err(StructureError::WrongType)
+                    }
+                    None => Structure::empty_list(),
+                })
+            };
             // The type check happens before anything is popped: a destination
             // holding the wrong type must not cost the source its element.
-            dst.as_list()?;
+            if let Some(dst) = &dst {
+                dst.as_list()?;
+            }
 
             let popped = if from_left {
                 src.lpop(1)?
@@ -1097,78 +1075,71 @@ impl<'a> Structures<'a> {
                 src.rpop(1)?
             };
             let Some(element) = popped.into_iter().next() else {
-                return Ok(None);
+                return Ok((Vec::new(), None));
             };
-            let values = vec![element.clone()];
+            let target = dst.as_mut().unwrap_or(&mut src);
             if to_left {
-                dst.lpush(values)?;
+                target.lpush(vec![element.clone()])?;
             } else {
-                dst.rpush(values)?;
+                target.rpush(vec![element.clone()])?;
             }
 
+            // An emptied source is deleted, matching `mutate` and Redis: a
+            // list with no elements does not exist. Each key keeps its TTL.
             let mut ops = Vec::with_capacity(2);
-            // An emptied source is deleted, matching what `mutate` does and
-            // what Redis does: a list with no elements does not exist.
             if src.is_empty() {
                 ops.push(StateOp::Delete {
-                    key: structure_key(source),
+                    key: keys[0].clone(),
+                    if_revision: None,
                 });
             } else {
                 ops.push(StateOp::Put {
-                    key: structure_key(source),
-                    value: crate::engine::stored::StoredVal::Json(encode(&src)?),
-                    ttl_ms: None,
-                    if_revision: src_revision,
+                    key: keys[0].clone(),
+                    value: StoredVal::Json(encode(&src)?),
+                    ttl_ms: ttl_left(Some(src_item)),
+                    if_revision: None,
                 });
             }
-            ops.push(StateOp::Put {
-                key: structure_key(destination),
-                value: crate::engine::stored::StoredVal::Json(encode(&dst)?),
-                ttl_ms: None,
-                if_revision: dst_revision,
-            });
-
-            match self.engine.put_state_batch(ops) {
-                Ok(()) => return Ok(Some(element)),
-                // Someone wrote to either key between our read and our write.
-                // Nothing was applied, so start over from their value.
-                Err(crate::engine::EngineError::State(
-                    crate::engine::StateError::RevisionMismatch,
-                )) => continue,
-                Err(_) => return Err(StructureError::WrongType),
+            if let Some(dst) = &dst {
+                ops.push(StateOp::Put {
+                    key: keys[1].clone(),
+                    value: StoredVal::Json(encode(dst)?),
+                    ttl_ms: ttl_left(items[1].as_ref()),
+                    if_revision: None,
+                });
             }
-        }
-        Err(StructureError::TooManyEntries)
+            Ok((ops, Some(element)))
+        })
     }
 
-    /// Write one structure back under a compare-and-swap, deleting it when it
-    /// came out empty.
-    fn write_one(
-        &self,
-        key: &str,
-        structure: &Structure,
-        expected: Option<u64>,
-    ) -> Result<(), Retry> {
-        if structure.is_empty() {
-            let _ = self.engine.delete_state(&structure_key(key));
-            return Ok(());
-        }
-        let Ok(encoded) = encode(structure) else {
-            return Err(Retry);
-        };
-        match self
-            .engine
-            .put_state(structure_key(key), encoded, None, expected)
-        {
-            Ok(_) => Ok(()),
-            Err(_) => Err(Retry),
-        }
-    }
     pub fn delete(&self, key: &str) -> bool {
         self.engine
             .delete_state(&structure_key(key))
             .unwrap_or(false)
     }
+}
+
+/// The milliseconds `item` has left to live, for a write that keeps its TTL.
+fn ttl_left(item: Option<&StateItem>) -> Option<u64> {
+    item.and_then(|i| i.expires_at_ms)
+        .map(|at| at.saturating_sub(crate::engine::now_ms()).max(1))
+}
+
+/// Read a stored item as a structure.
+fn decode(item: &StateItem) -> Result<Structure, StructureError> {
+    let Some(json) = item.value.as_json() else {
+        return Err(StructureError::WrongType);
+    };
+    // A value that is not a structure at all is a type error; a value that
+    // *is* one but will not parse is corruption, and saying so is the
+    // difference between a client fixing its command and an operator
+    // looking at the data.
+    let structure = match serde_json::from_value::<Structure>(json.clone()) {
+        Ok(structure) => structure,
+        Err(e) if json.get("kind").is_some() => return Err(StructureError::Corrupt(e.to_string())),
+        Err(_) => return Err(StructureError::WrongType),
+    };
+    Ok(structure)
 }
 
 #[cfg(test)]

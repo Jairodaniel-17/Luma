@@ -13,3 +13,8 @@ ui/dist/** -text
 tests/fixtures/golden_data_dir/** -text -diff
 # Except its README, which is prose and should behave like every other doc.
 tests/fixtures/golden_data_dir/README.md text
+tests/fixtures/golden_data_dir_v4_26/** -text -diff
+
+# Shell scripts run inside Linux containers mounted straight from a Windows
+# checkout, where autocrlf would end every line in a carriage return bash rejects.
+*.sh text eol=lf

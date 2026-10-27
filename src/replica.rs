@@ -248,11 +248,13 @@ pub async fn follow_once(
             .ok_or_else(|| anyhow!("object `{}` is not under `{prefix}`", meta.location))?
             .to_string();
         // `wal/events-000001.log` lands as `events-000001.log`: the prefix
-        // groups objects in the bucket, it is not part of the layout.
-        let name = relative
-            .strip_prefix("wal/")
-            .unwrap_or(&relative)
-            .to_string();
+        // groups objects in the bucket, it is not part of the layout. The
+        // epoch and the shipped blob and queue files share the prefix and are
+        // not WAL: written here they broke every pass (the epoch is not sealed).
+        let Some(name) = crate::wal_ship::wal_object_name(&relative) else {
+            continue;
+        };
+        let name = name.to_string();
 
         // The snapshot is always taken: it is rewritten in place rather than
         // appended, so size is not a reliable "unchanged" signal for it.
@@ -318,7 +320,7 @@ pub fn spawn(config: crate::config::Config, role: Role) {
             ticker.tick().await;
             match follow_once(
                 &target.store,
-                &format!("{}/wal-stream", target.prefix),
+                &crate::wal_ship::stream_prefix(&target.prefix),
                 &data_dir,
                 &mut state,
                 |bytes| secrets.decrypt_bytes(bytes),

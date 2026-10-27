@@ -195,8 +195,13 @@ pub async fn prune(
         while let Some(meta) = stream.next().await {
             let key = meta?.location;
             if let Some(rest) = key.as_ref().strip_prefix(&format!("{root}/")) {
+                // Only full backups: the same root also holds the shipped WAL
+                // and files (`wal-stream/`) and the fencing epoch, which a
+                // retention count must neither count nor delete.
                 if let Some((backup, _)) = rest.split_once('/') {
-                    seen.insert(backup.to_string());
+                    if backup.starts_with("backup-") {
+                        seen.insert(backup.to_string());
+                    }
                 }
             }
         }
@@ -314,6 +319,26 @@ pub async fn ship(
     // ordering.
     prune(&target.store, &target.prefix, retention).await?;
     Ok(keys)
+}
+
+/// The newest complete remote backup's name, or `None` when there is none.
+/// Complete means it has its manifest, which is uploaded last.
+pub async fn latest_backup(target: &RemoteTarget) -> Result<Option<String>> {
+    use futures_util::StreamExt as _;
+    let root = target.prefix.trim_end_matches('/');
+    let mut stream = target.store.list(Some(&ObjectPath::from(root)));
+    let mut complete = std::collections::BTreeSet::new();
+    while let Some(meta) = stream.next().await {
+        let key = meta?.location;
+        if let Some(rest) = key.as_ref().strip_prefix(&format!("{root}/")) {
+            if let Some((backup, file)) = rest.split_once('/') {
+                if backup.starts_with("backup-") && file == MANIFEST_OBJECT {
+                    complete.insert(backup.to_string());
+                }
+            }
+        }
+    }
+    Ok(complete.into_iter().next_back())
 }
 
 /// Fetch a remote backup into `local`, decrypting as it goes.

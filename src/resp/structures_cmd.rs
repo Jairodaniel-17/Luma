@@ -112,6 +112,7 @@ fn structure_error(e: StructureError) -> Value {
         // Not WRONGTYPE: the client did nothing wrong and retrying with
         // another command will not help.
         StructureError::Corrupt(detail) => err(format!("ERR {detail}")),
+        StructureError::Storage(detail) => err(format!("ERR {detail}")),
     }
 }
 

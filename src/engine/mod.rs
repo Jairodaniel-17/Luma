@@ -55,9 +55,23 @@ struct Inner {
     /// Group commit: batches the WAL fsync and the projection transaction across
     /// whatever mutations are in flight. See `engine::commit`.
     commits: commit::Commits,
+    /// Striped per-key write locks. See `Engine::lock_keys`.
+    key_locks: Box<[parking_lot::Mutex<()>]>,
     memory_rss_bytes: AtomicU64,
 
     shutdown: CancellationToken,
+}
+
+/// How many stripes the per-key write lock has. Two keys share a stripe with
+/// probability 1/256, which only costs them some parallelism, never
+/// correctness.
+const KEY_LOCK_STRIPES: usize = 256;
+
+fn key_stripe(key: &str) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    (h.finish() as usize) % KEY_LOCK_STRIPES
 }
 
 impl Engine {
@@ -104,36 +118,12 @@ impl Engine {
         let inner = self.0.clone();
         let events = self.0.events.clone();
         let write_wal = move |lines: &[Vec<u8>]| persist.write_batch_synced(lines);
+        // Every state event in the batch shares one projection transaction (the
+        // expensive half; `state_db::apply_events` carries the numbers), and the
+        // publish happens in queue order so a subscriber never sees a gap that
+        // fills in afterwards.
         let apply_batch = move |evs: &[EventRecord]| -> (u64, Option<anyhow::Error>) {
-            // Every state event in the batch shares one redb transaction. That
-            // is the expensive half: redb is a copy-on-write B-tree, so a
-            // per-record transaction rewrites the page path from leaf to root
-            // each time. `state_db::apply_events` carries the numbers.
-            let state_events: Vec<&EventRecord> =
-                evs.iter().filter(|ev| is_state_event(ev)).collect();
-            if let Some(db) = &inner.state_db {
-                if !state_events.is_empty() {
-                    if let Err(err) = db.apply_events(&state_events) {
-                        // The transaction is atomic, so none of them landed.
-                        return (0, Some(err));
-                    }
-                }
-            }
-
-            // Everything else owns its own storage and applies on its own. The
-            // publish happens here, in queue order, so a subscriber never sees a
-            // gap that fills in afterwards.
-            let mut highest = 0u64;
-            for ev in evs {
-                if !is_state_event(ev) {
-                    if let Err(err) = Inner::apply_event(&inner, ev) {
-                        return (highest, Some(err));
-                    }
-                }
-                events.publish_record(ev.clone());
-                highest = ev.offset;
-            }
-            (highest, None)
+            Self::apply_committed(&inner, &events, evs)
         };
         self.0.commits.wait_for(
             event.offset,
@@ -144,6 +134,81 @@ impl Engine {
         )?;
         self.metrics().inc_events();
         Ok(event)
+    }
+
+    /// Append one event to the WAL outside the commit queue, **in offset
+    /// order**. The caller holds the ordering guard (`append_guard`).
+    ///
+    /// Everything already queued is committed first (`Commits::drain`), so no
+    /// lower offset can reach the WAL or the projection after this one. The
+    /// direct writers — deletes, atomic batches, vector mutations — used to skip
+    /// that and overtake queued puts, which the projection then dropped.
+    fn append_direct(&self, event: &EventRecord) -> Result<(), EngineError> {
+        let Some(persist) = &self.0.persist else {
+            return Ok(());
+        };
+        let inner = self.0.clone();
+        let events = self.0.events.clone();
+        let write_wal = |lines: &[Vec<u8>]| persist.write_batch_synced(lines);
+        let apply_batch = move |evs: &[EventRecord]| -> (u64, Option<anyhow::Error>) {
+            Self::apply_committed(&inner, &events, evs)
+        };
+        self.0.commits.drain(commit::Commit {
+            write_wal: &write_wal,
+            apply_batch: &apply_batch,
+        })?;
+        persist.append_event(event)?;
+        Ok(())
+    }
+
+    /// The apply half of a committed batch: one projection transaction for the
+    /// state events, then every other event, publishing in offset order.
+    fn apply_committed(
+        inner: &Arc<Inner>,
+        events: &events::EventBus,
+        evs: &[EventRecord],
+    ) -> (u64, Option<anyhow::Error>) {
+        let state_events: Vec<&EventRecord> = evs.iter().filter(|ev| is_state_event(ev)).collect();
+        if let Some(db) = &inner.state_db {
+            if !state_events.is_empty() {
+                if let Err(err) = db.apply_events(&state_events) {
+                    return (0, Some(err));
+                }
+            }
+        }
+        let mut highest = 0u64;
+        for ev in evs {
+            if !is_state_event(ev) {
+                if let Err(err) = Inner::apply_event(inner, ev) {
+                    return (highest, Some(err));
+                }
+            }
+            events.publish_record(ev.clone());
+            highest = ev.offset;
+        }
+        (highest, None)
+    }
+
+    /// Lock the write stripes of `keys`, in a fixed order so two multi-key
+    /// writers can never deadlock.
+    ///
+    /// Held from the revision check through the commit. That is what makes a
+    /// compare-and-swap atomic: the check used to run before anything was
+    /// locked, so several writers could see the same revision, all pass, and
+    /// all commit — the second overwriting the first with a revision that was
+    /// no longer the one it had checked. Keys on different stripes still
+    /// commit concurrently and share the group fsync.
+    fn lock_keys<'k>(
+        &self,
+        keys: impl IntoIterator<Item = &'k str>,
+    ) -> Vec<parking_lot::MutexGuard<'_, ()>> {
+        let mut stripes: Vec<usize> = keys.into_iter().map(key_stripe).collect();
+        stripes.sort_unstable();
+        stripes.dedup();
+        stripes
+            .into_iter()
+            .map(|i| self.0.key_locks[i].lock())
+            .collect()
     }
 }
 
@@ -234,8 +299,43 @@ pub enum StateOp {
     },
     Delete {
         key: String,
+        /// Compare-and-swap guard, as for `Put`.
+        if_revision: Option<u64>,
     },
 }
+
+/// What `Engine::update_state` does with the key once it has seen it.
+#[derive(Debug, Clone)]
+pub enum StateChange {
+    Keep,
+    /// Write `value`. `expires_at_ms` is absolute, so keeping the key's TTL is
+    /// passing the old item's `expires_at_ms` through.
+    Put {
+        value: stored::StoredVal,
+        expires_at_ms: Option<u64>,
+    },
+    Delete,
+}
+
+impl StateOp {
+    fn key(&self) -> &str {
+        match self {
+            StateOp::Put { key, .. } | StateOp::Delete { key, .. } => key,
+        }
+    }
+}
+
+/// The compare-and-swap rule every write shares: `None` always passes,
+/// `Some(0)` only for a key that does not exist, `Some(n)` only when the live
+/// revision is `n`.
+fn check_revision(current: Option<u64>, expected: Option<u64>) -> Result<(), state::StateError> {
+    match (expected, current) {
+        (None, _) | (Some(0), None) => Ok(()),
+        (Some(want), Some(have)) if want == have => Ok(()),
+        _ => Err(state::StateError::RevisionMismatch),
+    }
+}
+
 impl Engine {
     pub fn new(config: Config, shutdown: CancellationToken) -> anyhow::Result<Self> {
         // The in-RAM replay buffer retains full event payloads (a vector upsert
@@ -287,6 +387,9 @@ impl Engine {
             metrics,
             persist,
             commits: commit::Commits::new(),
+            key_locks: (0..KEY_LOCK_STRIPES)
+                .map(|_| parking_lot::Mutex::new(()))
+                .collect(),
             memory_rss_bytes: AtomicU64::new(read_process_memory_rss()),
 
             shutdown,
@@ -348,8 +451,14 @@ impl Engine {
         )
     }
 
+    /// `ok`, or `read_only` once a failed WAL fsync has stopped all writes
+    /// (see `Persist::is_read_only`).
     pub fn health(&self) -> &'static str {
-        "ok"
+        if self.0.persist.as_ref().is_some_and(|p| p.is_read_only()) {
+            "read_only"
+        } else {
+            "ok"
+        }
     }
 
     pub fn events(&self) -> &events::EventBus {
@@ -358,6 +467,16 @@ impl Engine {
 
     pub fn metrics(&self) -> Arc<metrics::Metrics> {
         self.0.metrics.clone()
+    }
+
+    /// Export the KV projection for a backup (see `StateDb::export`). `None`
+    /// without a persistent projection, where there is nothing to export.
+    /// For a data directory no server has open, see `export_state_offline`.
+    pub fn export_state(&self, out: &std::path::Path) -> anyhow::Result<Option<u64>> {
+        match &self.0.state_db {
+            Some(db) => db.export(out).map(Some),
+            None => Ok(None),
+        }
     }
 
     pub fn persist(&self) -> Option<persist::Persist> {
@@ -802,12 +921,70 @@ impl Engine {
         if ops.is_empty() {
             return Ok(());
         }
+        // Every key of the batch is locked from the revision checks through the
+        // commit, so no other writer can move one of them in between.
+        let _keys = self.lock_keys(ops.iter().map(StateOp::key));
+        self.batch_locked(ops)
+    }
+
+    /// Read-modify-write of several keys as one atomic, durable step: `change`
+    /// sees the live items of `keys` (in that order, `None` for absent ones)
+    /// and returns the ops to commit as one batch, all with every key locked.
+    ///
+    /// Stronger than a compare-and-swap loop, which is exposed to ABA: a key
+    /// deleted and created again restarts at revision 1, so a guard read before
+    /// both still matches and a stale write goes through. Nothing can happen to
+    /// a locked key, so there is nothing to compare.
+    ///
+    /// Every op must name one of `keys`; one that does not is refused, because
+    /// it would be written without its lock.
+    pub fn update_states<T, E>(
+        &self,
+        keys: &[String],
+        change: impl FnOnce(&[Option<state::StateItem>]) -> Result<(Vec<StateOp>, T), E>,
+    ) -> Result<T, E>
+    where
+        E: From<EngineError>,
+    {
+        let _keys = self.lock_keys(keys.iter().map(String::as_str));
+        let mut items = Vec::with_capacity(keys.len());
+        for key in keys {
+            items.push(if let Some(db) = &self.0.state_db {
+                db.get_state(key).map_err(EngineError::from)?
+            } else {
+                self.0.state.get(key)
+            });
+        }
+        let (ops, out) = change(&items)?;
+        if let Some(op) = ops.iter().find(|op| !keys.iter().any(|k| k == op.key())) {
+            return Err(EngineError::Internal(anyhow::anyhow!(
+                "update_states: op on {} outside the locked keys",
+                op.key()
+            ))
+            .into());
+        }
+        if !ops.is_empty() {
+            self.batch_locked(ops)?;
+        }
+        Ok(out)
+    }
+
+    /// The body of `put_state_batch`. The caller holds every key's lock.
+    fn batch_locked(&self, ops: Vec<StateOp>) -> Result<(), EngineError> {
         let now = now_ms();
 
         // Phase 1: validate and allocate. Nothing is written yet, so a
-        // rejection here leaves the store exactly as it was.
+        // rejection here leaves the store exactly as it was. A key written twice
+        // in one batch gets consecutive revisions, and its second guard is
+        // checked against the first write, as if the ops ran one after another.
+        let mut in_batch: HashMap<&str, Option<u64>> = HashMap::new();
         let mut prepared = Vec::with_capacity(ops.len());
         for op in &ops {
+            let key = op.key();
+            let current = match in_batch.get(key) {
+                Some(rev) => *rev,
+                None => self.live_revision(key)?,
+            };
             match op {
                 StateOp::Put {
                     key,
@@ -815,12 +992,10 @@ impl Engine {
                     ttl_ms,
                     if_revision,
                 } => {
-                    let revision = if let Some(db) = &self.0.state_db {
-                        db.prepare_put_revision(key, *if_revision)?
-                    } else {
-                        self.0.state.prepare_put_revision(key, *if_revision)?
-                    };
+                    check_revision(current, *if_revision)?;
+                    let revision = current.map_or(1, |r| r.saturating_add(1));
                     let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
+                    in_batch.insert(key, Some(revision));
                     prepared.push(serde_json::json!({
                         "op": "put",
                         "key": key,
@@ -829,7 +1004,9 @@ impl Engine {
                         "expires_at_ms": expires_at_ms,
                     }));
                 }
-                StateOp::Delete { key } => {
+                StateOp::Delete { key, if_revision } => {
+                    check_revision(current, *if_revision)?;
+                    in_batch.insert(key, None);
                     prepared.push(serde_json::json!({ "op": "delete", "key": key }));
                 }
             }
@@ -841,9 +1018,7 @@ impl Engine {
             "state_batch",
             serde_json::json!({ "ops": prepared.clone() }),
         );
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         if let Some(db) = &self.0.state_db {
             db.apply_state_batch(&event)?;
         } else {
@@ -859,7 +1034,7 @@ impl Engine {
                             expires_at_ms,
                         );
                     }
-                    StateOp::Delete { key } => {
+                    StateOp::Delete { key, .. } => {
                         let _ = self.0.state.delete(key);
                     }
                 }
@@ -876,6 +1051,22 @@ impl Engine {
         Ok(())
     }
 
+    /// The live revision of `key`, or `None` if it does not exist or expired.
+    /// A failed read is an error, never "absent": inventing revision 1 for a
+    /// key that exists would let an unguarded put rewind it.
+    fn live_revision(&self, key: &str) -> Result<Option<u64>, EngineError> {
+        Ok(if let Some(db) = &self.0.state_db {
+            db.get_state(key)?.map(|item| item.revision)
+        } else {
+            self.0.state.get(key).map(|item| item.revision)
+        })
+    }
+
+    /// Put `value` under `key`.
+    ///
+    /// `if_revision` is a compare-and-swap guard: `Some(n)` writes only if the
+    /// live revision is `n`, and `Some(0)` only if the key does not exist
+    /// (revisions start at 1). Check and write are one atomic step.
     pub fn put_state(
         &self,
         key: String,
@@ -884,14 +1075,67 @@ impl Engine {
         if_revision: Option<u64>,
     ) -> Result<state::StateItem, EngineError> {
         let value = value.into();
+        let _key = self.lock_keys([key.as_str()]);
         let now = now_ms();
         let expires_at_ms = ttl_ms.map(|ttl| now.saturating_add(ttl));
-        let revision = if let Some(db) = &self.0.state_db {
-            db.prepare_put_revision(&key, if_revision)?
-        } else {
-            self.0.state.prepare_put_revision(&key, if_revision)?
-        };
+        let current = self.live_revision(&key)?;
+        check_revision(current, if_revision)?;
+        self.put_locked(key, value, expires_at_ms, current)
+    }
 
+    /// Read-modify-write of one key as a single atomic step: `change` sees the
+    /// live item and decides what to write, with the key locked throughout, so
+    /// no other writer can slip in between the read and the write and nothing
+    /// has to retry. This is what `INCR`, `APPEND` or `LPUSH` need: a CAS loop
+    /// gives the same answer but can run out of attempts under contention,
+    /// which Redis never does.
+    pub fn update_state<T, E>(
+        &self,
+        key: &str,
+        change: impl FnOnce(Option<&state::StateItem>) -> Result<(StateChange, T), E>,
+    ) -> Result<T, E>
+    where
+        E: From<EngineError>,
+    {
+        let _key = self.lock_keys([key]);
+        let item = if let Some(db) = &self.0.state_db {
+            db.get_state(key).map_err(EngineError::from)?
+        } else {
+            self.0.state.get(key)
+        };
+        let (decision, out) = change(item.as_ref())?;
+        match decision {
+            StateChange::Keep => {}
+            StateChange::Put {
+                value,
+                expires_at_ms,
+            } => {
+                self.put_locked(
+                    key.to_string(),
+                    value,
+                    expires_at_ms,
+                    item.map(|i| i.revision),
+                )?;
+            }
+            StateChange::Delete => {
+                if item.is_some() {
+                    self.delete_locked(key, "explicit")?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Write `key` at the revision after `current`. The caller holds the key's
+    /// lock and has already checked any guard.
+    fn put_locked(
+        &self,
+        key: String,
+        value: stored::StoredVal,
+        expires_at_ms: Option<u64>,
+        current: Option<u64>,
+    ) -> Result<state::StateItem, EngineError> {
+        let revision = current.map_or(1, |r| r.saturating_add(1));
         let event_data = serde_json::json!({
             "key": key,
             "revision": revision,
@@ -924,7 +1168,13 @@ impl Engine {
     }
 
     pub fn delete_state(&self, key: &str) -> Result<bool, EngineError> {
-        self.delete_state_with_reason(key, "explicit")
+        self.delete_guarded(key, "explicit", None)
+    }
+
+    /// Delete `key` only if its live revision is `revision`: the delete half
+    /// of compare-and-swap. `Ok(false)` if the key does not exist.
+    pub fn delete_state_if(&self, key: &str, revision: u64) -> Result<bool, EngineError> {
+        self.delete_guarded(key, "explicit", Some(revision))
     }
 
     pub fn delete_state_with_reason(
@@ -932,24 +1182,32 @@ impl Engine {
         key: &str,
         reason: &'static str,
     ) -> Result<bool, EngineError> {
-        let exists = if let Some(db) = &self.0.state_db {
-            db.exists_live(key)?
-        } else {
-            self.0.state.exists_live(key)
-        };
-        if !exists {
-            return Ok(false);
-        }
+        self.delete_guarded(key, reason, None)
+    }
 
+    fn delete_guarded(
+        &self,
+        key: &str,
+        reason: &'static str,
+        if_revision: Option<u64>,
+    ) -> Result<bool, EngineError> {
+        let _key = self.lock_keys([key]);
+        let Some(current) = self.live_revision(key)? else {
+            return Ok(false);
+        };
+        check_revision(Some(current), if_revision)?;
+        self.delete_locked(key, reason)
+    }
+
+    /// Delete a key that exists. The caller holds its lock.
+    fn delete_locked(&self, key: &str, reason: &'static str) -> Result<bool, EngineError> {
         let data = serde_json::json!({
             "key": key,
             "reason": reason,
         });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("state_deleted", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         if let Some(db) = &self.0.state_db {
             db.apply_state_deleted(&event)?;
         }
@@ -1085,9 +1343,7 @@ impl Engine {
         });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_collection_created", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         self.0.vectors.create_collection(collection, dim, metric)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
@@ -1116,9 +1372,7 @@ impl Engine {
         let data = serde_json::json!({ "collection": collection });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_collection_dropped", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
         drop(append);
@@ -1151,9 +1405,7 @@ impl Engine {
         });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_added", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
         drop(append);
@@ -1181,9 +1433,7 @@ impl Engine {
         });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_upserted", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
         drop(append);
@@ -1238,9 +1488,7 @@ impl Engine {
                 "meta": &meta,
             });
             let event = self.0.events.next_record("vector_upserted", data);
-            if let Some(persist) = &self.0.persist {
-                persist.append_event(&event)?;
-            }
+            self.append_direct(&event)?;
             store_items.push((event.offset, id, vector, meta));
             events.push(event);
         }
@@ -1287,9 +1535,7 @@ impl Engine {
         });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_updated", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
         drop(append);
@@ -1313,9 +1559,7 @@ impl Engine {
         });
         let append = self.0.events.append_guard();
         let event = self.0.events.next_record("vector_deleted", data);
-        if let Some(persist) = &self.0.persist {
-            persist.append_event(&event)?;
-        }
+        self.append_direct(&event)?;
         self.0.vectors.apply_event(&event)?;
         self.0.events.publish_record(event);
         drop(append);
@@ -1464,12 +1708,17 @@ impl Engine {
         };
         let mut expired = 0usize;
         for key in keys {
-            let present = if let Some(db) = &self.0.state_db {
-                db.exists_any(&key).unwrap_or(false)
+            // Re-checked under the key's lock: between the scan and here a
+            // writer may have put the key again without a TTL, and deleting
+            // that fresh value would lose a confirmed write. Only a key that is
+            // still present and still expired goes.
+            let _key = self.lock_keys([key.as_str()]);
+            let expired_now = if let Some(db) = &self.0.state_db {
+                db.exists_any(&key)? && !db.exists_live(&key)?
             } else {
-                self.0.state.exists_any(&key)
+                self.0.state.exists_any(&key) && !self.0.state.exists_live(&key)
             };
-            if !present {
+            if !expired_now {
                 continue;
             }
             let data = serde_json::json!({
@@ -1478,9 +1727,7 @@ impl Engine {
             });
             let append = self.0.events.append_guard();
             let event = self.0.events.next_record("state_deleted", data);
-            if let Some(persist) = &self.0.persist {
-                persist.append_event(&event)?;
-            }
+            self.append_direct(&event)?;
             if let Some(db) = &self.0.state_db {
                 db.apply_state_deleted(&event)?;
             } else {
@@ -1503,6 +1750,31 @@ impl Engine {
 pub use events::{EventBus, EventRecord};
 pub use metrics::Metrics;
 pub use state::{StateError, StateItem};
+
+/// Export the KV projection of a data directory **no running server has
+/// open**: fjall takes no lock, so opening it next to a live server would be
+/// two writers on one LSM. `luma backup` asks the server first and comes here
+/// only when nothing answers. `None` when there is no projection.
+pub fn export_state_offline(
+    data_dir: &std::path::Path,
+    out: &std::path::Path,
+) -> anyhow::Result<Option<u64>> {
+    if !data_dir.join("state.lsm").is_dir() {
+        return Ok(None);
+    }
+    state_db::StateDb::open(data_dir)?.export(out).map(Some)
+}
+
+/// Load a backup's KV export into `data_dir`, replacing whatever projection is
+/// there: it is derived data, and the export plus the WAL after it is the
+/// authoritative copy. Returns the offset replay continues from.
+pub fn import_state(data_dir: &std::path::Path, from: &std::path::Path) -> anyhow::Result<u64> {
+    let lsm = data_dir.join("state.lsm");
+    if lsm.exists() {
+        std::fs::remove_dir_all(&lsm)?;
+    }
+    state_db::StateDb::import(data_dir, from)
+}
 
 fn now_ms() -> u64 {
     let dur = std::time::SystemTime::now()

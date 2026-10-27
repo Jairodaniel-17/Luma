@@ -194,6 +194,192 @@ pub async fn ship_once(
     Ok(report)
 }
 
+/// Where an instance ships its WAL and files, and where its fencing epoch
+/// lives, under the remote root. One function so the shipper, the replica,
+/// `promote` and `restore-remote` cannot disagree: `promote` used to claim the
+/// epoch at the root while shipping checked it here, so it fenced nobody.
+pub fn stream_prefix(root: &str) -> String {
+    format!("{}/wal-stream", root.trim_end_matches('/'))
+}
+
+/// The data directory name of a shipped WAL object (`snapshot.json`,
+/// `wal/events-*.log` → `events-*.log`), or `None` for everything else that
+/// shares the prefix: the epoch, the files index and the shipped files.
+pub(crate) fn wal_object_name(relative: &str) -> Option<&str> {
+    if relative == "snapshot.json" {
+        return Some(relative);
+    }
+    relative
+        .strip_prefix("wal/")
+        .filter(|name| name.starts_with("events-") && name.ends_with(".log"))
+}
+
+/// The data directory trees that live outside the WAL and so are shipped as
+/// files: blob objects and queue messages.
+const SHIPPED_TREES: &[&str] = &["blobs", "queues"];
+/// The list of shipped files, so a restart knows what is already up and a
+/// restore knows what exists (and so what was deleted).
+const FILES_INDEX: &str = "files-index.json";
+
+/// What has been shipped of the blob and queue trees: relative path to
+/// `(length, modified time in ns)`. Loaded from the remote index on the first
+/// pass, so a restart does not re-upload everything.
+#[derive(Debug, Default)]
+pub struct FileShipState {
+    loaded: bool,
+    shipped: std::collections::BTreeMap<String, (u64, u128)>,
+}
+
+/// Every file in the shipped trees, with its length and modified time.
+///
+/// Temp files are in-progress writes and are skipped; so are queue leases,
+/// which are ephemeral: a restored message without one is simply visible.
+fn local_files(data_dir: &Path) -> Result<std::collections::BTreeMap<String, (u64, u128)>> {
+    let mut out = std::collections::BTreeMap::new();
+    for tree in SHIPPED_TREES {
+        let root = data_dir.join(tree);
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Ok(meta) = entry.metadata() else {
+                    continue; // removed between the listing and the stat
+                };
+                if meta.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if name.starts_with(".tmp-") || name.ends_with(".lease") {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(data_dir)
+                    .map_err(|_| anyhow!("file escaped the data dir"))?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                out.insert(relative, (meta.len(), modified));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Ship the blob and queue trees: upload what is new or changed, delete what
+/// is gone, then the index. Returns how many objects changed.
+///
+/// Blobs and queue messages are not in the WAL, so shipping only the WAL left
+/// them recoverable only as of the last full backup, hours behind. With this
+/// the recovery point is the shipping interval for them too.
+pub async fn ship_files(
+    store: &Arc<dyn ObjectStore>,
+    prefix: &str,
+    data_dir: &Path,
+    state: &mut FileShipState,
+    encrypt: impl Fn(&[u8]) -> Result<Vec<u8>>,
+    decrypt: impl Fn(&[u8]) -> Result<Vec<u8>>,
+) -> Result<usize> {
+    let prefix = prefix.trim_end_matches('/');
+    let index_key = ObjectPath::from(format!("{prefix}/{FILES_INDEX}"));
+    if !state.loaded {
+        if let Ok(found) = store.get(&index_key).await {
+            let plain = decrypt(&found.bytes().await?)?;
+            state.shipped = serde_json::from_slice(&plain)?;
+        }
+        state.loaded = true;
+    }
+
+    let local = local_files(data_dir)?;
+    let mut changed = 0;
+    for (relative, stamp) in &local {
+        if state.shipped.get(relative) == Some(stamp) {
+            continue;
+        }
+        // Gone since the listing (acked, deleted): the next pass deletes it.
+        let Ok(bytes) = std::fs::read(data_dir.join(relative)) else {
+            continue;
+        };
+        let sealed = encrypt(&bytes).with_context(|| format!("encrypting {relative}"))?;
+        store
+            .put(
+                &ObjectPath::from(format!("{prefix}/files/{relative}")),
+                PutPayload::from(sealed),
+            )
+            .await
+            .with_context(|| format!("uploading {relative}"))?;
+        state.shipped.insert(relative.clone(), *stamp);
+        changed += 1;
+    }
+    let gone: Vec<String> = state
+        .shipped
+        .keys()
+        .filter(|k| !local.contains_key(*k))
+        .cloned()
+        .collect();
+    for relative in gone {
+        let key = ObjectPath::from(format!("{prefix}/files/{relative}"));
+        match store.delete(&key).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(e).with_context(|| format!("deleting {relative}")),
+        }
+        state.shipped.remove(&relative);
+        changed += 1;
+    }
+    if changed > 0 {
+        let index = encrypt(&serde_json::to_vec(&state.shipped)?)?;
+        store
+            .put(&index_key, PutPayload::from(index))
+            .await
+            .context("uploading the files index")?;
+    }
+    Ok(changed)
+}
+
+/// Bring the blob and queue trees in `data_dir` to what was last shipped:
+/// download every indexed file, and remove local files the index does not
+/// list (deleted after the backup the directory was restored from).
+pub async fn restore_files(
+    store: &Arc<dyn ObjectStore>,
+    prefix: &str,
+    data_dir: &Path,
+    decrypt: impl Fn(&[u8]) -> Result<Vec<u8>>,
+) -> Result<usize> {
+    let prefix = prefix.trim_end_matches('/');
+    let index_key = ObjectPath::from(format!("{prefix}/{FILES_INDEX}"));
+    let Ok(found) = store.get(&index_key).await else {
+        return Ok(0);
+    };
+    let index: std::collections::BTreeMap<String, (u64, u128)> =
+        serde_json::from_slice(&decrypt(&found.bytes().await?)?)?;
+    for relative in index.keys() {
+        let sealed = store
+            .get(&ObjectPath::from(format!("{prefix}/files/{relative}")))
+            .await
+            .with_context(|| format!("downloading {relative}"))?
+            .bytes()
+            .await?;
+        let target = data_dir.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, decrypt(&sealed)?)?;
+    }
+    for relative in local_files(data_dir)?.keys() {
+        if !index.contains_key(relative) {
+            std::fs::remove_file(data_dir.join(relative))?;
+        }
+    }
+    Ok(index.len())
+}
+
 /// Reconstruct a data directory from a shipped prefix.
 ///
 /// Writes the snapshot and every segment back, which is exactly the layout the
@@ -229,7 +415,9 @@ pub async fn restore_shipped(
             .ok_or_else(|| anyhow!("object `{key}` is not under `{prefix}`"))?;
         // `wal/events-000001.log` restores as `events-000001.log`: the prefix
         // only groups objects in the bucket, it is not part of the layout.
-        let name = relative.strip_prefix("wal/").unwrap_or(relative);
+        let Some(name) = wal_object_name(relative) else {
+            continue; // epoch and shipped files: see `restore_files`
+        };
 
         let sealed = store.get(&key).await?.bytes().await?;
         let plain = decrypt(&sealed).with_context(|| format!("decrypting {name}"))?;
@@ -274,18 +462,16 @@ pub fn spawn(config: crate::config::Config) {
     tokio::spawn(async move {
         let secrets = crate::crypto::SecretBox::from_env();
         let mut state = ShipState::new();
+        let mut files = FileShipState::default();
+        let stream = stream_prefix(&target.prefix);
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
         let data_dir = PathBuf::from(data_dir);
         loop {
             ticker.tick().await;
             let started = std::time::Instant::now();
-            match ship_once(
-                &target.store,
-                &format!("{}/wal-stream", target.prefix),
-                &data_dir,
-                &mut state,
-                |bytes| secrets.encrypt_bytes(bytes),
-            )
+            match ship_once(&target.store, &stream, &data_dir, &mut state, |bytes| {
+                secrets.encrypt_bytes(bytes)
+            })
             .await
             {
                 Ok(report) if report.uploaded.is_empty() => {
@@ -301,6 +487,27 @@ pub fn spawn(config: crate::config::Config) {
                 // Killing the task on a transient network error would silently
                 // stop shipping for the lifetime of the process.
                 Err(e) => tracing::error!("WAL shipping failed, will retry: {e}"),
+            }
+            // Blobs and queues, which the WAL does not carry. Skipped while
+            // fenced: another node owns the prefix now.
+            if crate::fencing::standing(&target.store, &stream, &data_dir)
+                .await
+                .is_ok_and(|s| matches!(s, crate::fencing::Standing::Current))
+            {
+                match ship_files(
+                    &target.store,
+                    &stream,
+                    &data_dir,
+                    &mut files,
+                    |bytes| secrets.encrypt_bytes(bytes),
+                    |bytes| secrets.decrypt_bytes(bytes),
+                )
+                .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(files = n, "blobs and queues shipped"),
+                    Err(e) => tracing::error!("file shipping failed, will retry: {e}"),
+                }
             }
         }
     });
@@ -522,5 +729,110 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report, ShipReport::default());
+    }
+
+    /// `promote` claims at `stream_prefix(root)`, shipping checks the prefix it
+    /// is given: the old primary must find itself fenced there.
+    #[tokio::test]
+    async fn a_promotion_fences_the_old_primary() {
+        let dir = data_dir();
+        let store = store();
+        let stream = stream_prefix("inst/");
+        let mut state = ShipState::new();
+        ship_once(&store, &stream, dir.path(), &mut state, seal)
+            .await
+            .unwrap();
+        crate::fencing::claim_next_epoch(&store, &stream)
+            .await
+            .unwrap();
+        std::fs::write(
+            dir.path().join("events-000002.log"),
+            b"b
+",
+        )
+        .unwrap();
+        let report = ship_once(&store, &stream, dir.path(), &mut state, seal)
+            .await
+            .unwrap();
+        assert!(
+            report.fenced,
+            "the old primary kept shipping after a promotion"
+        );
+        assert!(report.uploaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn files_ship_and_restore_including_deletions() {
+        let dir = data_dir();
+        let blobs = dir.path().join("blobs").join("b1");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join("keep"), b"k").unwrap();
+        std::fs::write(blobs.join("gone"), b"g").unwrap();
+        std::fs::write(blobs.join(".tmp-x"), b"partial").unwrap();
+        let queue = dir.path().join("queues").join("q");
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(queue.join("m1.json"), b"{}").unwrap();
+        std::fs::write(queue.join("m1.lease"), b"{}").unwrap();
+
+        let store = store();
+        let mut state = FileShipState::default();
+        let shipped = ship_files(&store, "inst", dir.path(), &mut state, seal, unseal)
+            .await
+            .unwrap();
+        assert_eq!(shipped, 3, "temp files and leases are not shipped");
+        std::fs::remove_file(blobs.join("gone")).unwrap();
+        // A restart starts from the remote index, not from scratch.
+        let mut restarted = FileShipState::default();
+        let changed = ship_files(&store, "inst", dir.path(), &mut restarted, seal, unseal)
+            .await
+            .unwrap();
+        assert_eq!(changed, 1, "only the deletion is new");
+
+        // The target holds the old backup's copy of the deleted blob.
+        let target = tempfile::tempdir().unwrap();
+        let old = target.path().join("blobs").join("b1");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("gone"), b"g").unwrap();
+        let restored = restore_files(&store, "inst", target.path(), unseal)
+            .await
+            .unwrap();
+        assert_eq!(restored, 2);
+        assert_eq!(std::fs::read(old.join("keep")).unwrap(), b"k");
+        assert!(!old.join("gone").exists(), "a deleted blob came back");
+        assert!(target.path().join("queues/q/m1.json").exists());
+    }
+
+    /// The epoch and the shipped files share the prefix with the WAL; restore
+    /// must lay down only snapshot and segments.
+    #[tokio::test]
+    async fn restore_ignores_the_epoch_and_shipped_files() {
+        let dir = data_dir();
+        std::fs::create_dir_all(dir.path().join("blobs/b")).unwrap();
+        std::fs::write(dir.path().join("blobs/b/o"), b"o").unwrap();
+        let store = store();
+        ship_once(&store, "inst", dir.path(), &mut ShipState::new(), seal)
+            .await
+            .unwrap();
+        ship_files(
+            &store,
+            "inst",
+            dir.path(),
+            &mut FileShipState::default(),
+            seal,
+            unseal,
+        )
+        .await
+        .unwrap();
+        crate::fencing::claim_next_epoch(&store, "inst")
+            .await
+            .unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        let count = restore_shipped(&store, "inst", target.path(), unseal)
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "snapshot and one segment");
+        assert!(!target.path().join("files").exists());
+        assert!(!target.path().join(FILES_INDEX).exists());
     }
 }

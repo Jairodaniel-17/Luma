@@ -20,12 +20,34 @@ pub async fn backup(
     Extension(ctx): Extension<TenantContext>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_role(&ctx, "admin")?;
+    let internal = |e: String| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e);
     state
         .engine
         .force_snapshot()
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+        .map_err(|e| internal(e.to_string()))?;
     let offset = state.engine.events().last_published_offset();
-    Ok(Json(serde_json::json!({ "ok": true, "offset": offset })))
+    // A full, verified backup taken by the server itself: only the process
+    // that has the KV projection open can export it safely. `luma backup`
+    // calls this when a server is running.
+    let config = state.config.clone();
+    let engine = state.engine.clone();
+    let (dest, manifest) = tokio::task::spawn_blocking(move || {
+        let dest = crate::backup::run_backup_with(&config, Some(&engine))?;
+        let manifest = crate::backup::verify(&dest)?;
+        Ok::<_, anyhow::Error>((dest, manifest))
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(|e| internal(e.to_string()))?;
+    // Off-host too, like the scheduled backups: a backup taken before an
+    // upgrade is the one most likely to be needed from another machine.
+    crate::backup::ship_if_configured(&state.config, &dest).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "offset": offset,
+        "path": dest.display().to_string(),
+        "manifest": manifest,
+    })))
 }
 
 pub async fn get_audit_log(

@@ -152,7 +152,8 @@ impl StateStore {
                 (next_rev, value, Some(old_value))
             }
             std::collections::hash_map::Entry::Vacant(e) => {
-                if if_revision.is_some() {
+                // `Some(0)` is create-if-absent; any other guard needs a key.
+                if if_revision.is_some_and(|r| r != 0) {
                     return Err(StateError::RevisionMismatch);
                 }
                 e.insert(Entry {
@@ -280,33 +281,6 @@ impl StateStore {
             self.reindex_key(&key, None, Some(&entry.value));
         }
         self.track_expiry(&key, revision, expires_at_ms);
-    }
-
-    pub fn prepare_put_revision(
-        &self,
-        key: &str,
-        if_revision: Option<u64>,
-    ) -> Result<u64, StateError> {
-        let now = now_ms();
-        let shard = &self.0.shards[shard_index(key)];
-        let map = shard.read();
-        let current = map.get(key).filter(|e| !is_expired(e, now));
-        match current {
-            Some(e) => {
-                if let Some(expected) = if_revision {
-                    if e.revision != expected {
-                        return Err(StateError::RevisionMismatch);
-                    }
-                }
-                Ok(e.revision.saturating_add(1))
-            }
-            None => {
-                if if_revision.is_some() {
-                    return Err(StateError::RevisionMismatch);
-                }
-                Ok(1)
-            }
-        }
     }
 
     pub fn apply_put_with_revision(

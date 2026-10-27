@@ -47,6 +47,9 @@ pub mod crypto;
 /// Document store: chunking, storage, and retrieval of ingested documents.
 #[forbid(unsafe_code)]
 pub mod docstore;
+/// systemd readiness and watchdog notifications.
+#[forbid(unsafe_code)]
+pub mod sdnotify;
 
 #[forbid(unsafe_code)]
 pub mod durability;

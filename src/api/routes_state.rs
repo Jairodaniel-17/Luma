@@ -59,6 +59,37 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
+/// `GET /v1/health/ready` — 200 while this node can take writes, 503 with the
+/// reason when it cannot or soon will not: `read_only` after a failed WAL
+/// fsync, `disk_full` once writes are being refused for space (`write_gate`),
+/// `disk_low` under 10 % free. What a monitor should poll: `/v1/health` answers 200 as long
+/// as the process is up, even when every write is being refused. The WAL
+/// replay finishes before the listener opens, so a node that answers at all
+/// has replayed.
+pub async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
+    let mut status = state.engine.health();
+    if status == "ok" {
+        let space = state
+            .config
+            .data_dir
+            .as_deref()
+            .and_then(|dir| crate::durability::disk_space(std::path::Path::new(dir)));
+        if let Some((free, total)) = space {
+            if free < crate::api::write_floor(total) {
+                status = "disk_full";
+            } else if free < total / 10 {
+                status = "disk_low";
+            }
+        }
+    }
+    let code = if status == "ok" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, axum::Json(serde_json::json!({ "status": status })))
+}
+
 /// Which role this data directory holds.
 fn node_role(state: &AppState) -> crate::replica::Role {
     match &state.config.data_dir {

@@ -19,7 +19,8 @@ momento.
 | | Estado |
 |---|---|
 | Respaldo local y restore | Verificado, con `--verify` |
-| Respaldo remoto (S3/R2/GCS/MinIO) | Implementado; **SigV4 contra MinIO real sin probar** |
+| Respaldo remoto (S3/R2/GCS/MinIO) | Probado contra MinIO real (`scripts/dr_drill.sh`) |
+| Host perdido → host nuevo desde el remoto | `luma restore-remote`, ver §1. Simulacro: RPO ≤ 10 s, RTO ≈ 6 s |
 | Réplica de lectura | Verificada en tests; promoción manual |
 | Failover automático | **No existe.** W2.3 en el plan |
 | Fencing por epoch contra split-brain | Implementado. Ventana de un intervalo de envío, ver §3 |
@@ -53,13 +54,18 @@ Si `wal=0` **y** `snapshot=false`, el respaldo está vacío: comprueba que
 ### Qué contiene, y qué no
 
 Contiene: la base SQLite (vía `VACUUM INTO`, así que es consistente), el
-`snapshot.json`, los segmentos del WAL, `vectors/`, `blobs/` y `queues/`.
+`snapshot.json`, los segmentos del WAL, `vectors/`, `blobs/`, `queues/` y
+`state.export.jsonl`: el KV entero leído de un instante (una lectura
+consistente, no una copia de `state.lsm`, que en caliente saldría desgarrada).
 
-**No contiene `state.lsm`** (la proyección KV), a propósito. Es una proyección
-del WAL: el restore la reconstruye reproduciendo. Copiarla en caliente falla en
-Windows con violación de compartición y en Linux produce una lectura desgarrada —
-y una proyección desgarrada es peor que ninguna, porque el restore arrancaría
-desde estado derivado corrupto en vez de reconstruirlo limpio.
+El export es imprescindible: la retención borra segmentos viejos del WAL, así
+que un respaldo con solo el WAL perdía toda clave escrita antes del segmento más
+antiguo que quedaba. Se exporta **antes** de copiar el WAL, y el restore
+reproduce el WAL encima.
+
+Con el servidor en marcha, `luma backup` le pide el respaldo al servidor
+(`POST /v1/admin/backup`): solo el proceso que tiene abierta la proyección puede
+exportarla sin riesgo. Sin servidor, la abre él.
 
 ### Restaurar
 
@@ -70,7 +76,7 @@ desde estado derivado corrupto en vez de reconstruirlo limpio.
 # 2. Restaura.
 luma restore backups/20260822T125301Z
 
-# 3. Arranca. El arranque reproduce el WAL y reconstruye redb.
+# 3. Arranca. El arranque reproduce el WAL posterior al export.
 luma serve
 ```
 
@@ -94,6 +100,34 @@ Las credenciales van por entorno (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 El manifiesto se sube **al final**, después de todos los objetos. Un `download`
 que no encuentra manifiesto rechaza el prefijo en vez de restaurar a medias: si
 la subida se cortó, no hay manifiesto, y el prefijo se descarta entero.
+
+Con `wal_ship_interval_secs = 10`, además, cada 10 s se suben el WAL y los
+cambios de `blobs/` y `queues/` (que no van en el WAL) a `<prefijo>/wal-stream/`.
+
+### Se perdió el host
+
+```bash
+# En la máquina nueva, con el mismo luma.toml (backup_remote_url, credenciales
+# por entorno y LUMA_MASTER_KEY: sin ella no se descifra nada) y data_dir vacío:
+luma restore-remote
+luma serve        # o systemctl start luma
+```
+
+`restore-remote` baja el último respaldo completo (el que tiene manifiesto), lo
+verifica y lo restaura; encima pone el WAL enviado después y deja `blobs/` y
+`queues/` como estaban en el último envío. Al final reclama la siguiente epoch,
+así que si el host viejo vuelve a la vida deja de enviar en su siguiente pasada.
+Se niega a escribir en un `data_dir` que no esté vacío.
+
+Lo que se pierde: como mucho las escrituras de los últimos
+`wal_ship_interval_secs`. La excepción es la base SQLite (cuentas, auditoría,
+tablas del hub), que no se envía: vuelve al último respaldo completo. Los
+documentos del buscador se reindexan desde el ERP.
+
+Medido con `scripts/dr_drill.sh` (MinIO, carga de KV, colas, blobs, vectores y
+documentos, `kill -9` del host): todo lo confirmado hasta 2,5 s antes del corte
+estaba; RTO de 6,3 s entre `restore-remote` y `/v1/health/ready` en 200, con
+~6 400 objetos.
 
 ---
 

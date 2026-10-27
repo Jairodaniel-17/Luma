@@ -261,13 +261,30 @@ async fn write_message_atomic(dir: &StdPath, msg: &StoredMessage) -> Result<(), 
     Ok(())
 }
 
-/// Rewrite a message to record a lease change, atomically but not durably.
+/// A message's lease: when it becomes visible again and how often it was
+/// delivered. Kept in its own `<id>.lease` file next to the message.
+#[derive(Debug, Serialize, Deserialize)]
+struct Lease {
+    visible_at: u64,
+    attempts: u64,
+}
+
+/// Record a lease change, atomically but not durably.
 ///
-/// See `durability::replace_atomic` for why the distinction matters and where
-/// the line is.
+/// In a file of its own, never in the message: the message is written once,
+/// durably, at enqueue and not touched again. Rewriting it on every receive
+/// without an fsync (which the lease does not deserve, see
+/// `durability::replace_atomic`) could leave the message itself zero-length
+/// after a power cut on a filesystem that does not order the rename after the
+/// data, which loses a message the producer was told was stored. Losing a
+/// lease only makes the message visible again.
 async fn write_message_lease(dir: &StdPath, msg: &StoredMessage) -> Result<(), ApiError> {
-    let bytes = serde_json::to_vec(msg).map_err(|_| io_error("failed to serialize message"))?;
-    let final_path = dir.join(format!("{}.json", msg.id));
+    let lease = Lease {
+        visible_at: msg.visible_at,
+        attempts: msg.attempts,
+    };
+    let bytes = serde_json::to_vec(&lease).map_err(|_| io_error("failed to serialize lease"))?;
+    let final_path = dir.join(format!("{}.lease", msg.id));
     if let Err(e) = crate::durability::replace_atomic(&final_path, &bytes).await {
         tracing::error!("queue lease update failed: {}", e);
         return Err(io_error("failed to update message"));
@@ -303,18 +320,44 @@ pub async fn enqueue(
         attempts: 0,
     };
 
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|_| io_error("failed to create queue directory"))?;
+    // No `create_dir_all` first: `write_atomic` creates the directories and
+    // fsyncs each new level in its parent, and a directory created here
+    // beforehand would make it skip exactly those fsyncs.
     write_message_atomic(&dir, &msg).await?;
 
     Ok(axum::Json(EnqueueResponse { id }))
 }
 
-/// Read and parse one stored message, skipping temp files and unreadable entries.
+/// Read one stored message with its current lease.
+///
+/// A message that cannot be read is skipped but logged: it is written
+/// durably and atomically, so an unreadable one is damage an operator has to
+/// see, not something to drop in silence.
 async fn load_message(path: &StdPath) -> Option<StoredMessage> {
-    let bytes = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        // Acked between the listing and the read.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "queue message unreadable: {e}");
+            return None;
+        }
+    };
+    let mut msg: StoredMessage = match serde_json::from_slice(&bytes) {
+        Ok(msg) => msg,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "queue message corrupt: {e}");
+            return None;
+        }
+    };
+    // A missing or damaged lease is a lost lease: the message is visible.
+    if let Ok(raw) = tokio::fs::read(path.with_extension("lease")).await {
+        if let Ok(lease) = serde_json::from_slice::<Lease>(&raw) {
+            msg.visible_at = lease.visible_at;
+            msg.attempts = lease.attempts;
+        }
+    }
+    Some(msg)
 }
 
 /// Collect message file paths in a queue dir, sorted oldest-first by file name
@@ -409,11 +452,17 @@ pub async fn ack(
     Path((queue, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let path = resolve_message_path(&state, &ctx, &queue, &id)?;
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    // Under the receive lock, so a receive cannot write a lease for a message
+    // this ack is removing.
+    let lock = receive_lock(&scoped_lock_key(&ctx, &queue)).await;
+    let _guard = lock.lock().await;
+    match crate::durability::remove_durable(&path).await {
+        Ok(_) => {}
         Err(_) => return Err(io_error("failed to delete message")),
     }
+    // The lease goes after the message: a crash in between leaves only a
+    // stray lease, which nothing reads.
+    let _ = tokio::fs::remove_file(path.with_extension("lease")).await;
     Ok(axum::Json(AckResponse { ok: true }))
 }
 

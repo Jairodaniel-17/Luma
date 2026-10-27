@@ -208,6 +208,54 @@ impl Commits {
         }
     }
 
+    /// Commit everything queued so far, then return.
+    ///
+    /// For a writer that appends to the WAL **directly** instead of through the
+    /// queue (deletes, atomic batches, vector mutations). It must call this
+    /// while holding the caller's ordering guard, so nothing can be queued
+    /// behind it: once the queue is empty, its own record is the next offset in
+    /// file order too.
+    ///
+    /// Without it the two paths overtook each other. A queued put took offset 10
+    /// and released the guard; a delete took 11, wrote and applied it at once;
+    /// then the leader applied 10 — and the projection, which skips anything at
+    /// or below the last offset it applied, dropped the put while its caller was
+    /// told OK. The WAL had the same inversion on disk, so replay lost it too.
+    pub fn drain(&self, commit: Commit<'_>) -> anyhow::Result<()> {
+        loop {
+            let batch = {
+                let mut q = self.0.queue.lock();
+                if q.committing {
+                    self.0.progress.wait(&mut q);
+                    continue;
+                }
+                if q.pending.is_empty() {
+                    return Ok(());
+                }
+                q.committing = true;
+                std::mem::take(&mut q.pending)
+            };
+
+            let (highest, failure) = Self::commit_batch(&batch, &commit);
+
+            let mut q = self.0.queue.lock();
+            q.committing = false;
+            if highest > 0 {
+                q.applied = q.applied.max(highest);
+            }
+            let failed = failure.map(|err| err.to_string());
+            if let Some(reason) = &failed {
+                // The queued writers learn it through `wait_for`, as with any
+                // leader's failure.
+                q.failure = Some(reason.clone());
+            }
+            self.0.progress.notify_all();
+            if let Some(reason) = failed {
+                anyhow::bail!("a queued commit ahead of this write failed: {reason}");
+            }
+        }
+    }
+
     /// One batch: a single WAL write with a single fsync, then the applies in
     /// order.
     ///

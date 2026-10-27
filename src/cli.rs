@@ -18,6 +18,9 @@ pub enum Command {
     Restore {
         path: String,
     },
+    /// Rebuild an empty data directory from the remote: the newest full
+    /// backup, then the WAL and the blob and queue files shipped after it.
+    RestoreRemote,
     /// Turn a replica back into a primary.
     ///
     /// The plan promised promotion through `luma promote` and the function
@@ -84,6 +87,7 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Command> {
             })?;
             Ok(Command::Restore { path })
         }
+        "restore-remote" => Ok(Command::RestoreRemote),
         "connect" => parse_connect(&args[2..]),
         "promote" => Ok(Command::Promote),
         "demote" => Ok(Command::Demote),
@@ -142,6 +146,7 @@ pub fn help_text() -> String {
         "    serve                    Arranca el servidor (por defecto si no se indica ninguno)",
         "    backup [--verify]        Copia el estado persistente; --verify lo restaura y lo comprueba",
         "    restore <path>           Restaura desde un directorio de backup",
+        "    restore-remote           Rehace un data_dir vacío desde el remoto (respaldo + WAL y archivos enviados)",
         "    promote                  Convierte una réplica en primario (quita el marcador REPLICA)",
         "    demote                   Convierte un primario en réplica de solo lectura",
         "    role                     Dice si el data_dir es `primary` o `replica`",
@@ -183,7 +188,8 @@ pub async fn run_promote(config: &Config) -> anyhow::Result<()> {
     // one stayed read-only, which is an outage with no writer at all.
     match luma::backup_remote::store_from_config(config) {
         Ok(Some(target)) => {
-            let epoch = luma::fencing::claim_next_epoch(&target.store, &target.prefix).await?;
+            let stream = luma::wal_ship::stream_prefix(&target.prefix);
+            let epoch = luma::fencing::claim_next_epoch(&target.store, &stream).await?;
             luma::fencing::set_local_epoch(path, epoch)?;
             println!(
                 "Promovido a primario: {data_dir}\n\
@@ -209,6 +215,70 @@ pub async fn run_promote(config: &Config) -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// `luma restore-remote`: the host is gone and a new one has an empty
+/// `data_dir`. Lays down the newest full backup, then the WAL shipped since
+/// (replay brings the KV, vectors and documents up to the last shipping pass),
+/// then the shipped blob and queue files, and finally claims the next epoch so
+/// the old host, should it come back, stops shipping into the prefix.
+///
+/// The relational SQLite comes from the full backup only: it is not shipped.
+pub async fn run_restore_remote(config: &Config) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let data_dir = config
+        .data_dir
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no hay data_dir configurado"))?;
+    let data = std::path::Path::new(&data_dir);
+    // Only into an empty directory: mixing a restore with whatever is there
+    // gives a state that is neither, and nobody would notice.
+    if std::fs::read_dir(data).is_ok_and(|mut entries| entries.next().is_some()) {
+        anyhow::bail!(
+            "{data_dir} no está vacío; restore-remote solo escribe en un directorio vacío"
+        );
+    }
+    let target = luma::backup_remote::store_from_config(config)?
+        .ok_or_else(|| anyhow::anyhow!("no hay destino remoto configurado (backup_remote_url)"))?;
+    let secrets = luma::crypto::SecretBox::from_env();
+    let stream = luma::wal_ship::stream_prefix(&target.prefix);
+    std::fs::create_dir_all(data)?;
+
+    let backup = luma::backup_remote::latest_backup(&target).await?;
+    if let Some(name) = &backup {
+        let staging = data.join(".restore-remote");
+        luma::backup_remote::fetch(&target, name, &staging, &secrets).await?;
+        luma::backup::verify(&staging)?;
+        luma::backup::restore(config, &staging.to_string_lossy())?;
+        std::fs::remove_dir_all(&staging)?;
+    }
+    // Shipped segments are whole copies of the live files, so they replace
+    // the backup's older, shorter copies of the same names.
+    let wal = match luma::wal_ship::restore_shipped(&target.store, &stream, data, |b| {
+        secrets.decrypt_bytes(b)
+    })
+    .await
+    {
+        Ok(n) => n,
+        Err(e) if backup.is_some() => {
+            println!("ATENCIÓN: sin WAL enviado ({e}); queda solo el respaldo completo.");
+            0
+        }
+        Err(e) => return Err(e),
+    };
+    let files =
+        luma::wal_ship::restore_files(&target.store, &stream, data, |b| secrets.decrypt_bytes(b))
+            .await?;
+    let epoch = luma::fencing::claim_next_epoch(&target.store, &stream).await?;
+    luma::fencing::set_local_epoch(data, epoch)?;
+    println!(
+        "Restaurado en {data_dir} en {:.1} s: respaldo {}, {wal} objetos de WAL, {files} archivos de \
+         blobs y colas. Epoch {epoch}: el host anterior, si vuelve, deja de enviar.\n\
+         Arranca con `luma serve`; el arranque reproduce el WAL.",
+        started.elapsed().as_secs_f64(),
+        backup.as_deref().unwrap_or("(ninguno)"),
+    );
     Ok(())
 }
 
@@ -361,7 +431,15 @@ pub async fn run_connect(
     }
 }
 
-pub fn run_backup(config: &Config, verify: bool) -> anyhow::Result<()> {
+pub async fn run_backup(config: &Config, verify: bool) -> anyhow::Result<()> {
+    // A running server has the KV projection open, and fjall takes no lock: a
+    // second process opening it would be two writers on one LSM. So the server
+    // takes the backup itself (and always verifies it); only when nothing
+    // answers is the data directory backed up from here.
+    if let Some(path) = backup_via_server(config).await? {
+        println!("Backup creado y verificado por el servidor en {path}");
+        return Ok(());
+    }
     let dest = luma::backup::run_backup(config)?;
     println!("Backup creado en {}", dest.display());
     if verify {
@@ -377,6 +455,37 @@ pub fn run_backup(config: &Config, verify: bool) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Ask the server on this host for a backup. `None` when no server answers.
+async fn backup_via_server(config: &Config) -> anyhow::Result<Option<String>> {
+    let host = if config.bind_addr.is_unspecified() {
+        std::net::IpAddr::from([127, 0, 0, 1])
+    } else {
+        config.bind_addr
+    };
+    let url = format!(
+        "http://{}/v1/admin/backup",
+        std::net::SocketAddr::new(host, config.port)
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()?;
+    match client.post(&url).bearer_auth(&config.api_key).send().await {
+        Err(e) if e.is_connect() => Ok(None),
+        Err(e) => Err(anyhow::anyhow!(
+            "a server answers at {url} but the backup request failed: {e}"
+        )),
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await?;
+            Ok(Some(body["path"].as_str().unwrap_or_default().to_string()))
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("the running server refused the backup ({status}): {body}")
+        }
+    }
 }
 
 pub fn run_restore(config: &Config, path: String) -> anyhow::Result<()> {
@@ -430,8 +539,17 @@ mod tests {
     #[test]
     fn the_help_mentions_every_subcommand() {
         const SUBCOMMANDS: &[&str] = &[
-            "serve", "backup", "restore", "promote", "demote", "role", "vacuum", "diskann",
-            "connect", "help",
+            "serve",
+            "backup",
+            "restore",
+            "restore-remote",
+            "promote",
+            "demote",
+            "role",
+            "vacuum",
+            "diskann",
+            "connect",
+            "help",
         ];
         let help = help_text();
         let missing: Vec<&&str> = SUBCOMMANDS
@@ -454,6 +572,7 @@ mod tests {
             vec!["luma", "backup"],
             vec!["luma", "backup", "--verify"],
             vec!["luma", "restore", "/tmp/backup"],
+            vec!["luma", "restore-remote"],
             vec!["luma", "promote"],
             vec!["luma", "demote"],
             vec!["luma", "role"],

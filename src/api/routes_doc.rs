@@ -113,6 +113,17 @@ fn validate_collection(state: &AppState, collection: &str) -> Result<(), ApiErro
             "collection too long",
         ));
     }
+    // A document lives at `doc:{collection}:{id}`. With a ':' allowed in the
+    // collection, collection "a:b" id "c" and collection "a" id "b:c" are the
+    // same key: two documents overwriting each other, across organizations
+    // too, since ownership is checked by collection name.
+    if collection.is_empty() || collection.contains(':') {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            "collection must be non-empty and must not contain ':'",
+        ));
+    }
     Ok(())
 }
 

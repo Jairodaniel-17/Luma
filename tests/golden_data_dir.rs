@@ -25,8 +25,10 @@ use std::time::{Duration, Instant};
 /// auth is not persisted — but the requests below need one.
 const API_KEY: &str = "golden-key";
 
-fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden_data_dir")
+fn fixture_dir(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
 }
 
 fn free_port() -> u16 {
@@ -121,7 +123,19 @@ impl Server {
 
 #[tokio::test]
 async fn current_binary_reads_a_data_dir_written_by_an_earlier_build() {
-    let fixture = fixture_dir();
+    reads_fixture("golden_data_dir", "4.24.0").await;
+}
+
+/// The version in production for Friochap (SPEC-friochap F5): KV in the fjall
+/// LSM rather than redb, and a document whose index entries a migration at
+/// startup rebuilds. Recorded with `scripts/golden_fixture.sh`.
+#[tokio::test]
+async fn current_binary_reads_a_data_dir_written_by_v4_26() {
+    reads_fixture("golden_data_dir_v4_26", "4.26.0").await;
+}
+
+async fn reads_fixture(name: &str, version: &str) {
+    let fixture = fixture_dir(name);
     assert!(
         fixture.join("snapshot.json").exists(),
         "golden fixture missing at {fixture:?} — regenerate it from a release \
@@ -149,7 +163,8 @@ async fn current_binary_reads_a_data_dir_written_by_an_earlier_build() {
         .await
         .expect("kv response was not JSON");
     assert_eq!(
-        kv["value"]["marker"], "kv-v4.24.0",
+        kv["value"]["marker"],
+        format!("kv-v{version}"),
         "KV value from the fixture did not survive: {kv}"
     );
 
@@ -180,7 +195,7 @@ async fn current_binary_reads_a_data_dir_written_by_an_earlier_build() {
         1,
         "queued message from the fixture was not readable: {received}"
     );
-    assert_eq!(messages[0]["body"]["marker"], "queue-v4.24.0");
+    assert_eq!(messages[0]["body"]["marker"], format!("queue-v{version}"));
 
     // ── Vector: manifest plus run file, the richest format of the set ────────
     let vector: serde_json::Value = http
@@ -194,7 +209,8 @@ async fn current_binary_reads_a_data_dir_written_by_an_earlier_build() {
         .await
         .expect("vector response was not JSON");
     assert_eq!(
-        vector["meta"]["marker"], "vector-v4.24.0",
+        vector["meta"]["marker"],
+        format!("vector-v{version}"),
         "vector from the fixture did not survive: {vector}"
     );
 
@@ -210,6 +226,25 @@ async fn current_binary_reads_a_data_dir_written_by_an_earlier_build() {
         .await
         .expect("collection detail was not JSON");
     assert_eq!(detail["dim"].as_u64(), Some(4));
+
+    // Documents, and their index: found by a field, not only by id.
+    if fixture.join("state.lsm").exists() {
+        let found: serde_json::Value = http
+            .post(format!("{}/v1/doc/ordenes/find", server.base))
+            .bearer_auth(API_KEY)
+            .json(&serde_json::json!({ "filter": { "estado": "abierto" } }))
+            .send()
+            .await
+            .expect("doc find failed")
+            .json()
+            .await
+            .expect("doc find was not JSON");
+        assert_eq!(
+            found["documents"][0]["doc"]["marker"],
+            format!("doc-v{version}"),
+            "document from the fixture not found through its index: {found}"
+        );
+    }
 
     server.stop();
 }

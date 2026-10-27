@@ -20,6 +20,7 @@ pub async fn auth_middleware(
     let is_static_get = req.method() == axum::http::Method::GET && !path.starts_with("/v1");
     if is_static_get
         || path == "/v1/health"
+        || path == "/v1/health/ready"
         || path == "/v1/auth/register"
         || path == "/v1/auth/login"
         || path.ends_with("openapi.yaml")

@@ -20,7 +20,7 @@
 //! exception classes based on it, so a reworded message is a behaviour change.
 
 use crate::engine::stored::StoredVal;
-use crate::engine::Engine;
+use crate::engine::{Engine, EngineError, StateChange, StateItem, StateOp};
 use crate::resp::protocol::Value;
 use crate::resp::scripts;
 
@@ -372,8 +372,37 @@ pub enum PubSubCommand {
     NumSub(Vec<Vec<u8>>),
 }
 
+/// Serializes `EXEC` against every other RESP command.
+///
+/// Redis runs a transaction with nothing interleaved, and `WATCH` relies on the
+/// check and the queued commands being one step. Ordinary commands share the
+/// gate; `EXEC` takes it alone. Commands from the HTTP API do not pass
+/// through here, as they never touched a Redis transaction to begin with.
+///
+/// ponytail: one process-wide gate, so transactions on unrelated keys also
+/// wait for each other; per-key gating if EXEC throughput ever matters.
+static TX_GATE: parking_lot::RwLock<()> = parking_lot::const_rwlock(());
+
 /// Execute one command.
 pub fn dispatch(
+    engine: &Engine,
+    session: &mut Session,
+    args: &[Vec<u8>],
+    authenticate: &dyn Fn(&str, &str) -> Option<AuthBinding>,
+    pubsub: Option<&crate::resp::pubsub::PubSub>,
+    allow_flush: bool,
+) -> Dispatch {
+    let is_exec = args.first().is_some_and(|a| command_name(a) == "EXEC");
+    if is_exec {
+        let _gate = TX_GATE.write();
+        dispatch_one(engine, session, args, authenticate, pubsub, allow_flush)
+    } else {
+        let _gate = TX_GATE.read();
+        dispatch_one(engine, session, args, authenticate, pubsub, allow_flush)
+    }
+}
+
+fn dispatch_one(
     engine: &Engine,
     session: &mut Session,
     args: &[Vec<u8>],
@@ -928,15 +957,39 @@ fn info(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
 /// bytes. `GET` has to answer both, because the whole point is that the two
 /// surfaces address one store.
 fn read_bytes(engine: &Engine, key: &str) -> Option<Vec<u8>> {
-    let item = engine.get_state(key)?;
+    engine.get_state(key).map(|item| item_bytes(&item))
+}
+
+fn item_bytes(item: &StateItem) -> Vec<u8> {
     match &item.value {
-        StoredVal::Raw { bytes, .. } => Some(bytes.clone()),
-        StoredVal::Json(value) => Some(match value {
+        StoredVal::Raw { bytes, .. } => bytes.clone(),
+        StoredVal::Json(value) => match value {
             // A JSON string reads back as its contents, not as a quoted literal:
             // `SET k v` then a GET must return `v`, not `"v"`.
             serde_json::Value::String(text) => text.clone().into_bytes(),
             other => other.to_string().into_bytes(),
-        }),
+        },
+    }
+}
+
+/// Read-modify-write one key as a single atomic step (`Engine::update_state`):
+/// `change` sees the live item and returns what to write and the reply. A
+/// read followed by a separate write let two `INCR`s read the same number
+/// and both write `n + 1`.
+fn update(
+    engine: &Engine,
+    key: &str,
+    change: impl FnOnce(Option<&StateItem>) -> (StateChange, Value),
+) -> Value {
+    engine
+        .update_state(key, |item| Ok::<_, EngineError>(change(item)))
+        .unwrap_or_else(|e| err(format!("ERR {e}")))
+}
+
+fn put_raw(bytes: Vec<u8>, expires_at_ms: Option<u64>) -> StateChange {
+    StateChange::Put {
+        value: StoredVal::raw(bytes, None),
+        expires_at_ms,
     }
 }
 
@@ -987,34 +1040,28 @@ fn set(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR syntax error");
     }
 
-    // Read the existing value only when a modifier actually needs it. The plain
-    // `SET k v` — which is the overwhelming majority of traffic and the one a
-    // benchmark measures — used to pay an unconditional read transaction for a
-    // value it then ignored.
-    let existing = if only_if_absent || only_if_present || keep_ttl {
-        engine.get_state(&key)
-    } else {
-        None
-    };
-    if only_if_absent && existing.is_some() {
-        return Value::nil();
+    let value = args[1].clone();
+    // The plain `SET k v` — the overwhelming majority of traffic and the one a
+    // benchmark measures — needs no read, so it skips the read-modify-write.
+    if !(only_if_absent || only_if_present || keep_ttl) {
+        return match engine.put_state(key, StoredVal::raw(value, None), ttl_ms, None) {
+            Ok(_) => Value::ok(),
+            Err(e) => err(format!("ERR {e}")),
+        };
     }
-    if only_if_present && existing.is_none() {
-        return Value::nil();
-    }
-    if keep_ttl {
-        // Carry the remaining TTL rather than clearing it, which is what
-        // KEEPTTL means and what a session-refresh pattern depends on.
-        ttl_ms = existing
-            .as_ref()
-            .and_then(|item| item.expires_at_ms)
-            .map(|at| at.saturating_sub(now_ms()));
-    }
-
-    match engine.put_state(key, StoredVal::raw(args[1].clone(), None), ttl_ms, None) {
-        Ok(_) => Value::ok(),
-        Err(e) => err(format!("ERR {e}")),
-    }
+    update(engine, &key, |existing| {
+        if (only_if_absent && existing.is_some()) || (only_if_present && existing.is_none()) {
+            return (StateChange::Keep, Value::nil());
+        }
+        // KEEPTTL carries the remaining TTL rather than clearing it, which is
+        // what a session-refresh pattern depends on.
+        let expires_at_ms = if keep_ttl {
+            existing.and_then(|item| item.expires_at_ms)
+        } else {
+            ttl_ms.map(|ttl| now_ms().saturating_add(ttl))
+        };
+        (put_raw(value, expires_at_ms), Value::ok())
+    })
 }
 
 /// `SCRIPT LOAD|EXISTS|FLUSH`.
@@ -1176,12 +1223,10 @@ fn getdel(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR wrong number of arguments for 'getdel' command");
     }
     let key = scope(session, &args[0]);
-    let value = read_bytes(engine, &key);
-    let _ = engine.delete_state(&key);
-    match value {
-        Some(bytes) => Value::Bulk(Some(bytes)),
-        None => Value::nil(),
-    }
+    update(engine, &key, |item| match item {
+        Some(item) => (StateChange::Delete, Value::Bulk(Some(item_bytes(item)))),
+        None => (StateChange::Keep, Value::nil()),
+    })
 }
 
 fn setex(engine: &Engine, session: &Session, args: &[Vec<u8>], multiplier: u64) -> Value {
@@ -1214,10 +1259,11 @@ fn setnx(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     if held(engine, &key).exists() {
         return Value::Integer(0);
     }
-    match engine.put_state(key, StoredVal::raw(args[1].clone(), None), None, None) {
-        Ok(_) => Value::Integer(1),
-        Err(_) => Value::Integer(0),
-    }
+    let value = args[1].clone();
+    update(engine, &key, |item| match item {
+        Some(_) => (StateChange::Keep, Value::Integer(0)),
+        None => (put_raw(value, None), Value::Integer(1)),
+    })
 }
 
 fn strlen(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
@@ -1249,30 +1295,38 @@ fn incr_by_arg(engine: &Engine, session: &Session, args: &[Vec<u8>], sign: i64) 
 }
 
 fn apply_delta(engine: &Engine, key: &str, delta: i64) -> Value {
-    let current = match read_bytes(engine, key) {
-        Some(bytes) => match std::str::from_utf8(&bytes)
-            .ok()
-            .and_then(|t| t.trim().parse::<i64>().ok())
-        {
-            Some(n) => n,
-            // Redis is explicit here rather than resetting to zero: silently
-            // discarding a non-numeric value would destroy data.
-            None => return err("ERR value is not an integer or out of range"),
-        },
-        None => 0,
-    };
-    let Some(next) = current.checked_add(delta) else {
-        return err("ERR increment or decrement would overflow");
-    };
-    match engine.put_state(
-        key.to_string(),
-        StoredVal::raw(next.to_string().into_bytes(), None),
-        None,
-        None,
-    ) {
-        Ok(_) => Value::Integer(next),
-        Err(e) => err(format!("ERR {e}")),
-    }
+    update(engine, key, |item| {
+        let current = match item.map(item_bytes) {
+            Some(bytes) => match std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|t| t.trim().parse::<i64>().ok())
+            {
+                Some(n) => n,
+                // Redis is explicit here rather than resetting to zero: silently
+                // discarding a non-numeric value would destroy data.
+                None => {
+                    return (
+                        StateChange::Keep,
+                        err("ERR value is not an integer or out of range"),
+                    )
+                }
+            },
+            None => 0,
+        };
+        let Some(next) = current.checked_add(delta) else {
+            return (
+                StateChange::Keep,
+                err("ERR increment or decrement would overflow"),
+            );
+        };
+        // The key keeps its TTL, as INCR does in Redis: a rate-limit counter
+        // with an expiry must not become immortal on its second hit.
+        let expires_at_ms = item.and_then(|i| i.expires_at_ms);
+        (
+            put_raw(next.to_string().into_bytes(), expires_at_ms),
+            Value::Integer(next),
+        )
+    })
 }
 
 fn mget(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
@@ -1305,17 +1359,21 @@ fn mset(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
     if args.is_empty() || !args.len().is_multiple_of(2) {
         return err("ERR wrong number of arguments for 'mset' command");
     }
-    for pair in args.chunks_exact(2) {
-        if let Err(e) = engine.put_state(
-            scope(session, &pair[0]),
-            StoredVal::raw(pair[1].clone(), None),
-            None,
-            None,
-        ) {
-            return err(format!("ERR {e}"));
-        }
+    // One batch: Redis applies MSET all at once, and a failure halfway must
+    // not leave some of the keys written.
+    let ops = args
+        .chunks_exact(2)
+        .map(|pair| StateOp::Put {
+            key: scope(session, &pair[0]),
+            value: StoredVal::raw(pair[1].clone(), None),
+            ttl_ms: None,
+            if_revision: None,
+        })
+        .collect();
+    match engine.put_state_batch(ops) {
+        Ok(()) => Value::ok(),
+        Err(e) => err(format!("ERR {e}")),
     }
-    Value::ok()
 }
 
 // ── key commands ─────────────────────────────────────────────────────────────
@@ -1404,19 +1462,26 @@ fn expire(engine: &Engine, session: &Session, args: &[Vec<u8>], multiplier: u64)
         return err("ERR value is not an integer or out of range");
     };
     let key = physical_key(engine, &scope(session, &args[0]));
-    let Some(item) = engine.get_state(&key) else {
-        return Value::Integer(0);
-    };
-    if n <= 0 {
-        // A non-positive expiry deletes the key immediately, as Redis does.
-        let _ = engine.delete_state(&key);
-        return Value::Integer(1);
-    }
-    let ttl_ms = (n as u64).saturating_mul(multiplier);
-    match engine.put_state(key, item.value, Some(ttl_ms), None) {
-        Ok(_) => Value::Integer(1),
-        Err(_) => Value::Integer(0),
-    }
+    let deadline_ms =
+        (n > 0).then(|| now_ms().saturating_add((n as u64).saturating_mul(multiplier)));
+    set_deadline(engine, &key, deadline_ms)
+}
+
+/// Give `key` an expiry, keeping its value. `None` is a deadline already
+/// past: the key is deleted at once, as Redis does. Reply 1 if the key
+/// existed, 0 if not.
+fn set_deadline(engine: &Engine, key: &str, deadline_ms: Option<u64>) -> Value {
+    update(engine, key, |item| match (item, deadline_ms) {
+        (None, _) => (StateChange::Keep, Value::Integer(0)),
+        (Some(_), None) => (StateChange::Delete, Value::Integer(1)),
+        (Some(item), Some(at)) => (
+            StateChange::Put {
+                value: item.value.clone(),
+                expires_at_ms: Some(at),
+            },
+            Value::Integer(1),
+        ),
+    })
 }
 
 fn persist(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
@@ -1424,16 +1489,16 @@ fn persist(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR wrong number of arguments for 'persist' command");
     }
     let key = physical_key(engine, &scope(session, &args[0]));
-    let Some(item) = engine.get_state(&key) else {
-        return Value::Integer(0);
-    };
-    if item.expires_at_ms.is_none() {
-        return Value::Integer(0);
-    }
-    match engine.put_state(key, item.value, None, None) {
-        Ok(_) => Value::Integer(1),
-        Err(_) => Value::Integer(0),
-    }
+    update(engine, &key, |item| match item {
+        Some(item) if item.expires_at_ms.is_some() => (
+            StateChange::Put {
+                value: item.value.clone(),
+                expires_at_ms: None,
+            },
+            Value::Integer(1),
+        ),
+        _ => (StateChange::Keep, Value::Integer(0)),
+    })
 }
 
 fn now_ms() -> u64 {
@@ -1750,14 +1815,26 @@ fn rename(engine: &Engine, session: &Session, args: &[Vec<u8>], only_if_absent: 
         .expires_at_ms
         .map(|at| at.saturating_sub(now_ms()))
         .filter(|remaining| *remaining > 0);
-    match engine.put_state(to, item.value, ttl_ms, None) {
-        Ok(_) => {
-            let _ = engine.delete_state(&from);
-            if only_if_absent {
-                Value::Integer(1)
-            } else {
-                Value::ok()
-            }
+    // Write and delete in one batch, the source guarded by the revision just
+    // read: a crash between two separate writes left the value under both
+    // names, and a write to the source in between was silently dropped.
+    let ops = vec![
+        StateOp::Put {
+            key: to,
+            value: item.value,
+            ttl_ms,
+            if_revision: None,
+        },
+        StateOp::Delete {
+            key: from,
+            if_revision: Some(item.revision),
+        },
+    ];
+    match engine.put_state_batch(ops) {
+        Ok(()) if only_if_absent => Value::Integer(1),
+        Ok(()) => Value::ok(),
+        Err(EngineError::State(crate::engine::StateError::RevisionMismatch)) => {
+            err("ERR the key changed during RENAME; retry")
         }
         Err(e) => err(format!("ERR {e}")),
     }
@@ -1768,13 +1845,13 @@ fn append(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR wrong number of arguments for 'append' command");
     }
     let key = scope(session, &args[0]);
-    let mut current = read_bytes(engine, &key).unwrap_or_default();
-    current.extend_from_slice(&args[1]);
-    let len = current.len() as i64;
-    match engine.put_state(key, StoredVal::raw(current, None), None, None) {
-        Ok(_) => Value::Integer(len),
-        Err(e) => err(format!("ERR {e}")),
-    }
+    update(engine, &key, |item| {
+        let mut current = item.map(item_bytes).unwrap_or_default();
+        current.extend_from_slice(&args[1]);
+        let len = current.len() as i64;
+        let expires_at_ms = item.and_then(|i| i.expires_at_ms);
+        (put_raw(current, expires_at_ms), Value::Integer(len))
+    })
 }
 
 fn getset(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
@@ -1782,14 +1859,14 @@ fn getset(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR wrong number of arguments for 'getset' command");
     }
     let key = scope(session, &args[0]);
-    let previous = read_bytes(engine, &key);
-    match engine.put_state(key, StoredVal::raw(args[1].clone(), None), None, None) {
-        Ok(_) => match previous {
-            Some(bytes) => Value::Bulk(Some(bytes)),
+    // GETSET clears the TTL, as SET does.
+    update(engine, &key, |item| {
+        let reply = match item {
+            Some(item) => Value::Bulk(Some(item_bytes(item))),
             None => Value::nil(),
-        },
-        Err(e) => err(format!("ERR {e}")),
-    }
+        };
+        (put_raw(args[1].clone(), None), reply)
+    })
 }
 
 fn incrbyfloat(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
@@ -1803,32 +1880,33 @@ fn incrbyfloat(engine: &Engine, session: &Session, args: &[Vec<u8>]) -> Value {
         return err("ERR value is not a valid float");
     }
     let key = scope(session, &args[0]);
-    let current = match read_bytes(engine, &key) {
-        Some(bytes) => match std::str::from_utf8(&bytes)
-            .ok()
-            .and_then(|t| t.trim().parse::<f64>().ok())
-        {
-            Some(n) => n,
-            None => return err("ERR value is not a valid float"),
-        },
-        None => 0.0,
-    };
-    let next = current + delta;
-    if !next.is_finite() {
-        return err("ERR increment would produce NaN or Infinity");
-    }
-    // Redis trims trailing zeros so `1.0 + 0.5` reads back as `1.5`, not
-    // `1.5000000000000000`.
-    let rendered = format_float(next);
-    match engine.put_state(
-        key,
-        StoredVal::raw(rendered.clone().into_bytes(), None),
-        None,
-        None,
-    ) {
-        Ok(_) => Value::bulk(rendered),
-        Err(e) => err(format!("ERR {e}")),
-    }
+    update(engine, &key, |item| {
+        let current = match item.map(item_bytes) {
+            Some(bytes) => match std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|t| t.trim().parse::<f64>().ok())
+            {
+                Some(n) => n,
+                None => return (StateChange::Keep, err("ERR value is not a valid float")),
+            },
+            None => 0.0,
+        };
+        let next = current + delta;
+        if !next.is_finite() {
+            return (
+                StateChange::Keep,
+                err("ERR increment would produce NaN or Infinity"),
+            );
+        }
+        // Redis trims trailing zeros so `1.0 + 0.5` reads back as `1.5`, not
+        // `1.5000000000000000`.
+        let rendered = format_float(next);
+        let expires_at_ms = item.and_then(|i| i.expires_at_ms);
+        (
+            put_raw(rendered.clone().into_bytes(), expires_at_ms),
+            Value::bulk(rendered),
+        )
+    })
 }
 
 fn format_float(value: f64) -> String {
@@ -1847,21 +1925,13 @@ fn expire_at(engine: &Engine, session: &Session, args: &[Vec<u8>], multiplier: u
     let Ok(at) = String::from_utf8_lossy(&args[1]).parse::<i64>() else {
         return err("ERR value is not an integer or out of range");
     };
-    let key = scope(session, &args[0]);
-    let Some(item) = engine.get_state(&key) else {
-        return Value::Integer(0);
-    };
+    let key = physical_key(engine, &scope(session, &args[0]));
     let deadline_ms = (at.max(0) as u64).saturating_mul(multiplier);
-    let now = now_ms();
-    if deadline_ms <= now {
-        // A deadline in the past deletes immediately, as Redis does.
-        let _ = engine.delete_state(&key);
-        return Value::Integer(1);
-    }
-    match engine.put_state(key, item.value, Some(deadline_ms - now), None) {
-        Ok(_) => Value::Integer(1),
-        Err(_) => Value::Integer(0),
-    }
+    set_deadline(
+        engine,
+        &key,
+        (deadline_ms > now_ms()).then_some(deadline_ms),
+    )
 }
 
 // ── transactions ─────────────────────────────────────────────────────────────
@@ -1928,7 +1998,7 @@ fn exec(
 
     let mut replies = Vec::with_capacity(queued.len());
     for args in queued {
-        match dispatch(engine, session, &args, authenticate, pubsub, allow_flush) {
+        match dispatch_one(engine, session, &args, authenticate, pubsub, allow_flush) {
             Dispatch::Reply(value) => replies.push(value),
             // QUIT is in TRANSACTION_CONTROL so it never reaches the queue;
             // treating it as a reply keeps this total without a panic.
@@ -3650,6 +3720,57 @@ mod tests {
             matches!(&items[0], Value::Error(m) if m.contains("not allowed in transactions")),
             "got {:?}",
             items[0]
+        );
+    }
+
+    // ── atomicity under concurrency ──────────────────────────────────────────
+
+    /// Many clients hitting one key at once, as a rate limiter or a job
+    /// counter does. Redis runs each command alone, so none may be lost.
+    fn hammer(e: &Engine, argv: &[&str]) {
+        const CLIENTS: usize = 8;
+        const EACH: usize = 100;
+        std::thread::scope(|scope| {
+            for _ in 0..CLIENTS {
+                scope.spawn(|| {
+                    for _ in 0..EACH {
+                        let reply = run_outside(e, argv);
+                        assert!(!matches!(reply, Value::Error(_)), "{reply:?}");
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn concurrent_incr_loses_no_increment() {
+        let (e, _dir) = engine();
+        hammer(&e, &["INCR", "hits"]);
+        assert_eq!(run_outside(&e, &["GET", "hits"]), Value::bulk("800"));
+    }
+
+    #[test]
+    fn concurrent_lpush_on_a_new_key_loses_no_element() {
+        let (e, _dir) = engine();
+        hammer(&e, &["LPUSH", "jobs", "x"]);
+        assert_eq!(run_outside(&e, &["LLEN", "jobs"]), Value::Integer(800));
+    }
+
+    #[test]
+    fn concurrent_append_loses_no_byte() {
+        let (e, _dir) = engine();
+        hammer(&e, &["APPEND", "log", "ab"]);
+        assert_eq!(run_outside(&e, &["STRLEN", "log"]), Value::Integer(1600));
+    }
+
+    #[test]
+    fn incr_keeps_the_ttl() {
+        let (e, _dir) = engine();
+        run_outside(&e, &["SET", "limit", "1", "EX", "100"]);
+        run_outside(&e, &["INCR", "limit"]);
+        assert!(
+            matches!(run_outside(&e, &["TTL", "limit"]), Value::Integer(n) if n > 0),
+            "a counter with an expiry must not become immortal on INCR"
         );
     }
 }

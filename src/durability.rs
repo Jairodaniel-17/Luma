@@ -99,6 +99,54 @@ pub async fn replace_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Free and total bytes of the filesystem that holds `dir`, or `None` when it
+/// cannot be told (the directory does not exist, or the platform hides it).
+///
+/// Cached for two seconds: the write gate asks on every write, and listing
+/// the mounts each time would cost more than the writes it guards.
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+    use std::time::{Duration, Instant};
+    type Cached = Option<(Instant, std::path::PathBuf, Option<(u64, u64)>)>;
+    static CACHE: parking_lot::Mutex<Cached> = parking_lot::const_mutex(None);
+
+    let mut cache = CACHE.lock();
+    if let Some((at, cached_dir, space)) = cache.as_ref() {
+        if cached_dir == dir && at.elapsed() < Duration::from_secs(2) {
+            return *space;
+        }
+    }
+    let space = std::fs::canonicalize(dir).ok().and_then(|dir| {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        disks
+            .list()
+            .iter()
+            .filter(|disk| dir.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().as_os_str().len())
+            .map(|disk| (disk.available_space(), disk.total_space()))
+    });
+    *cache = Some((Instant::now(), dir.to_path_buf(), space));
+    space
+}
+
+/// Remove a file **durably**: once this returns, the removal survives a
+/// crash. A plain `remove_file` only changes the directory in the page cache,
+/// so after a power cut an acknowledged queue message or a deleted object can
+/// come back. Returns whether the file existed; a missing file is not an
+/// error, so the call is idempotent.
+pub async fn remove_durable(path: &Path) -> io::Result<bool> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = path.parent().map(Path::to_path_buf) {
+        tokio::task::spawn_blocking(move || fsync_dir(&parent))
+            .await
+            .map_err(|e| io::Error::other(format!("fsync_dir task failed: {e}")))??;
+    }
+    Ok(true)
+}
+
 /// Create a directory and every missing ancestor, durably.
 ///
 /// `create_dir_all` is not enough, and the gap is not theoretical: step 4 of

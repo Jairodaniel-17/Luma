@@ -353,3 +353,68 @@ fn structures_survive_backup_and_restore() {
     let members = set.as_set().unwrap();
     assert!(members.contains(&b"alpha".to_vec()) && members.contains(&b"beta".to_vec()));
 }
+
+/// A key written long ago must come back from a backup, however much WAL has
+/// been pruned since. Backups used to leave the KV projection out and rely on
+/// the WAL to rebuild it, but the WAL keeps only `wal_retention_segments`.
+fn pruned_wal_restore(live: bool) {
+    use luma::engine::Engine;
+    use tokio_util::sync::CancellationToken;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let config = Config {
+        data_dir: Some(data.to_string_lossy().to_string()),
+        backup_dir: dir.path().join("backups").to_string_lossy().to_string(),
+        wal_retention_segments: 2,
+        snapshot_interval_secs: 3600,
+        ..Config::default()
+    };
+    let e = Engine::new(config.clone(), CancellationToken::new()).unwrap();
+    e.put_state("old".into(), serde_json::json!("kept"), None, None)
+        .unwrap();
+    // Each snapshot seals the segment it was writing; five of them push the
+    // segment holding `old` past a retention of two.
+    for i in 0..5 {
+        e.force_snapshot().unwrap();
+        e.put_state(format!("filler{i}"), serde_json::json!(i), None, None)
+            .unwrap();
+    }
+    e.force_snapshot().unwrap();
+    e.delete_state("filler0").unwrap();
+    let backup = if live {
+        // The server's own path: the engine exports while it keeps running.
+        let backup = luma::backup::run_backup_with(&config, Some(&e)).unwrap();
+        // Written after the export, so only the WAL copy can bring it back.
+        drop(e);
+        backup
+    } else {
+        drop(e);
+        luma::backup::run_backup(&config).unwrap()
+    };
+    luma::backup::verify(&backup).unwrap();
+
+    let restored_dir = dir.path().join("restored");
+    let restored = Config {
+        data_dir: Some(restored_dir.to_string_lossy().to_string()),
+        ..config.clone()
+    };
+    luma::backup::restore(&restored, backup.to_str().unwrap()).unwrap();
+    let e = Engine::new(restored, CancellationToken::new()).unwrap();
+    assert!(
+        e.get_state("old").is_some(),
+        "a key whose WAL segment was pruned is missing from the restore"
+    );
+    assert!(e.get_state("filler4").is_some());
+    assert!(e.get_state("filler0").is_none(), "a delete came back");
+}
+
+#[test]
+fn a_restore_keeps_keys_whose_wal_segments_were_pruned() {
+    pruned_wal_restore(true);
+}
+
+#[test]
+fn an_offline_backup_keeps_keys_whose_wal_segments_were_pruned() {
+    pruned_wal_restore(false);
+}

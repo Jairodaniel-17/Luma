@@ -1,0 +1,41 @@
+# systemd unit for Luma in production.
+#
+# Type=notify: systemd counts Luma as started only once the WAL replay is done
+# and the HTTP listener is open (READY=1). WatchdogSec: Luma sends WATCHDOG=1
+# only after a real request to its own /v1/health succeeds, so a wedged
+# request path gets restarted, not just a dead process.
+#
+# Install: copy to /etc/systemd/system/luma.service, adjust the paths and
+# MemoryMax (peak RSS measured under the real load + 50 %), then
+#   systemctl daemon-reload && systemctl enable --now luma
+[Unit]
+Description=Luma data engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=luma
+Group=luma
+WorkingDirectory=/var/lib/luma
+ExecStart=/usr/local/bin/luma serve
+EnvironmentFile=-/etc/luma/luma.env
+Restart=always
+RestartSec=2
+WatchdogSec=30
+# The replay of a large WAL can take a while; do not kill it for being slow.
+TimeoutStartSec=600
+# Luma lets requests in flight finish for up to 10 s after SIGTERM.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+MemoryMax=1G
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/luma
+
+[Install]
+WantedBy=multi-user.target

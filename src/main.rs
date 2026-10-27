@@ -37,10 +37,13 @@ async fn main() -> anyhow::Result<()> {
             diskann::run_status(&config, collection)?;
         }
         cli::Command::Backup { verify } => {
-            cli::run_backup(&config, verify)?;
+            cli::run_backup(&config, verify).await?;
         }
         cli::Command::Restore { path } => {
             cli::run_restore(&config, path)?;
+        }
+        cli::Command::RestoreRemote => {
+            cli::run_restore_remote(&config).await?;
         }
         cli::Command::Promote => {
             cli::run_promote(&config).await?;

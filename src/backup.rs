@@ -52,7 +52,15 @@ pub struct BackupManifest {
     pub vector_collections: usize,
     pub blob_files: usize,
     pub queue_files: usize,
+    /// Whether the backup holds `state.export.jsonl`, the KV projection as of
+    /// one instant. Absent in backups from before it existed, which restore
+    /// from the WAL alone and so lack keys older than the retained WAL.
+    #[serde(default)]
+    pub state_export: bool,
 }
+
+/// The KV projection inside a backup (see `StateDb::export`).
+pub const STATE_EXPORT: &str = "state.export.jsonl";
 
 /// Copy a directory tree, returning how many files were written.
 fn copy_tree(src: &Path, dst: &Path) -> Result<usize> {
@@ -108,7 +116,15 @@ fn count_dirs(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Back up a data directory no server has open. With a server running, use
+/// `run_backup_with` from inside it (`POST /v1/admin/backup` does).
 pub fn run_backup(config: &Config) -> Result<PathBuf> {
+    run_backup_with(config, None)
+}
+
+/// Back up, exporting the KV projection through `engine` when given (the live
+/// server), or by opening it directly when not (nothing else has it open).
+pub fn run_backup_with(config: &Config, engine: Option<&crate::engine::Engine>) -> Result<PathBuf> {
     let backup_root = PathBuf::from(&config.backup_dir);
     fs::create_dir_all(&backup_root)?;
 
@@ -126,6 +142,7 @@ pub fn run_backup(config: &Config) -> Result<PathBuf> {
         vector_collections: 0,
         blob_files: 0,
         queue_files: 0,
+        state_export: false,
     };
 
     // 1. SQLite consistent copy via VACUUM INTO.
@@ -176,6 +193,18 @@ pub fn run_backup(config: &Config) -> Result<PathBuf> {
         // change still verify. Those name `state.redb`, which is why the verify
         // and restore paths below still look for that name and only that name —
         // no build has ever written a backup containing `state.lsm`.
+
+        // The projection is exported instead, from a consistent read
+        // snapshot, and **before** the WAL is copied: the WAL then covers every
+        // write after the export, and restore replays it on top. Without it a
+        // restore had only the WAL, and retention prunes the WAL: every key
+        // older than the retained segments was missing.
+        let export = dest.join(STATE_EXPORT);
+        let exported = match engine {
+            Some(engine) => engine.export_state(&export)?,
+            None => crate::engine::export_state_offline(data, &export)?,
+        };
+        manifest.state_export = exported.is_some();
 
         if let Ok(entries) = fs::read_dir(data) {
             for entry in entries.flatten() {
@@ -246,6 +275,17 @@ pub fn verify(backup_path: &Path) -> Result<BackupManifest> {
         let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         if result != "ok" {
             return Err(anyhow!("SQLite integrity check failed: {result}"));
+        }
+    }
+
+    if manifest.state_export {
+        let export = fs::read_to_string(backup_path.join(STATE_EXPORT))
+            .map_err(|e| anyhow!("manifest claims a state export but it is unreadable: {e}"))?;
+        // Every line must parse: a truncated export would restore without
+        // the keys past the cut and nothing else would notice.
+        for (n, line) in export.lines().enumerate() {
+            serde_json::from_str::<serde_json::Value>(line)
+                .map_err(|e| anyhow!("state export line {} is corrupt: {e}", n + 1))?;
         }
     }
 
@@ -382,6 +422,13 @@ pub fn restore(config: &Config, backup_path: &str) -> Result<()> {
         copy_tree(&src.join("vectors"), &data.join("vectors"))?;
         copy_tree(&src.join("blobs"), &data.join("blobs"))?;
         copy_tree(&src.join("queues"), &data.join("queues"))?;
+        // The KV projection as of the backup; the next start replays the WAL
+        // after it.
+        let export = src.join(STATE_EXPORT);
+        if export.exists() {
+            let offset = crate::engine::import_state(data, &export)?;
+            tracing::info!(offset, "KV projection restored from the backup's export");
+        }
     }
 
     tracing::info!("restore from {} complete", src.display());
@@ -389,7 +436,7 @@ pub fn restore(config: &Config, backup_path: &str) -> Result<()> {
 }
 
 /// Spawn the opt-in periodic backup task. No-op unless `backup_enabled`.
-pub fn spawn_backup_task(config: Config) {
+pub fn spawn_backup_task(config: Config, engine: crate::engine::Engine) {
     if !config.backup_enabled {
         return;
     }
@@ -401,8 +448,9 @@ pub fn spawn_backup_task(config: Config) {
         loop {
             ticker.tick().await;
             let cfg = config.clone();
+            let engine = engine.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let dest = run_backup(&cfg)?;
+                let dest = run_backup_with(&cfg, Some(&engine))?;
                 // Verify every backup the task takes. It reads back what was
                 // just written, which is cheap next to producing it, and it is
                 // the difference between having backups and believing you do.
@@ -440,7 +488,7 @@ pub fn spawn_backup_task(config: Config) {
 /// A remote failure is logged, never fatal: the local backup already succeeded,
 /// and turning a transient network problem into a failed backup run would throw
 /// away a good local copy for nothing.
-async fn ship_if_configured(config: &Config, dest: &Path) {
+pub async fn ship_if_configured(config: &Config, dest: &Path) {
     let target = match crate::backup_remote::store_from_config(config) {
         Ok(Some(target)) => target,
         Ok(None) => return,

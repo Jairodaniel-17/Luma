@@ -26,8 +26,17 @@ fn content_len_checked(total_len: u32, meta_len: u32, vector_len: u32) -> io::Re
         })
 }
 
+/// The search document log.
+///
+/// Each record goes to disk as one buffered write followed by an fsync, under a
+/// lock, so concurrent ingests cannot interleave their fields and an ingest
+/// that returned OK survives a power cut. A write that fails halfway (disk
+/// full) is cut back off, and a record torn by a crash is cut off when the log
+/// is opened: either one left in place made every record after it unreadable,
+/// because the log is only navigable by its length prefixes.
 pub struct AppendLog {
     path: PathBuf,
+    append: parking_lot::Mutex<()>,
 }
 
 impl AppendLog {
@@ -35,15 +44,14 @@ impl AppendLog {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Ok(Self { path })
+        truncate_torn_tail(&path)?;
+        Ok(Self {
+            path,
+            append: parking_lot::Mutex::new(()),
+        })
     }
 
     pub fn append(&self, doc: &Document) -> io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-
         let meta_data = (doc.id, &doc.metadata);
         let meta_bytes = serde_json::to_vec(&meta_data)?;
         let vector_bytes = bincode::serialize(&doc.vector)
@@ -58,13 +66,25 @@ impl AppendLog {
         // Structure: [TotalLen:4][MetaLen:4][MetaBytes][VectorLen:4][VectorBytes][ContentBytes]
         let total_len = 4 + meta_len + 4 + vector_len + content_len;
 
-        file.write_all(&total_len.to_le_bytes())?;
-        file.write_all(&meta_len.to_le_bytes())?;
-        file.write_all(&meta_bytes)?;
-        file.write_all(&vector_len.to_le_bytes())?;
-        file.write_all(&vector_bytes)?;
-        file.write_all(content_bytes)?;
+        let mut record = Vec::with_capacity(4 + total_len as usize);
+        record.extend_from_slice(&total_len.to_le_bytes());
+        record.extend_from_slice(&meta_len.to_le_bytes());
+        record.extend_from_slice(&meta_bytes);
+        record.extend_from_slice(&vector_len.to_le_bytes());
+        record.extend_from_slice(&vector_bytes);
+        record.extend_from_slice(content_bytes);
 
+        let _append = self.append.lock();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let start = file.metadata()?.len();
+        if let Err(e) = file.write_all(&record).and_then(|()| file.sync_data()) {
+            // Leave no partial record behind for the next append to land after.
+            let _ = file.set_len(start);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -186,6 +206,41 @@ impl AppendLog {
     }
 }
 
+/// Cut off a record that a crash left incomplete at the end of the log.
+///
+/// Walks the length prefixes; the first record that runs past the end of the
+/// file, and everything after it, goes.
+fn truncate_torn_tail(path: &std::path::Path) -> io::Result<()> {
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    let mut offset = 0u64;
+    let mut prefix = [0u8; 4];
+    while offset < len {
+        let complete = len - offset >= 4 && {
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(&mut prefix)?;
+            offset + 4 + u64::from(u32::from_le_bytes(prefix)) <= len
+        };
+        if !complete {
+            tracing::warn!(
+                path = %path.display(),
+                offset,
+                dropped = len - offset,
+                "search log ends in a torn record; cutting it off"
+            );
+            file.set_len(offset)?;
+            file.sync_data()?;
+            return Ok(());
+        }
+        offset += 4 + u64::from(u32::from_le_bytes(prefix));
+    }
+    Ok(())
+}
+
 pub struct MetadataIterator {
     reader: Option<BufReader<File>>,
     offset: u64,
@@ -298,5 +353,38 @@ mod tests {
         let res = log.read_document(0);
         assert!(res.is_err(), "torn record must error, not panic");
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// A crash mid-append leaves a torn record at the end. Reopening must cut
+    /// it off, so the next append lands where a reader expects a record and
+    /// every earlier document stays readable.
+    #[test]
+    fn torn_tail_is_cut_off_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("documents.log");
+        let doc = |id: u32| Document {
+            id,
+            vector: vec![id as f32; 4],
+            content: format!("doc {id}"),
+            metadata: serde_json::from_value(serde_json::json!({})).unwrap(),
+        };
+        let log = AppendLog::new(path.clone()).unwrap();
+        log.append(&doc(1)).unwrap();
+        log.append(&doc(2)).unwrap();
+        drop(log);
+        // Half of a third record, as a power cut would leave it.
+        let good = std::fs::metadata(&path).unwrap().len();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&100u32.to_le_bytes()).unwrap();
+        f.write_all(b"partial").unwrap();
+        drop(f);
+
+        let log = AppendLog::new(path.clone()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), good);
+        log.append(&doc(3)).unwrap();
+        let ids: Vec<u32> = log.scan_metadata().unwrap().map(|r| r.unwrap().1).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        let offsets: Vec<u64> = log.scan_metadata().unwrap().map(|r| r.unwrap().0).collect();
+        assert_eq!(log.read_document(offsets[2]).unwrap().content, "doc 3");
     }
 }
