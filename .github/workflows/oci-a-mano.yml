@@ -1,14 +1,11 @@
-name: OCI drill (monthly)
+name: OCI drill (by hand)
 
-# SPEC-friochap CA-8 against the real OCI Object Storage. It used to run every
-# night inside nightly-resilience and made ~80 000 requests per run, while OCI's
-# free tier is 50 000 requests a month: the nightly drills keep using MinIO
-# (free) and this one runs once a month with a single drill (~40 000 requests),
-# or by hand when the remote code changes.
+# SPEC-friochap CA-8 against the real OCI Object Storage. Already passed; a run
+# costs ~40 000 requests (OCI's free tier is 50 000 a month), so it never runs on
+# a schedule: by hand only, if the remote code changes. Friochap's real backups
+# are the check from here on; the nightly drills keep using MinIO (free).
 
 on:
-  schedule:
-    - cron: "29 4 1 * *"
   workflow_dispatch:
 
 env:
