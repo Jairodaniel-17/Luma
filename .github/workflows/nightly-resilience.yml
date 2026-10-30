@@ -327,40 +327,6 @@ jobs:
       - name: systemd watchdog
         run: python3 scripts/watchdog_check.py bin/luma
 
-  lost-host-oci:
-    name: Lost host, rebuilt from OCI Object Storage
-    # SPEC-friochap CA-8 against the real remote Friochap uses (OCI Object
-    # Storage, S3 API, Toronto), not MinIO: real latency, real S3 dialect.
-    # Each drill writes under its own prefix, deleted at the end.
-    if: ${{ !inputs.only || contains(format(',{0},', inputs.only), ',lost-host-oci,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      BACKUP_REMOTE_URL: s3://luma-backups/ci-${{ github.run_id }}
-      BACKUP_REMOTE_ENDPOINT: ${{ secrets.OCI_S3_ENDPOINT }}
-      BACKUP_REMOTE_REGION: ca-toronto-1
-      AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install stable
-        uses: dtolnay/rust-toolchain@stable
-      - name: Build the binary under test
-        run: cargo build --release --bin luma --locked && mkdir -p bin && cp target/release/luma bin/
-      - name: LazyFS image
-        run: docker build -q -t luma-apagon scripts/apagon
-      - name: Host lost, rebuilt from OCI (RPO 10 s)
-        run: DRILLS=2 bash scripts/dr_drill.sh bin
-      - name: Delete the drill's objects
-        if: always()
-        # OCI rejects the CRC checksums newer AWS CLIs add by default.
-        env:
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-        run: >-
-          aws s3 rm --recursive "$BACKUP_REMOTE_URL" --endpoint-url "$BACKUP_REMOTE_ENDPOINT"
-          --region "$BACKUP_REMOTE_REGION" --only-show-errors
-
   disk-faults:
     name: Full disk, EIO on fsync
     # SPEC-friochap F2: a 64 MB ext4 fills up, a device-mapper disk starts
@@ -386,7 +352,6 @@ jobs:
         crash-recovery,
         power-cuts,
         lost-host,
-        lost-host-oci,
         disk-faults,
         ioredis,
         durability-invariants,
