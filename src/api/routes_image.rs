@@ -1,7 +1,7 @@
 //! On-the-fly image transform of blobs already in the store (Cloudflare
 //! Images-equivalent). Stateless: reads source bytes from
 //! `{data_dir}/blobs/{bucket}/{key}`, decodes, optionally resizes to fit within
-//! `w`/`h` preserving aspect ratio, re-encodes to png/jpeg, and returns bytes.
+//! `w`/`h` preserving aspect ratio, re-encodes to png/jpeg/webp, and returns bytes.
 //!
 //! These routes live in the authenticated router chain, so every request
 //! requires a valid Bearer api_key.
@@ -144,7 +144,8 @@ pub async fn transform(
         None => None,
         Some("png") => Some(ImageFormat::Png),
         Some("jpeg") | Some("jpg") => Some(ImageFormat::Jpeg),
-        Some(_) => return Err(bad_request("unsupported format (png|jpeg)")),
+        Some("webp") => Some(ImageFormat::WebP),
+        Some(_) => return Err(bad_request("unsupported format (png|jpeg|webp)")),
     };
 
     let bytes = match tokio::fs::read(&path).await {
@@ -233,7 +234,32 @@ fn process(
                 .map_err(|_| bad_request("failed to encode png"))?;
             Ok((buf, "image/png"))
         }
-        // Unreachable: out_format is only ever Jpeg or Png by construction.
+        ImageFormat::WebP => {
+            // Lossy WebP (libwebp); `quality` 1-100 like jpeg. Default 80, close to jpeg 85 in size/quality.
+            let q = f32::from(quality.unwrap_or(80));
+            let rgba = img.to_rgba8();
+            let enc = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
+            Ok((enc.encode(q).to_vec(), "image/webp"))
+        }
+        // Unreachable: out_format is only ever Jpeg, Png or WebP by construction.
         _ => Err(bad_request("unsupported output format")),
+    }
+}
+
+#[cfg(test)]
+mod webp_tests {
+    use super::*;
+
+    #[test]
+    fn webp_con_perdida_es_valido_y_mas_chico_que_png() {
+        let img = image::RgbImage::from_fn(300, 300, |x, y| image::Rgb([(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8]));
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+        let (w, ct) = process(&png, Some(150), Some(150), Some(ImageFormat::WebP), Some(80)).unwrap();
+        assert_eq!(ct, "image/webp");
+        assert_eq!(&w[0..4], b"RIFF");
+        assert_eq!(&w[8..12], b"WEBP");
+        let (p, _) = process(&png, Some(150), Some(150), Some(ImageFormat::Png), None).unwrap();
+        assert!(w.len() < p.len(), "webp {} >= png {}", w.len(), p.len());
     }
 }
