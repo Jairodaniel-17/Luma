@@ -1,9 +1,9 @@
 # Incidente: Luma colgado por «write halt because of write buffer saturation» (05/11/2026)
 
 ## Sintoma
-En celestia, Luma dejo de responder (`/v1/health` sin respuesta, puerto 8093 sin escuchar tras reiniciar) y el journal de
+En un servidor de produccion, Luma dejo de responder (`/v1/health` sin respuesta, puerto 8093 sin escuchar tras reiniciar) y el journal de
 systemd se lleno con cientos de miles de lineas `fjall::partition: partition: write halt because of write buffer saturation`
-(unas 100 por segundo). Dejaron de servir las portadas de Musica (cache en Luma) y la cache de IA de Friochap.
+(unas 100 por segundo). Dejaron de servir los clientes que usaban a Luma como cache y como almacen de objetos.
 Reiniciar no lo arreglaba: volvia al mismo bucle antes de abrir el puerto.
 
 ## Causa (probable, NO reproducida)
@@ -14,15 +14,15 @@ memtables y puede ocurrir lo mismo antes de que el servidor escuche.
 
 Lo que se probo (05/11/2026, `cargo test --lib write_halt_tests`): un valor de 70 MB seguido de escrituras pequenas y reapertura, y
 300 MiB en valores de 1 MiB sin persistir y reapertura. **Las dos pasan tambien con el buffer de 64 MiB**, asi que el disparador exacto
-de celestia (a las 04:09 UTC, tras la carga que hizo musica-covers y las subidas de demos) no se reprodujo con una prueba de una sola
+de el servidor (a las 04:09 UTC, tras la carga que hizo musica-covers y las subidas de demos) no se reprodujo con una prueba de una sola
 hebra. Quedan como hipotesis un flush detenido por E/S lenta o una carrera con varias hebras concurrentes. Las mitigaciones de abajo
 son validas aunque la causa exacta siga abierta, y las pruebas quedan como regresion.
 
-## Receta de recuperacion (probada en celestia)
+## Receta de recuperacion (probada en produccion)
 1. `systemctl stop luma`
-2. Respaldar: `tar czf /root/respaldos-luma/luma-$(date +%F-%H%M).tgz -C /var/lib/private luma`
-3. Mover el diario aparte: `mv /var/lib/private/luma/state.lsm/journals /root/respaldos-luma/journals-viejos` y
-   `mkdir` uno vacio con el mismo dueno (`chown 64912:64912` en celestia). Luma reconstruye el estado desde su propio WAL de eventos
+2. Respaldar: `tar czf /ruta/de/respaldos/luma-$(date +%F-%H%M).tgz -C /var/lib/private luma`
+3. Mover el diario aparte: `mv /var/lib/private/luma/state.lsm/journals /ruta/de/respaldos/journals-viejos` y
+   `mkdir` uno vacio con el mismo dueno (`chown` al usuario del servicio). Luma reconstruye el estado desde su propio WAL de eventos
    (`events-*.log`, `wal_retention_segments`).
 4. `systemctl start luma` y comprobar `GET /v1/health` y que no haya lineas `write halt`.
 
