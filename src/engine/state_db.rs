@@ -88,7 +88,7 @@ impl StateDb {
         // El buffer de escritura de fjall (64 MiB por defecto) es menor que lo que Luma admite escribir (`max_json_mb`
         // hasta 100 MB por documento y lotes arbitrarios). Con el limite por debajo de lo que una sola operacion puede
         // ocupar, las escrituras esperan en bucle a que se vacie un buffer que solo ellas harian rotar (05/11/2026: Luma
-        // colgado en celestia, ver docs/INCIDENTE-2026-11-05-write-halt.md). Se dimensiona desde el mayor documento admitido.
+        // colgado en produccion, ver docs/INCIDENTE-2026-11-05-write-halt.md). Se dimensiona desde el mayor documento admitido.
         const MIB: u64 = 1024 * 1024;
         let max_json = crate::config::resolve::resolve_max_json_mb() as u64 * MIB;
         let buffer = std::env::var("LUMA_LSM_WRITE_BUFFER_MB")
@@ -687,7 +687,7 @@ mod write_halt_tests {
         }
     }
 
-    /// Regresion del 05/11/2026 en celestia: un valor que por si solo llena el buffer de escritura dejaba la
+    /// Regresion del 05/11/2026 en produccion: un valor que por si solo llena el buffer de escritura dejaba la
     /// siguiente escritura esperando para siempre ("write halt because of write buffer saturation"), y al reabrir
     /// el diario ocurria lo mismo antes de que el servidor escuchara. Debe terminar, no colgarse.
     #[test]
