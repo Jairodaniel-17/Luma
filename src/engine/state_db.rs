@@ -85,7 +85,22 @@ impl StateDb {
         // separately. The name says which engine wrote it, so a downgrade finds
         // no directory rather than a file it would misread.
         let path = data_dir.as_ref().join("state.lsm");
-        let keyspace = Config::new(&path).open().context("open the LSM keyspace")?;
+        // El buffer de escritura de fjall (64 MiB por defecto) es menor que lo que Luma admite escribir (`max_json_mb`
+        // hasta 100 MB por documento y lotes arbitrarios). Con el limite por debajo de lo que una sola operacion puede
+        // ocupar, las escrituras esperan en bucle a que se vacie un buffer que solo ellas harian rotar (05/11/2026: Luma
+        // colgado en celestia, ver docs/INCIDENTE-2026-11-05-write-halt.md). Se dimensiona desde el mayor documento admitido.
+        const MIB: u64 = 1024 * 1024;
+        let max_json = crate::config::resolve::resolve_max_json_mb() as u64 * MIB;
+        let buffer = std::env::var("LUMA_LSM_WRITE_BUFFER_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|mb| (mb * MIB).max(64 * MIB))
+            .unwrap_or_else(|| (512 * MIB).max(4 * max_json));
+        let keyspace = Config::new(&path)
+            .max_write_buffer_size(buffer)
+            .max_journaling_size((1024 * MIB).max(2 * buffer))
+            .open()
+            .context("open the LSM keyspace")?;
         let options = PartitionCreateOptions::default();
         Ok(Self {
             state: keyspace.open_partition(STATE, options.clone())?,
@@ -653,5 +668,69 @@ mod tests {
             .map(|item| item.key)
             .collect();
         assert_eq!(keys, vec!["a:1", "a:2"], "b:1 is past the boundary");
+    }
+}
+
+#[cfg(test)]
+mod write_halt_tests {
+    use super::StateDb;
+    use crate::engine::events::EventRecord;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn big(offset: u64, key: &str, mb: usize) -> EventRecord {
+        EventRecord {
+            offset,
+            ts_ms: 1,
+            event_type: "state_updated".to_string(),
+            data: serde_json::json!({ "key": key, "value": "x".repeat(mb * 1024 * 1024), "revision": 1 }),
+        }
+    }
+
+    /// Regresion del 05/11/2026 en celestia: un valor que por si solo llena el buffer de escritura dejaba la
+    /// siguiente escritura esperando para siempre ("write halt because of write buffer saturation"), y al reabrir
+    /// el diario ocurria lo mismo antes de que el servidor escuchara. Debe terminar, no colgarse.
+    #[test]
+    fn un_valor_grande_no_deja_las_escrituras_en_espera_para_siempre() {
+        let dir = tempfile::tempdir().unwrap();
+        let ruta = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let db = StateDb::open(&ruta).unwrap();
+            db.apply_state_updated(&big(1, "grande", 70)).unwrap();
+            db.apply_state_updated(&big(2, "otro", 1)).unwrap();
+            db.apply_state_updated(&big(3, "y_otro", 1)).unwrap();
+            drop(db);
+            // Reabrir con el diario lleno tampoco debe quedarse esperando.
+            let db = StateDb::open(&ruta).unwrap();
+            db.apply_state_updated(&big(4, "despues", 1)).unwrap();
+            let _ = tx.send(db.applied_offset().unwrap());
+        });
+        let offset = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("las escrituras se quedaron esperando al buffer de escritura (write halt)");
+        assert_eq!(offset, 4);
+    }
+
+    /// Carga sostenida sin persistir (como una cache de IA o portadas): cientos de MiB en valores medianos, y reabrir.
+    #[test]
+    fn carga_sostenida_y_reapertura_no_se_cuelgan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ruta = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let db = StateDb::open(&ruta).unwrap();
+            for i in 1..=300u64 {
+                db.apply_state_updated(&big(i, &format!("k{i}"), 1)).unwrap();
+            }
+            drop(db);
+            let db = StateDb::open(&ruta).unwrap();
+            db.apply_state_updated(&big(301, "despues", 1)).unwrap();
+            let _ = tx.send(db.applied_offset().unwrap());
+        });
+        let offset = rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("la carga sostenida o la reapertura se quedaron esperando (write halt)");
+        assert_eq!(offset, 301);
     }
 }

@@ -60,7 +60,8 @@ impl Drop for Telemetry {
 /// nothing at all on a successful start, so an operator checking which port it
 /// bound to had to know to set an environment variable first.
 pub fn init(endpoint: Option<&str>, service_name: &str) -> Telemetry {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,fjall=warn,lsm_tree=warn"));
 
     let Some(endpoint) = endpoint.filter(|e| !e.trim().is_empty()) else {
         tracing_subscriber::registry()
