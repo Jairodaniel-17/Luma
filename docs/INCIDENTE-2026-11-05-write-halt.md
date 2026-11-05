@@ -14,7 +14,7 @@ memtables y puede ocurrir lo mismo antes de que el servidor escuche.
 
 Lo que se probo (05/11/2026, `cargo test --lib write_halt_tests`): un valor de 70 MB seguido de escrituras pequenas y reapertura, y
 300 MiB en valores de 1 MiB sin persistir y reapertura. **Las dos pasan tambien con el buffer de 64 MiB**, asi que el disparador exacto
-de el servidor (a las 04:09 UTC, tras la carga que hizo musica-covers y las subidas de demos) no se reprodujo con una prueba de una sola
+del incidente (tras una carga de escrituras de un cliente de cache y varias subidas de objetos) no se reprodujo con una prueba de una sola
 hebra. Quedan como hipotesis un flush detenido por E/S lenta o una carrera con varias hebras concurrentes. Las mitigaciones de abajo
 son validas aunque la causa exacta siga abierta, y las pruebas quedan como regresion.
 
